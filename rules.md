@@ -2,9 +2,13 @@
 
 **Status:** Active project policy
 
+**Version:** v0.2 · synchronized 13 August 2026
+
 **Applies to:** AI coding assistants, autonomous agents, automation tools, and human contributors using AI-generated work
 
-**Last updated:** 11 August 2026
+**Last updated:** 13 August 2026
+
+**Related documents:** [README](README.md) · [PRD](prd.md) · [Design](design.md) · [Architecture](architecture.md) · [Workflow](workflow.md) · [Implementation](implementation.md)
 
 ## 1. Purpose
 
@@ -19,8 +23,8 @@ When instructions conflict, use this order:
 1. Platform, system, security, and legal requirements
 2. The project owner's latest explicit instruction
 3. This `rules.md`
-4. `architecture.md`
-5. `prd.md`
+4. The concern-specific authoritative document in `implementation.md` §1: PRD for product outcomes, architecture for durable system design, design for interaction, and workflow for chronology
+5. `implementation.md` for exact build-contract details consistent with those authorities
 6. `README.md`
 7. Existing code, tests, schemas, and API contracts
 
@@ -34,7 +38,9 @@ Unless the project owner explicitly approves a change, the AI must preserve thes
 
 - Customers choose a specific, named local vendor.
 - Vendors retain their identity and control their catalogue, prices, availability, hours, and fulfilment estimates.
-- The MVP has one vendor per cart and order.
+- The MVP customer cart may contain products from multiple named vendor locations. Checkout groups lines by vendor and creates one independent order per vendor location; no individual order may span vendors.
+- Each vendor order retains its own acceptance, fulfilment promise, delivery or pickup fee, substitutions, cancellation, refund, settlement, and audit history. A failure at one vendor must not silently cancel, reassign, or corrupt another vendor's order.
+- Vendors may view and act only on their own child order. Support and admin actions must identify the affected child order; checkout-group visibility never grants permission to mutate siblings.
 - Delivery fees are distance-based and shown transparently before the customer commits.
 - The platform charges the vendor per successfully completed order; a vendor subscription is not the current model.
 - Pickup, vendor self-delivery, and shared delivery-partner fulfilment are supported product modes.
@@ -102,7 +108,7 @@ An AI must never:
 
 ## 5. File and change discipline
 
-Before substantial implementation work, the AI must review `README.md`, `prd.md`, `architecture.md`, this file, and any repository-specific agent instructions that exist.
+Before substantial implementation work, the AI must review `README.md`, `prd.md`, `architecture.md`, `design.md`, `workflow.md`, `implementation.md`, this file, and any repository-specific agent instructions that exist.
 
 For every change, the AI must:
 
@@ -154,8 +160,9 @@ Additional requirements:
 
 - Exact customer address and masked contact details are disclosed to the assigned partner only at the approved assignment stage.
 - Sensitive admin actions require a reason, actor identity, timestamp, before/after record, and audit event.
-- High-value manual financial adjustments should require separate approval when the configured threshold is exceeded.
+- High-value or high-risk financial, restriction, configuration, and incident-control actions require separate approval at the configured threshold. The proposer must not approve their own request.
 - Tenancy and ownership checks must occur in the backend, not only by hiding controls in the UI.
+- A fraud or risk signal opens a review and may trigger only an approved, scoped, time-bound protection. It must not become an unexplained automatic punishment; evidence, reviewer, outcome, and appeal/review path are retained.
 
 ## 8. Orders, delivery, and financial integrity
 
@@ -165,6 +172,9 @@ The following are non-negotiable invariants:
 
 - Money is stored as integer minor units with an ISO currency code.
 - Order lines snapshot product name, variant, quantity basis, tax inputs, and agreed price.
+- Multi-store checkout uses an immutable checkout-group record plus vendor-scoped child orders. Customer payment, refund, discount, tip, and fee amounts must be explicitly allocated to those child orders so partial acceptance and partial failure remain reconcilable.
+- Cart additions do not create a hard inventory reservation. Any checkout soft hold is short-lived and attributable; placement remains provisional, vendor acceptance commits it, and rejection, cancellation, or timeout releases it. Concurrent hold/commit decisions must be atomic and idempotent.
+- A vendor decline or cancellation uses a standardized reason and a server-computed impact preview. It cannot transfer lines to another vendor or change a sibling order implicitly.
 - Delivery quotes snapshot distance, coordinates or zone inputs, formula version, fee components, currency, and expiry.
 - Historical charges are never recomputed using a newer price formula.
 - Ledger entries are append-only, attributable, and balanced; corrections use reversal or adjustment entries.
@@ -173,7 +183,14 @@ The following are non-negotiable invariants:
 - A completed delivery alone does not silently resolve an unresolved payment or ledger mismatch.
 - Vendor fees are applied according to the approved completed-order policy, including documented cancellation and refund treatment.
 - Delivery proof must be tied to the active assignment and must not expose the OTP in logs.
+- One vendor order has no more than one active delivery assignment by default. Reassignment creates a new attempt and preserves prior partner, reason, actor, timing, compensation, and custody history.
+- Server-confirmed pickup starts package custody. While custody is active, vendor edits and ordinary cancellation are blocked; failure or cancellation follows an authorized return/handoff flow until custody is closed.
+- Waiting, reassignment, return, and manual earning adjustments are posted as attributable ledger lines and may be disputed. They are never silently folded into base pay.
 - Retry, timeout, duplicate event, partial failure, cancellation, and dispute paths must be designed and tested.
+
+Versioned business configuration is immutable after activation. Every material change records scope, diff, proposer, approver, validation result, effective time, and rollback target. Rollback creates another version and does not recalculate historical orders.
+
+Incident controls must be scoped, reversible, attributable, and time-bound or explicitly reviewed. They may stop new work but must not silently erase accepted orders, active package custody, refunds, ledger entries, settlements, or payouts.
 
 No AI may invent a financial adjustment to make totals balance. It must surface the mismatch and preserve evidence.
 
@@ -188,6 +205,7 @@ The AI must apply data minimisation, purpose limitation, least privilege, and se
 - Test and development environments use synthetic or irreversibly anonymised data.
 - Production data must not be downloaded to a developer machine without explicit, documented approval and safeguards.
 - Analytics events exclude secret, payment-instrument, prescription, and unnecessary personal fields.
+- Delivery-partner location is collected only for an approved online/active-assignment purpose, at the minimum useful frequency, with visible state and bounded offline buffering. Collection stops when that purpose ends; retention/deletion follows an approved policy.
 - Rate limits and abuse protections cover login, OTP, checkout, promo, support, upload, and partner-state endpoints.
 - Account deletion, retention, consent, and access requests follow approved legal policy rather than AI-created assumptions.
 
@@ -202,6 +220,9 @@ The AI must, where relevant:
 - Test the expected path and important failure paths.
 - Test authorization and ownership boundaries for every affected role.
 - Test valid and invalid state transitions.
+- Test inventory reservation concurrency, expiry, commit, and release without overselling or leaking one vendor's stock state to another.
+- Test assignment replacement, waiting thresholds, custody locks, cancellation-after-pickup, return proof, and compensation disputes.
+- Test admin role denial, proposer/approver separation, configuration activation/rollback, scoped kill switches, trust-review decisions/appeals, and child-order support isolation.
 - Test retries, duplicate requests, duplicate webhooks, timeout, and partial failure behaviour.
 - Test money rounding, ledger balance, refund, cancellation, and fee eligibility.
 - Test geographic boundary and quote-expiry cases.
@@ -274,7 +295,7 @@ For payment duplication, ledger imbalance, unauthorized access, or personal-data
 
 Unless explicitly approved, an AI must not expand the MVP to include:
 
-- Multi-vendor checkout
+- Automatic combined-route or single-fee promises across multiple vendor orders before dispatch, allocation, and recovery rules are approved
 - Platform-owned inventory or dark stores
 - A 10-minute delivery guarantee
 - Citywide launch before zone economics are validated
@@ -298,6 +319,21 @@ Every material amendment should record:
 - Reason
 - Approver
 - Affected documents or systems
+
+### 15.1 Cross-document synchronization protocol
+
+For any product behavior change, update the authoritative source and every affected projection in the same change:
+
+| Change type | Required updates |
+|---|---|
+| Scope, actor outcome, business rule | `prd.md`, then traceability row and README summary where material |
+| Aggregate, state, data owner, security boundary | `architecture.md` and `implementation.md` |
+| Screen/action/status/error presentation | `design.md`, relevant workflow step, and UI tests in `implementation.md` |
+| Timer, endpoint, event, job, persistence constraint | `implementation.md`, with architecture/workflow references where externally visible |
+| Role, approval, privacy, financial or incident rule | `rules.md`, `architecture.md`, `implementation.md`, affected PRD/design/workflow sections |
+| Locked decision or production gate | `implementation.md` §§2–3 and the PRD/README decision summary |
+
+The change is incomplete if the same state, timer, fee example, role, or scope is named differently across documents without an explicit mapping. Run documentation link, heading, state/event vocabulary, and contradiction checks before handoff.
 
 This file should be reviewed before production launch and whenever the business model, regulated scope, payment flow, delivery model, or system architecture materially changes.
 

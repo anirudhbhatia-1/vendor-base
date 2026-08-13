@@ -10,6 +10,21 @@ Unlike dark-store quick-commerce platforms, this product does not own inventory 
 - Admin Console
 
 > **Status:** Product definition and validation stage. This repository currently contains planning documentation, not application code.
+> **Documentation baseline:** 13 August 2026 · implementation-ready structure v0.2
+
+## Start here
+
+Use the documents in this order before implementation:
+
+1. Read this README for product intent and scope.
+2. Read [prd.md](prd.md) for required outcomes and MVP acceptance.
+3. Read [architecture.md](architecture.md) for module ownership and durable state.
+4. Read [design.md](design.md) for every role's screens and interaction states.
+5. Read [workflow.md](workflow.md) for cross-role chronology and operational handoffs.
+6. Execute through [implementation.md](implementation.md), the canonical build contract for identifiers, timers, APIs, data, events, slices, tests, and release gates.
+7. Apply [rules.md](rules.md) to every contributor and change.
+
+If documents conflict, stop and resolve the conflict using the authority table in `implementation.md` §1. Do not encode an assumption in code.
 
 ## Why this product
 
@@ -34,25 +49,25 @@ The shop remains visible throughout the experience. It controls its catalogue, p
 
 1. The customer enters an address or pin code.
 2. The platform shows eligible local stores, including the customer's favourite or preferred shops.
-3. The customer selects one store and adds products to a single-store cart.
-4. The platform shows item prices, delivery or pickup options, delivery fees, and the expected fulfilment time.
-5. The vendor accepts the order, picks the items, and requests approval for substitutions or variable-weight adjustments.
-6. For delivery, an eligible delivery partner accepts the job and confirms pickup using an OTP or QR code.
-7. The customer tracks the order and confirms delivery using an OTP.
-8. The platform settles the order and records vendor earnings, partner earnings, platform fees, refunds, and adjustments.
+3. The customer adds products from one or more named stores. The cart keeps a separate store group for every vendor location.
+4. The platform validates each store group and shows its own minimum, delivery or pickup choice, fee, and fulfilment window before showing the combined checkout total.
+5. One checkout creates a checkout group containing one independent order per vendor. Each vendor accepts, picks, and requests approval for its own substitutions or variable-weight adjustments.
+6. Each store order is collected, vendor-delivered, or assigned to an eligible delivery partner. Separate deliveries remain visible unless the platform explicitly confirms a safe combined route.
+7. The customer tracks the overall checkout and each vendor order, confirming every pickup or delivery with the applicable OTP.
+8. The platform allocates payment and settles each vendor order independently, including vendor earnings, partner earnings, platform fees, refunds, and adjustments.
 
 ## Product experiences
 
 ### Customer App / Web
 
 - Location and address management
-- Search by shop, product, and category
+- Search by shop, product, brand, and category, with recent searches and local-language matching
 - Favourite and preferred stores
 - Dedicated vendor storefronts
 - Packaged and variable-weight products
 - Substitution preferences and approval
-- Single-store cart and checkout
-- UPI, cards, supported wallets, and controlled COD support
+- Multi-store cart grouped by named vendor, with one vendor-scoped order and fulfilment promise per store
+- Prepaid UPI, cards, and supported wallets; COD remains disabled until a separate cash-handling and reconciliation policy is approved
 - Pickup, scheduled delivery, order status, receipts, support, and reordering
 
 ### Vendor Portal
@@ -61,10 +76,11 @@ The shop remains visible throughout the experience. It controls its catalogue, p
 - Hours, service zones, minimum order, and preparation time
 - Catalogue creation and CSV import
 - Product pricing, stock status, and variable-weight configuration
-- Real-time order acceptance and picking workflow
+- Inventory freshness, checkout soft holds, and acceptance-time stock commitment
+- Real-time order acceptance, alert escalation, impact-aware decline/cancellation, and picking workflow
 - Substitution and customer-decision requests
 - Handoff to pickup or delivery partner
-- Sales, settlements, ratings, fulfilment, and repeat-customer insights
+- Structured operational escalation plus sales, settlements, ratings, fulfilment, and repeat-customer insights
 
 ### Delivery Partner App / Portal
 
@@ -73,19 +89,22 @@ The shop remains visible throughout the experience. It controls its catalogue, p
 - Job offers with pickup area, drop area, distance, deadline, and expected pay
 - Navigation to vendor and customer
 - OTP/QR pickup confirmation and OTP proof of delivery
-- Exception flows for vendor delays, missing packages, unsafe locations, wrong addresses, and unreachable customers
-- Trip-level earnings, incentives, tips, adjustments, and payout history
+- Assignment/reassignment history, vendor-wait timers, package custody, and controlled return-to-origin
+- Exception and emergency flows for vendor delays, missing packages, unsafe locations, accidents, wrong addresses, and unreachable customers
+- Privacy-bounded location tracking and text/landmark navigation fallback
+- Trip-level base, distance/time, waiting, return, incentive, tip, adjustment, dispute, and payout history
 - Masked customer communication and support escalation
 
 ### Admin Console
 
-- Vendor and delivery-partner verification
+- Vendor and delivery-partner verification, expiry, reverification, restriction, and appeal workflows
 - Store approval, publishing, pausing, and audit history
 - Catalogue and restricted-item moderation
-- Service-zone, fee, commission, and payout configuration
-- Live order and fulfilment monitoring
-- Cancellation, refund, dispute, and support tools
-- Fraud and quality controls
+- Versioned service-zone, fee, commission, payout, and operational-policy configuration with maker-checker approval
+- Checkout-group and child-order live monitoring with fulfilment, custody, settlement, and sibling isolation
+- Structured cancellation, refund, finance reconciliation, dispute, and support queues
+- Evidence-based trust reviews, quality controls, scoped restrictions, and appeal paths
+- Reversible, scoped incident kill switches with impact preview and audit history
 - Marketplace, vendor, delivery, finance, and operational reporting
 
 ## Business model
@@ -120,7 +139,7 @@ After the pilot proves demand and workable unit economics, the initial product s
 
 - One city with two or three launch pin-code clusters
 - Kirana or vegetables as the first category
-- Customer store discovery, preferred vendors, single-store ordering, checkout, and tracking
+- Customer store discovery, preferred vendors, multi-store cart, grouped checkout, vendor-scoped orders, and tracking
 - Vendor onboarding, catalogue management, order acceptance, picking, substitutions, and settlement visibility
 - Delivery-partner onboarding, assignment, navigation, verified handoff, exceptions, earnings, and payouts
 - Admin onboarding, moderation, order monitoring, refunds, audit logs, and basic analytics
@@ -130,7 +149,7 @@ After the pilot proves demand and workable unit economics, the initial product s
 
 - Owned inventory or dark stores
 - A 10-minute delivery promise
-- Multi-vendor checkout
+- Automatic consolidation of multiple store pickups into one delivery route before dispatch reliability and fee allocation are proven
 - Automated route optimisation
 - A complete POS or accounting replacement
 - Large, citywide delivery coverage before zone economics work
@@ -155,7 +174,7 @@ Delivery partners must never receive prescription contents, customer medical his
 
 | Area | Measures |
 |---|---|
-| Customer demand | Paid conversion after fee disclosure, repeat-order rate, preferred-store orders, average basket value |
+| Customer demand | Paid conversion after fee disclosure, repeat-order rate, preferred-store orders, average basket value, multi-store checkout conversion |
 | Vendor value | Incremental orders, GMV growth, vendor retention, acceptance rate, cancellation rate |
 | Fulfilment | Preparation time, pickup delay, on-time delivery, completion rate, issue/refund rate |
 | Delivery partners | Job acceptance, completed trips, earnings per active hour, payout accuracy, safety incidents |
@@ -173,27 +192,32 @@ Add live tracking, batch assignment, route optimisation, loyalty rewards, recurr
 
 ### Phase 3: Expand the marketplace
 
-Consider multi-vendor checkout, B2B ordering, more store categories, and vendor-managed advertising only after the single-store model is reliable.
+Improve cross-store delivery consolidation, then consider B2B ordering, more store categories, and vendor-managed advertising after vendor-scoped order economics are reliable.
 
 ## Documentation
 
 - [Product Requirements Document](prd.md) contains the complete product requirements, workflows, business rules, data model, risks, and phased scope.
 - [Product Design](design.md) translates the requirements into navigation, screens, interaction states, shared components, accessibility rules, and the white/light visual direction.
 - [Architecture](architecture.md) defines the proposed system boundaries, domain modules, data model, state machines, integrations, security, deployment, and scaling path.
+- [End-to-End Workflow Architecture](workflow.md) joins the customer, vendor, delivery-partner, admin, category, order, payment, settlement, exception, and support journeys from entry through final closure.
+- [Implementation Blueprint](implementation.md) is the executable contract for terminology, IDs, state records, timers, endpoints, persistence, workers, permissions, build slices, tests, releases, and rollback.
 - [AI Rules and Boundaries](rules.md) defines what AI contributors may do, must verify, must not do, and when they must stop for approval.
 - Mercato was reviewed as product inspiration for local-store discovery, named merchant selection, pickup/delivery, and merchant ecommerce tooling. It is not a specification to copy.
 
-## Current decisions still needed
+## Production gates still needing named owners
 
 - Launch neighbourhood and first vendor category
 - Initial vendor fee per completed order
 - Final customer delivery-fee formula and maximum service radius
 - Delivery-partner employment or contracting model
-- Payment, payout, and COD policy
+- Payment and payout providers plus reconciliation behavior; COD remains disabled
 - Vendor and partner verification requirements
 - Primary launch client: responsive web, Android app, or both
-- Pharmacy compliance owner and launch criteria
+- Backend framework and hosting
+- Privacy/retention schedule, support/approval thresholds, and recovery objectives
+
+These gates do not permit engineers to invent production policy. Their IDs, owners, blocked stages, and required outputs are maintained in `implementation.md` §3. Provider-neutral interfaces and synthetic test adapters may be built before provider selection.
 
 ## Project status
 
-The next product milestone is a concierge-style pilot, followed by a decision on whether the evidence supports building the web MVP. No production architecture or technology stack has been selected yet.
+The next product milestone is a concierge-style pilot, followed by the vertical slices in `implementation.md` §12. No application code or production technology stack exists yet; implementation begins only when the entry gate for a slice is satisfied.

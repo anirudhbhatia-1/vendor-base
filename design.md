@@ -1,8 +1,9 @@
 # Design — Neighbourhood Store Marketplace
 
-**Status:** Proposed product design (information architecture, navigation, and screen-by-screen specification)
+**Status:** MVP interaction contract v0.2
+**Synchronized:** 13 August 2026
 **Product stage:** Validation / pre-implementation — no visual UI kit or production build exists yet
-**Related documents:** [README](README.md) · [Product Requirements Document](prd.md) · [Architecture](architecture.md) · [AI Rules and Boundaries](rules.md)
+**Related documents:** [README](README.md) · [Product Requirements Document](prd.md) · [Architecture](architecture.md) · [Workflow](workflow.md) · [Implementation](implementation.md) · [AI Rules and Boundaries](rules.md)
 
 ## 1. Purpose and scope
 
@@ -10,7 +11,7 @@ This document turns the functional requirements in `prd.md` and the state machin
 
 It is a structural and interaction specification, not a visual design system. It defines *what screens exist, what they contain, and how they behave* so a designer can produce wireframes/mockups and an engineer can scope components with a shared vocabulary. Colours, spacing, and pixel layouts are intentionally left open (see Section 12).
 
-Nothing here overrides `rules.md`. In particular: one vendor per cart, distance-based delivery fees shown before commitment, per-completed-order vendor fees, no owned inventory, no 10-minute promise, and disabled pharmacy/COD flows unless explicitly enabled later. The approved MVP design is prepaid-only.
+Nothing here overrides `rules.md`. In particular: a multi-store cart creates one independent order per vendor, distance-based delivery fees are shown per vendor before commitment, vendor fees apply per completed vendor order, the platform owns no inventory, there is no 10-minute promise, and pharmacy/COD remain disabled unless explicitly enabled later. The approved MVP design is prepaid-only.
 
 ## 2. Design principles → design implications
 
@@ -31,7 +32,7 @@ The customer flow combines two useful reference models. Mercato contributes loca
 These are interaction references, not a request to copy brand styling, proprietary layouts, promotional language, delivery promises, or dark-store economics. This product adapts speed-of-shopping patterns to a vendor-first marketplace:
 
 - **Named vendor before anonymous inventory.** Every product price, result, recommendation, cart, and order identifies the fulfilling local store. No screen implies that the platform owns the stock.
-- **Single-vendor cart.** Product-dense discovery may span eligible vendors, but the active cart belongs to one vendor location. Adding from another vendor requires an explicit replace-cart decision.
+- **Multi-store cart, vendor-scoped orders.** Product-dense discovery may span eligible vendors and adding from another vendor creates a visibly separate store group. Checkout creates one independent order, fee, promise, and status timeline per vendor; no order silently merges vendors.
 - **Honest fulfilment instead of a minutes promise.** The header and product surfaces show the latest vendor-backed preparation or arrival window. They never show a fixed quick-delivery claim that operations cannot guarantee.
 - **Transparent distance-based fees.** Home and storefront surfaces may show an estimate or “from” amount; cart and checkout show the applicable distance basis and authoritative quote before payment.
 - **Explicit customer control.** “No substitutions” remains the default, variable-weight uncertainty is visible before add-to-cart, and every material change follows the customer-decision flow.
@@ -144,53 +145,72 @@ Every primary screen must make its first, second, and third priorities visually 
 - **Purpose:** establish "where am I shopping" — the anchor for all discovery.
 - **Elements:** "use current location" (permission optional), manual pin-code/address search, map-pin fine adjustment, saved-address list, delivery instructions field.
 - **States:** no permission granted (manual entry works fully), address outside any service zone (clear message + "request a shop" CTA), address confirmed.
+- **Shopping-shell behaviour:** once confirmed, the current address label remains in the compact sticky header. Tapping it opens a bottom sheet with saved addresses, current-location detection, and search; changing it revalidates vendor eligibility, cart serviceability, fees, and fulfilment windows before the UI presents the new location as active.
 
 ### 7.3 Home / discovery
-- **Purpose:** the default landing screen once a location is set.
-- **Hierarchy:** Home is adaptive rather than one fixed marketplace grid.
-- **First-time customer:** location/address → concise neighbourhood-store proposition with one real storefront image → search by shop/item/category → launched categories → nearby stores. The first screen must make "buy from a local shop you trust" unmistakable before showing a large result set.
-  - The mobile first viewport uses a compact location header, prominent search, horizontally scrollable illustrated category shortcuts, and immediately visible store/product recommendations. It feels fast and familiar without promising a fixed delivery time.
-  - **Returning customer with a preferred store:** location/address → preferred store with open/next-slot state and a primary "Shop again" action → recent order/reorder shortcut → search → nearby discovery.
-  - **Returning customer without a preferred store:** location/address → search → recently used stores → nearby stores, with a quiet prompt to mark one store as preferred after a successful order.
-- **Elements:** location bar (tap to change), search bar, launched-category shortcuts (Vegetables, Kirana, Bakery, etc.), preferred-store feature when applicable, "Stores near you" results (name, logo, distance, open/closed, next slot, delivery fee from, rating or "New", min order), and recent orders where relevant. Pharmacy is hidden until compliance approval and launch enablement; category-demand research uses the generic "Request a shop/category" flow instead.
-- **States:** zero eligible stores in area (empty state + "request a shop"), all stores closed (still listed, marked closed with next-open time), loading skeleton for slow networks.
+- **Purpose:** start a useful basket within seconds while making the fulfilling local vendor explicit.
+- **Persistent first viewport:** compact address + honest fulfilment summary → wide search action → scannable category shortcuts → first personalised shopping shelf. A non-empty cart appears as a sticky bottom pill/bar above navigation. The screen does not use a large promotional hero, carousel, or full-width campaign banner ahead of core shopping.
+- **First-time customer:** address → search → category grid → nearby named stores. Until the customer chooses a store, product recommendations are grouped beneath a visible store header and each product card includes the store name. Selecting a store opens its storefront and establishes the shopping context.
+- **Returning customer with a preferred store:** address + the preferred store's latest fulfilment state → search within that store by default → `Buy again` shelf → frequently purchased categories → vendor-scoped product shelves. A `Search all nearby stores` switch expands discovery and can add another named store group without disturbing existing groups.
+- **Returning customer without a preferred store:** address → global search → `Buy again` grouped by prior store → recent stores → category shortcuts → nearby stores. After a completed order, a quiet action offers to make that store preferred.
+- **Shelf order:** action-required active order (when present) → `Buy again` → frequently purchased/recently viewed → categories → store-scoped recommendations → nearby stores. Empty or ineligible modules collapse rather than leaving blank space.
+- **Shelf contract:** every product shelf is owned by one named vendor and shows vendor name, verification state, honest fulfilment window, distance, fee estimate/from amount, and `View store`. Product cards support immediate `Add`; a shelf never merges indistinguishable stock from multiple stores.
+- **Elements:** sticky address/fulfilment header, persistent search, 8–12 high-frequency category shortcuts with `See all`, optional pickup/delivery mode control, product shelves, recently used/preferred store shortcuts, nearby store rows, global cart entry point, and active-order banner. Pharmacy remains hidden until explicitly enabled after compliance approval.
+- **States:** no eligible stores (coverage explanation + `Request a shop/category`), all stores closed (browseable with next available windows), preferred store unavailable (explanation + recent/nearby stores), partial catalogue failure (healthy shelves remain usable), and slow network (stable shell with category/product skeletons).
 
 ### 7.4 Search & filters
-- **Purpose:** find a shop, product, or category directly.
-- **Elements:** search field with local-language synonym support, filter chips (category, delivery/pickup, open now, delivery fee, rating, dietary/specialty attributes, preferred stores only), result list mixing matching stores and matching products-within-stores.
-- **States:** no results (suggest removing filters, matches Mercato's "couldn't find any stores" empty-state pattern), partial match with a "did you mean" suggestion.
+- **Purpose:** get from intent to an addable product or named store with minimal navigation.
+- **Entry behaviour:** tapping the persistent search opens a dedicated full-height search surface with autofocus, recent searches, frequently bought items, and category suggestions. The query and results survive back navigation and a temporary loss of connection.
+- **Type-ahead:** after 2–3 characters, show grouped suggestions for products, categories, brands, and stores with local-language synonyms and transliteration. Suggestions never claim stock until validated against the selected address and vendor.
+- **Results:** tabs are `Products`, `Stores`, and `Categories`. Product results are grouped by vendor by default; the current/preferred vendor group appears first when eligible. Each group shows fulfilment window, distance, fee estimate/from amount, and inline `Add` controls.
+- **Controls:** filter chips for vendor/current store, category/subcategory, pickup/delivery, open now, delivery fee, rating, dietary/specialty attributes, and availability; sort options are relevance, buy-again, price, distance, and fulfilment window. Price comparisons must retain unit/pack-size context.
+- **Cart rule:** while a cart exists, vendors already represented in it are labelled `In your cart` and rank ahead when otherwise relevant. Adding from another eligible vendor creates a new store group; search never clears, merges, or replaces an existing group.
+- **States:** no query (recent searches + suggestions), no results (show active filters, spelling alternatives, adjacent categories, and clear filters), partial/local-language match, stale results (timestamp + revalidation on `Add`), and vendor/category temporarily unavailable.
 
 ### 7.5 Store profile (storefront page)
-- **Purpose:** the named-vendor page — the emotional core of "buy from your trusted shop."
+- **Purpose:** combine the trust of a named neighbourhood shop with the speed of a quick-commerce catalogue.
 - **Hierarchy:**
-  1. **Trust:** one dominant real storefront photograph, store name, verification state, rating or "New", favourite control, and "set as preferred store." Do not combine a large banner, logo, badges, and text into a competing collage.
-  2. **Order feasibility:** open/closed or next-slot state, pickup/delivery eligibility, distance, minimum order, and estimated delivery fee. A customer should know whether and how the shop can serve them before browsing products.
-  3. **Shopping:** search-within-store, category navigation, and catalogue. The primary shopping action remains visible as the customer scrolls.
-- **Elements:** storefront photograph, logo or clean name-based fallback, store name, verification, rating or "New", distance, hours (with "closes in Xh" or "opens at Y"), minimum order, delivery fee summary, pickup/delivery toggle, category tabs, search-within-store, favourite/heart toggle, and "set as preferred store" action. Substitution, return, and other detailed policies live in a secondary disclosure sheet rather than the primary header. A vendor can publish without professional brand assets: the fallback uses its verified name, category treatment, and an admin-assisted storefront photo.
-- **States:** closed-but-browsable; if the vendor accepts scheduled orders, customers can build a cart and choose the next slot. Otherwise show "notify me when open" and prevent order placement, not browsing. A paused/unpublished store reached by direct link shows a graceful "temporarily unavailable" state.
+  1. **Compact trust + feasibility header:** storefront thumbnail/mark, store name, verification, rating or `New`, favourite/preferred action, open/next-slot state, pickup/delivery eligibility, distance, minimum, and fee estimate. The customer can expand this area for the full photo, hours, description, and policies.
+  2. **Sticky shopping controls:** search-within-store followed by category/subcategory navigation remains visible after the trust header scrolls away.
+  3. **Fast catalogue:** `Buy again`, popular items, and category sections use compact product cards with inline `Add`/quantity controls. The non-empty cart bar remains visible above bottom navigation.
+- **Elements:** compact store header, expandable store details, pickup/delivery toggle, search-within-store, category index, product shelves/list, favourite and `Set as preferred`, substitution/returns policy sheet, and share-store action. A vendor can publish without professional brand assets using its verified name and an admin-assisted storefront photo.
+- **States:** closed-but-browseable with next window; scheduled-only; temporarily paused; unpublished direct link; minimum order not met; catalogue partially unavailable; and preferred/current-cart store state. Closed stores that accept no future orders disable `Add` while keeping catalogue and `Notify me` available.
 
 ### 7.6 Category & product browse
-- **Purpose:** shop a store's catalogue.
-- **Elements:** category rail, product grid/list toggle, product card (image, name, unit/weight, price, offer badge, quantity stepper, availability state), sticky "View cart" bar once items are added.
-- **States:** out-of-stock (dimmed, "Notify when available"), variable-weight items marked "~₹X per kg, final weight confirmed by vendor."
+- **Purpose:** scan a large local-store catalogue and change quantities without repeated page transitions.
+- **Mobile structure:** sticky category title/search → horizontal top-level category tabs → vertical subcategory rail on the left → two-column product grid or compact product list on the right. The subcategory rail highlights the visible section and supports direct jumps without resetting scroll unnecessarily.
+- **Desktop structure:** persistent category/subcategory column, product results in the main area, and global cart access in the shell. Grid/list preference persists per device.
+- **Product card contract:** image, product name, pack/unit basis, current price, truthful reference/discount price when applicable, availability/variable-weight state, named vendor where outside a storefront, and compact `Add`. The card body opens product detail; `Add` does not.
+- **Fast add behaviour:** first tap validates current price, availability, vendor, and serviceability; success replaces `Add` with minus/quantity/plus controls without leaving the page. Rapid taps are coalesced into an idempotent quantity update and show a per-line retry state if validation fails.
+- **Cart feedback:** first add reveals the global cart bar; later changes update item count and subtotal in place. Reaching a quantity/stock limit explains the limit beside the control rather than failing silently.
+- **States:** out of stock (`Notify when available`), low confidence/`Vendor confirms`, variable weight (`~₹X per kg; final weight requires approval`), maximum quantity, price changed on add, unavailable at selected address, and alternate pack sizes.
 
 ### 7.7 Product detail
-- **Purpose:** full information before adding a quantity-sensitive or variable-weight item.
-- **Elements:** image, description, unit basis, price, permitted weight variance (for loose items), substitution note for this item, quantity stepper, add-to-cart.
-- **States:** for packaged items this can be a bottom sheet instead of a full page to keep the flow fast.
+- **Purpose:** provide information and choices that do not fit safely on the fast-add card.
+- **Presentation:** packaged everyday items open in a quick-view bottom sheet on mobile and side sheet on desktop; complex, variable-weight, or option-rich products use a full detail page. Back/close returns to the exact catalogue scroll position.
+- **Elements:** product images, name, vendor link, pack/unit and unit price, price/reference basis where required, availability confidence, description, ingredients/allergens where applicable, permitted weight variance, pack-size alternatives, item-level substitution preference, returns/quality policy, quantity control, and `Add to cart`.
+- **States:** already in its vendor group (show current quantity), unavailable, price/pack changed, variable-weight acknowledgement required, and adding the first line for another vendor.
 
 ### 7.8 Cart
-- **Purpose:** review a single store's order before checkout.
-- **Elements:** store header (locked to one vendor, with a warning before switching stores clears or replaces the current cart per PRD §7.1), line items with editable quantity, item-level substitution preference, an order-level substitution control defaulted to **No substitutions**, promo code field, subtotal, and an estimated fulfilment cost. Customers may change the order default to **Best match**, **Contact me**, or **Vendor may replace within ₹X**, then override individual items. The interface states that no replacement is allowed unless the customer deliberately changes this control. Once an address and delivery mode are known, show store-to-customer distance, estimated delivery fee, the distance-pricing basis, pickup cost of ₹0 where applicable, and "final fee confirmed at checkout" until a valid quote exists. The outer delivery cap is 40 route km, but a vendor's configured zone, serviceability, and available delivery-partner capacity may make the actual eligible radius smaller.
-- **States:** empty cart, attempted store switch while another vendor's cart exists (confirm replace or return to current cart), and an item becoming unavailable while the cart was idle (flagged inline and requiring acknowledgement before checkout).
+- **Purpose:** review one basket containing clearly separated vendor groups and expose every pre-checkout blocker without hiding split fulfilment.
+- **Entry points:** the global cart bar opens a full-height cart sheet on mobile and cart drawer on wide screens; `Review and checkout` opens the complete grouped-cart page. Cart state persists across sign-in and safe navigation.
+- **Cart summary:** show total items, number of stores, current item subtotal, and `View cart`. Never imply that several stores will arrive together.
+- **Vendor groups:** each collapsible group shows vendor name and verification, line items, group subtotal, minimum-order progress, latest fulfilment window, route/fee estimate, and `Add more from this store`. Removing the final line removes only that group after a clear confirmation.
+- **Line items:** thumbnail, name, pack/unit basis, price, quantity stepper, unavailable/changed state, remove, and item substitution preference. Recommended extras remain inside the same vendor group.
+- **Group controls:** substitutions default to **No substitutions** independently for each vendor. Customers may choose **Best match**, **Contact me**, or **Vendor may replace within ₹X**, then override individual items. Notes, promotions, tips, delivery/pickup, and timing apply only to the group they appear in.
+- **Adding another store:** the first valid `Add` creates a new named vendor group and announces `Added a new store to your cart`. If the configurable store limit is reached, explain the limit and offer to remove a group; never clear or replace one automatically.
+- **Cost preview:** show per-store subtotal, route distance when known, delivery fee/pickup ₹0, discounts, estimated vendor total, and a combined estimated total. Label every fee estimate `Final fee confirmed at checkout` until the grouped server quote is valid.
+- **Primary action:** sticky `Review checkout · ₹X` while all groups can proceed. If one group is blocked, name and focus that store's correction; customers may fix or remove that group without losing healthy groups.
+- **States:** empty cart; one or several vendor groups; store limit reached; item unavailable; quantity reduced; price/weight basis changed; group minimum not met; vendor closed/paused; address no longer serviceable for one group; estimate stale; group removed; and cart restored after sign-in.
 
 ### 7.9 Checkout
-- **Purpose:** confirm fulfilment method, pay, and place the order.
-- **Decision sequence:** checkout is one progressive mobile-friendly page ordered as fulfilment method → address or pickup point and slot → substitution rules → payment → final review. Each section shows a compact completed summary after resolution and remains directly editable.
-- **Primary action:** a sticky total and contextual action always name the next required step: "Choose address," "Select a slot," "Choose payment," or finally "Place order." Activating it scrolls/focuses the first incomplete or invalid section. Never show an unexplained disabled action.
-- **Elements:** delivery address or pickup point, pickup/delivery toggle, fulfilment timing, full fee breakdown (items, delivery fee with route distance and pricing basis, taxes, tip — optional, promo discount, total), prepaid payment method (UPI, cards, supported wallets), order notes, and a single "Place order" action that reflects the server-issued expiring quote (`architecture.md` §11.1). COD does not appear in the MVP. For the pilot, the delivery quote is **₹15 base + ₹8 for each route kilometre after the first 2 km**, up to a 40 route-km outer cap; the displayed quote must show route distance, included distance, per-km rate, and total. At 5 km the fee is ₹39; at 40 km it is ₹319. The formula version remains configurable and is stored with every order rather than silently recalculating historical charges.
+- **Purpose:** confirm each vendor's fulfilment, authorize the combined amount, and create independent vendor orders in one customer action.
+- **Decision sequence:** checkout is a progressive mobile page ordered as shared delivery address → vendor-group fulfilment and timing → payment → final review. Pickup groups select their own pickup point; substitutions remain editable summaries. Returning customers with valid defaults can keep completed groups collapsed.
+- **Primary action:** a sticky total and contextual action always name the next required step: "Choose address," "Complete Store X," "Choose payment," or finally "Place orders." Activating it scrolls/focuses the first incomplete or invalid vendor group. Never show an unexplained disabled action.
+- **Elements:** one section per named vendor showing address/pickup point, pickup/delivery toggle, honest timing, substitutions, notes, items, route distance, delivery fee, tax, promotion/tip allocation, and vendor total; a combined bill and prepaid method; and one server-idempotent `Place orders` action tied to the checkout-group quote (`architecture.md` §11.1). COD does not appear in the MVP. The pilot distance formula is applied and snapshotted separately for each delivered vendor order.
+- **Partial-success notice:** before commitment, state that stores confirm independently, orders may arrive separately, and a declined/timed-out store will be voided or refunded while accepted stores continue. Do not offer an all-or-nothing promise until inventory reservation and distributed cancellation are designed.
 - **Timing:** vendors configure ASAP and/or scheduled fulfilment independently for pickup and delivery. ASAP shows the earliest honest preparation/arrival window. Scheduled fulfilment uses 60-minute windows by default, subject to vendor/category configuration and capacity. Closed stores may accept a future window without implying immediate service.
-- **States:** quote expired (auto-refresh with a visible "prices updated" notice — never silently re-charge), payment failed (retry without re-entering the whole cart), address outside the vendor's current service zone (blocks placement with a clear reason), and incomplete/invalid sections (show the problem inline and move focus to the first one). The sticky total remains visible while the customer resolves blockers.
+- **States:** one vendor quote expired (refresh and identify that group), payment failed (retry without rebuilding groups), address outside one vendor's zone (fix or remove that group), vendor group unavailable, partial vendor acceptance after placement, and incomplete/invalid sections that focus the affected store. The combined total remains visible while blockers are resolved.
 - **Transactional recovery states:**
 
   | State | What the customer sees | Permitted action |
@@ -206,9 +226,10 @@ Every primary screen must make its first, second, and third priorities visually 
   A customer returning from UPI, a browser interruption, or a reopened app resumes the authoritative transaction state. Provider UI alone never determines the final message.
 
 ### 7.10 Order tracking
-- **Purpose:** show real, current status without over-promising.
-- **Elements:** status stepper mapped to the order state machine (see Section 11 for the full mapping), vendor contact (masked/protected channel), estimated ready/arrival window framed as an estimate, pickup/delivery OTP prominently displayed when relevant, and cancel-order action while still eligible. Status tracking is always available; continuous rider location appears only when platform delivery, partner consent, privacy policy, and technical reliability allow it, with a last-updated time and status-only fallback.
-- **States:** `AWAITING_CUSTOMER_DECISION` interrupts tracking with the substitution modal (7.11) rather than silently continuing.
+- **Purpose:** show the grouped checkout outcome and every vendor order's real status without implying synchronized fulfilment.
+- **Elements:** checkout-level summary first, followed by one vendor-order card with its own stepper, fulfilment estimate, items/receipt allocation, masked contact, support, OTP, and eligible cancellation. A placed card names the vendor, shows the response deadline as a local time, and explains that its allocation will be released if the vendor declines or times out. Continuous rider location is shown only for the applicable vendor order when consent, privacy, and reliability allow it.
+- **States:** independently waiting for vendor response, partially accepted checkout, vendor declined/timed out with refund or void status, and `AWAITING_CUSTOMER_DECISION`, which interrupts only the relevant vendor order with the substitution modal (7.11).
+- **Shopping continuity:** once an order is accepted, a compact active-order banner appears above customer navigation; Home remains usable for later shopping, but a new cart never mutates the active order.
 
 ### 7.11 Substitution / customer-decision modal
 - **Purpose:** the customer approves, rejects, or requests contact for a vendor-proposed change.
@@ -216,13 +237,13 @@ Every primary screen must make its first, second, and third priorities visually 
 - **States:** decision window expiring (countdown consistent with the SLA in `prd.md` §8), decision already made by a previous notification tap (idempotent — reopening shows the recorded choice, not a second prompt).
 
 ### 7.12 Order history & reorder
-- **Purpose:** revisit past orders, matching the one-tap-reorder pattern.
-- **Elements:** order list with store, date, total, status; order detail with receipt; "Reorder" button that rebuilds a cart from the same vendor with current prices/availability (never the old snapshot).
-- **States:** reorder is allowed for the next available slot when a closed vendor accepts scheduled orders. It is blocked if the vendor is unpublished or accepts neither immediate nor scheduled orders, with a clear explanation and optional substitute-store suggestions.
+- **Purpose:** make repeat essentials as fast to buy as new products while preserving current price/availability checks.
+- **Elements:** `Buy again` on Home, order list with store/date/total/status, order detail and receipt, item-level `Add again`, and `Reorder available items`. Reorder creates a draft cart from the same vendor using current catalogue records; it first presents unavailable, changed-pack, changed-price, and variable-weight lines for review.
+- **States:** existing group from the same vendor (merge with quantity preview), no group from that vendor (create a named group), store limit reached, closed vendor accepting scheduled orders, paused/unpublished vendor, no available historical lines, and current total differing from the old receipt. Substitute-store suggestions are clearly new-store options and never auto-replace the original vendor.
 
 ### 7.13 Favourites / My Stores
 - **Purpose:** the loyalty surface — "shop where you already trust."
-- **Elements:** grid of favourited stores, one marked "Preferred" (drives Home's pinned card), quick reorder-from-favourite shortcut.
+- **Elements:** recent, favourited, and followed stores; one marked `Preferred`, which controls the default Home/search store context; store availability/next window; last ordered date; `Shop again`; and per-store notification preference. Changing the preferred store does not clear or transfer an existing cart.
 
 ### 7.14 Profile & settings
 - **Purpose:** account, addresses, payment methods, notification and language preferences, consent management.
@@ -259,7 +280,8 @@ Every primary screen must make its first, second, and third priorities visually 
 
 ### 8.3 New order alert
 - **Purpose:** force a fast accept/decline within the configured SLA.
-- **Elements:** full-width modal/screen with items, customer notes, prep-time selector, Accept / Decline-with-reason, visible countdown to auto-cancel.
+- **Elements:** full-width modal/screen with this vendor's items only, customer notes, prep-time selector, Accept / Decline-with-reason, visible countdown to auto-cancel, and sibling-order privacy notice where relevant. Decline/cancel opens an impact sheet showing released customer allocation, notification, recorded reason, and acceptance-metric effect.
+- **Reason choices:** item availability too low, store too busy, closing soon, cannot meet slot, delivery unavailable, catalogue/price error, customer request cannot be fulfilled, safety/compliance problem, or other with explanation.
 - **States:** SLA missed → auto-cancel, logged to vendor health per `prd.md` §8; combined push + SMS escalation per `architecture.md` §6.2.
 
 ### 8.4 Order detail & picking
@@ -273,7 +295,8 @@ Every primary screen must make its first, second, and third priorities visually 
 
 ### 8.6 Catalogue list
 - **Purpose:** manage what's sellable.
-- **Elements:** searchable/filterable product table, bulk availability toggle, low-stock flags, category grouping.
+- **Elements:** searchable/filterable product table, bulk availability toggle, counted/vendor-confirms mode, low-stock flags, last-confirmed age, reserved/available quantity where reliable, reconfirmation queue, and category grouping.
+- **Reservation visibility:** explain cart/no reservation, checkout `SOFT_HELD`, placed `PROVISIONAL`, accepted `COMMITTED`, and `RELEASED`/`EXPIRED` states. `VENDOR_CONFIRMS` never appears as guaranteed reserved stock.
 
 ### 8.7 Add/edit product
 - **Purpose:** single-product CRUD.
@@ -303,9 +326,14 @@ Every primary screen must make its first, second, and third priorities visually 
 - **Purpose:** protected, template-first communication.
 - **Elements:** a support-visible thread per order, approved template shortcuts, optional free text, delivery/read state, and a masked-call escalation for approved active-order reasons. Personal numbers are never displayed. Masked-call access expires after the order/support window; the event is auditable without recording call content by default.
 
-### 8.14 Notifications & escalation settings
+### 8.14 Vendor support and escalation
+- **Elements:** structured reasons for customer not responding, payment adjustment blocked, rider not assigned/late, package-count dispute, customer arrived early/refused pickup, technical problem, unsafe/abusive interaction, and admin intervention.
+- **Outcome contract:** submission returns case reference, responsible queue, expected response time, current instruction, and resulting order state. The instruction stays visible on the order until resolution.
+
+### 8.15 Notifications & escalation settings
 - **Purpose:** control how loudly the vendor is alerted.
-- **Elements:** push/SMS toggles per event type, per-staff routing.
+- **Elements:** permitted alert devices, staff escalation order, test-notification action, push/SMS status, failed delivery attempts, audible-alert capability, and device removal.
+- **Sequence:** initial push/audible alert → reminder push after configured non-acknowledgement → SMS/provider fallback → server-driven auto-cancel at the displayed deadline.
 
 ## 9. Delivery Partner App/Portal
 
@@ -326,7 +354,7 @@ Every primary screen must make its first, second, and third priorities visually 
 - **Purpose:** a fast accept/decline decision with only the information needed to decide.
 - **Hierarchy:** expected payout is the visual anchor; total estimated time and distance are second; safety, return, package, handling, and vehicle constraints are third. Approximate pickup/drop-off and distance breakdowns sit inside an expandable "Trip details" area rather than competing with the decision summary.
 - **Elements:** expected pay (+known tip if any), estimated total distance/time, pickup-by deadline, expected vendor wait where known, prominent unsafe-area/return/heavy/fragile/vehicle-mismatch warnings, and expandable approximate pickup/drop-off areas with partner-to-vendor and vendor-to-customer distances. Accept / Decline remain fixed, one-handed actions; declining an unsafe or impractical offer is never penalised.
-- **States:** offer auto-expires after a short configurable window and reissues to the pool.
+- **States:** fulfilment moves `UNASSIGNED → OFFERED`; acceptance moves to `ASSIGNED`; decline/expiry closes the attempt and returns safe work to `UNASSIGNED`. The offer auto-expires at the displayed server deadline.
 
 ### 9.5 Active job flow (full-screen, one state at a time)
 - **Purpose:** the field workflow, screen-per-state to match the assignment machine in `architecture.md` §10.
@@ -337,10 +365,12 @@ Every primary screen must make its first, second, and third priorities visually 
   - `ARRIVED`: delivery confirmation entry point (9.7).
 - **Notes:** the active job and last confirmed state are cached locally so a dropped connection does not erase progress, per `architecture.md` §6.3.
 - **Navigation and safety:** an active job prevents accepting another job but does not block navigation. A persistent "Resume active job" control returns to the current step, while Support, Emergency, and essential Profile controls remain available at all times.
+- **Reassignment history:** expiry, inability to proceed, vehicle failure, vendor delay, lost connectivity/no movement, admin action, or customer cancellation shows the current instruction and preserves prior partner, waiting/return compensation, custody, ETA changes, reason/actor, and earnings impact. One vendor order maps to one assignment by default.
 
 ### 9.6 Pickup confirmation
-- **Elements:** QR/barcode scanner or manual OTP entry, item count and package count checklist, vendor handoff note field.
+- **Elements:** correct vendor and order, QR/barcode scanner or manual OTP, item/package counts, package condition, fragile/cold handling, vendor confirmation, and handoff note. Only server confirmation starts custody.
 - **States:** scanning/validating, invalid or expired proof, camera permission unavailable (manual entry remains available), proof saved offline, synchronizing, server-confirmed pickup, and support review. A locally saved proof does not display server-confirmed success.
+- **After custody:** vendor edits are locked except through an auditable exception; package-count changes require an exception; cancellation routes to return instead of ordinary cancellation.
 
 ### 9.7 Delivery confirmation
 - **Elements:** customer OTP entry (default proof), photo/signature only where policy explicitly allows, "Mark delivered" action.
@@ -359,9 +389,23 @@ Every primary screen must make its first, second, and third priorities visually 
 - **Purpose:** guided, non-dead-end paths for the messy real-world cases.
 - **Elements:** dedicated screens for vendor delay, missing package, damaged order, customer unreachable, wrong address, unsafe location — each ending in a clear next state (retry, return, cancel-with-reason, escalate to support) without exposing more customer contact detail than necessary.
 
+### 9.8.1 Vendor wait and reassignment
+- **Elements:** trusted arrival/geofence, server wait timer, vendor delay reason, revised pickup estimate, compensation accrued, and threshold-based `Keep waiting`, `Leave/reassign`, and `Support`. The offer discloses the applicable waiting-pay policy before acceptance.
+
+### 9.8.2 Return to origin
+- **Flow:** authorized → destination/instructions → returning → vendor count/condition confirmation → returned → return earning posted. Customer refund/support continues separately.
+- **States:** vendor closed/refuses return, alternate safe return point, perishable handling, damaged package, customer changed mind, wrong/unsafe address, customer unreachable, proof pending, compensation disputed, and support review.
+
+### 9.8.3 Safety, location, and navigation fallback
+- **Safety:** persistent emergency action routes unsafe pickup/drop, harassment/threat, accident, medical emergency, vehicle breakdown, or prohibited-goods concern to the correct emergency/specialist path rather than generic support.
+- **Location:** show when tracking is active, why, current frequency/battery mode, offline-buffer state, and when sharing stops. Permission denial/withdrawal explains the capability limit and permitted continuation or safe stop.
+- **Navigation fallback:** preferred maps app, full text address, landmark, instructions, retry, incorrect-pin report, and support remain available; a map is never the sole route representation.
+- **Integrity review:** mock GPS, reused proof, implausible speed/location, wrong-location completion, repeated unreachable claims, multiple devices/account sharing, compromised-device indicators, excessive proof failures, or collusion display a neutral review/capability state with case reference and appeal path. One signal never presents as automatic guilt.
+
 ### 9.9 Earnings & payouts
 - **Purpose:** trust in pay.
-- **Elements:** trip-level breakdown (base, distance/time, incentive, tip, adjustment, cash collected if enabled, net), daily/weekly rollups, payout history, bank details, downloadable statement.
+- **Elements:** trip-level breakdown (base, distance/time, waiting, return, incentive, tip, adjustment, cash collected if enabled, net), daily/weekly rollups, payout history, bank details, downloadable statement, and line-level dispute.
+- **Dispute states:** missing trip, incorrect distance, missing wait/return pay, tip/incentive discrepancy, payout failure, or unauthorized adjustment; show original/new amount, reason, actor, deadline, case status, evidence, and resolution.
 
 ### 9.10 Profile, training & support
 - **Elements:** profile/vehicle info, performance metrics shown transparently (completed trips, on-time pickup, feedback) with a coaching/dispute path before any restriction, one-tap support and emergency assistance.
@@ -370,12 +414,14 @@ Every primary screen must make its first, second, and third priorities visually 
 
 ### 10.1 Login & role-based access
 - **Purpose:** gate every module by role; every admin action is attributable.
-- **Elements:** authenticated login, role/permission summary visible to the admin themselves.
+- **Elements:** authenticated login, role/permission summary visible to the admin themselves, scoped queue counts, and an explicit access-denied state that names the required permission without exposing the underlying record.
+- **Initial roles:** vendor onboarding, partner onboarding, catalogue moderation, live operations, customer support, finance, trust and safety, compliance, reporting/audit, and exceptional super-admin. Fine-grained proposer/approver capabilities sit inside those roles; roles may be combined only through an approved access request.
+- **Separation of duties:** the proposer cannot approve their own high-risk refund, payout adjustment, restriction, fee/policy publication, or incident-control change.
 
 ### 10.2 Dashboard / overview
 - **Purpose:** the first screen — a pulse check, not a rabbit hole.
 - **Hierarchy:** use a shared risk order across admin roles: safety/security incidents → payment or ledger mismatches → ageing live-order exceptions → vendor/partner compliance blockers → routine pipeline work. Permissions determine which items an admin may open or act on, but not the meaning of severity.
-- **Elements:** a risk-ranked action queue, ageing active orders, vendor/partner pipeline counts, and top alerts. Today's GMV and other summary metrics remain secondary so operational problems cannot be visually buried by dashboard cards.
+- **Elements:** a risk-ranked action queue ordered safety incident → payment/ledger mismatch → stuck customer decision → expiring vendor acceptance → excessive rider wait → delivery failure → return required → overdue refund → payout failure → routine onboarding/moderation. Every row shows severity, owner, SLA/age, affected object, custody or amount at risk, and next action. Vendor/partner pipeline counts and today's GMV remain secondary.
 
 ### 10.3 Vendor pipeline
 - **Purpose:** move a vendor lead through the stages defined in `prd.md` §7.3.
@@ -383,25 +429,40 @@ Every primary screen must make its first, second, and third priorities visually 
 
 ### 10.4 Vendor detail & document review
 - **Elements:** business profile, locations, licences with verification status and expiry, immutable reviewer notes, service-zone map editor, fee/commission config, publish/pause/unpublish action (reason required, logged). High-impact suspension, fee, or payout changes show an impact preview and enter a pending-approval state when policy requires a second approver.
+- **Document lifecycle:** verified → expiring soon → grace period where approved → expired/reverification required → replacement under review → restored or rejected. The screen shows expiry date, reminders sent, replacement upload, affected capability, reviewer, complete review history, evidence, appeal path, any time-limited manual exception, and whether new orders are blocked while existing safe obligations continue. Automatic suspension occurs only under approved policy.
 
 ### 10.5 Delivery partner review
-- **Elements:** mirrors 10.3/10.4 for the partner pipeline (applied → documents pending → under review → approved/suspended/rejected/inactive), document verification, zone/vehicle assignment.
+- **Elements:** mirrors 10.3/10.4 for the partner pipeline (applied → documents pending → under review → approved/suspended/rejected/inactive), document verification, expiry/reverification controls, zone/vehicle assignment, restriction history, evidence, and appeal/review outcome. Restrictions state exactly which capability is blocked and do not erase active custody obligations.
 
 ### 10.6 Catalogue & moderation
 - **Elements:** cross-vendor product review queue, prohibited-item flags, bulk category taxonomy tools.
 
 ### 10.7 Live order monitor
 - **Purpose:** operational awareness across the whole marketplace in real time.
-- **Elements:** filterable table (vendor, state, exception flag, time-in-state), drill-in to order detail, manual-intervention actions gated by permission and always logged.
+- **Elements:** filterable table (checkout group, vendor order, vendor, state, exception flag, time-in-state), drill-in to order detail, manual-intervention actions gated by permission and always logged. A checkout group expands into vendor-scoped child orders; staff act on a selected child unless a separately confirmed multi-select action is valid. Sibling orders, allocations, fulfilments, settlements, cases, and timelines remain visually isolated.
 
 ### 10.8 Order detail & intervention
 - **Elements:** full order timeline (every state transition with actor, timestamp, reason — `architecture.md` §9), payment/ledger snapshot, and available intervention actions (cancel, refund, reassign). Every intervention shows the customer/vendor/partner and financial impact, requires a reason and confirmation, and enters pending approval above the configured risk or value threshold.
 
 ### 10.9 Support & dispute tools
-- **Elements:** case queue, evidence viewer (photos, messages), resolution actions (refund, partial refund, credit), customer/vendor/partner profile lookup, fraud flags, blocklist management.
+- **Elements:** automatic or manual case creation, risk- and SLA-ranked case queue, structured category/subcategory, affected checkout group/vendor order/assignment/ledger line, requester, current owner/team, response deadline, current instruction, safe evidence viewer with access controls, internal notes, participant-visible messages and response requests, resolution templates, partial/full refund or credit, duplicate-case merge, reopen/escalate, quality review, approval state, resulting operational state, and immutable decision history.
+- **Scoping:** a customer, vendor, or partner case attaches to the smallest affected object. A refund, cancellation, restriction, or communication on one vendor order cannot implicitly change a sibling.
+
+### 10.9.1 Trust and safety review
+- **Elements:** signals and source, linked accounts/devices/orders, evidence quality, prior decisions, requested restriction, customer/vendor/partner impact, reviewer assignment, response deadline, and appeal. A signal opens a review; it does not itself impose punishment. Temporary restrictions require a policy basis, expiry/review date, reason, and safe treatment of active orders or custody.
+
+### 10.9.2 Finance reconciliation queues
+- **Queues:** authorized-without-checkout, checkout-created/payment-unknown, capture failed, capture/allocation mismatch, duplicate webhook, refund pending/failed, unbalanced ledger, vendor settlement mismatch, partner earning mismatch, payout failed/duplicate-risk, provider statement unmatched, and earning/settlement disputes.
+- **Elements:** expected versus actual amount, child-order allocations, immutable ledger lines, provider references, owner, age/severity, amount at risk, last retry, next action, safe automated-retry eligibility, manual-review route, proposed correction, approval state, evidence, and complete audit history. Staff correct through idempotent reversal/adjustment flows; there is no edit-history or force-balance control.
 
 ### 10.10 Zones, fees & commission configuration
 - **Elements:** service-zone editor (radius/pin-code/polygon), delivery-fee formula parameters (base, included distance, per-km rate, thresholds, rounding, maximum radius), vendor per-completed-order fee configuration, affected-zone/order preview, effective date, and a "this changes a live business rule" confirmation. Material changes require a second approver; historical orders are never recalculated (`rules.md` §8).
+- **Lifecycle:** draft → validation failed or ready for approval → pending approval → scheduled → active → superseded/rolled back. Every version shows author, approver, diff, test result, scope, effective time, rollback target, and affected future workflows. Rollback creates a new version; it never rewrites orders quoted under an older version.
+
+### 10.10.1 Incident controls and kill switches
+- **Purpose:** contain a live failure without direct database edits.
+- **Controls:** pause one vendor, category, or zone; disable platform delivery, a payment method, promotion, new grouped checkout, substitutions, or a provider integration; reduce maximum stores per cart; stop new partner assignments; pause payouts; or force manual review for a scoped rule.
+- **Interaction:** display affected users/flows, current obligations that must continue safely, automatic expiry/review time, owner, reason, second-approval requirement, status banner, recovery checklist, and audit reference. Activation is reversible and scoped; it never cancels existing orders, drops custody, or rewrites financial history implicitly.
 
 ### 10.11 Reporting
 - **Elements:** city/zone/vendor/category dashboards (GMV, completed orders, take rate, active vendors/customers, repeat rate, fulfilment time, cancellations, refunds), vendor health score view, exportable reports with role-based access.
@@ -425,7 +486,7 @@ Every primary screen must make its first, second, and third priorities visually 
 | COMPLETED | Order complete | Completed | Completed |
 | CANCELLED / EXPIRED | Cancelled | Cancelled | Cancelled |
 
-Delivery-assignment sub-states (OFFERED, ASSIGNED, AT_VENDOR, EN_ROUTE_TO_CUSTOMER, ARRIVED, DELIVERY_FAILED, RETURN_REQUIRED) are surfaced only inside the Delivery Partner active-job flow (9.5) and, in simplified form, inside customer order tracking (7.10) — the customer never sees internal assignment vocabulary like "OFFERED."
+Delivery-assignment sub-states (OFFERED, ASSIGNED, AT_VENDOR, EN_ROUTE_TO_CUSTOMER, ARRIVED, DELIVERY_FAILED, RETURN_REQUIRED, RETURN_AUTHORIZED, RETURNING, RETURNED) are surfaced only inside the Delivery Partner active-job flow (9.5) and, in simplified form, inside customer order tracking (7.10) — the customer never sees internal assignment vocabulary like "OFFERED."
 
 ## 12. Shared components (structural inventory, not a visual kit)
 
@@ -433,6 +494,8 @@ Delivery-assignment sub-states (OFFERED, ASSIGNED, AT_VENDOR, EN_ROUTE_TO_CUSTOM
 |---|---|---|
 | Store card | Customer discovery, search | Name, logo, distance, open state, fee-from, rating, favourite toggle. |
 | Product card | Category browse, cart | Image, unit basis, price, availability, quantity stepper. |
+| Category/subcategory navigator | Customer Home, storefront, browse | Compact top-level shortcuts plus a sticky subcategory rail/list; preserves scroll and selected state. |
+| Persistent cart bar/drawer | Customer shopping surfaces | Item count, store count, combined item subtotal, and one-tap grouped-cart return; never implies one combined fulfilment. |
 | Order card / row | Customer history, vendor queue, admin monitor | Same underlying status chip vocabulary (Section 11) rendered per audience. |
 | Status stepper | Customer tracking | Linear progression with a distinct "needs your input" branch state. |
 | Decision modal | Customer substitution approval | Never auto-dismisses; requires an explicit tap. |
@@ -455,16 +518,18 @@ Delivery-assignment sub-states (OFFERED, ASSIGNED, AT_VENDOR, EN_ROUTE_TO_CUSTOM
 
 ### 12.2 Quick-commerce-inspired customer direction
 
-The customer App/Web should borrow the **speed and shopping clarity** of Blinkit/Zepto-style quick-commerce experiences, not their brand identity, dark-store business model, delivery claims, illustrations, copy, or exact layouts. These products lead with broad daily-needs discovery and rapid add-to-cart behaviour; Neighbourhood instead leads with the customer’s trusted named local vendor and an honest, distance-based fulfilment quote. Blinkit presents grocery and daily-essential shopping as a broad hyper-local catalogue, while Zepto foregrounds category-based grocery discovery. [Blinkit FAQ](https://blinkit.com/faq) · [Zepto](https://www.zepto.com/)
+The customer App/Web should borrow the **speed and shopping clarity** of Blinkit/Zepto-style quick-commerce experiences, not their brand identity, dark-store business model, delivery claims, illustrations, copy, or exact layouts. These products lead with broad daily-needs discovery and rapid add-to-cart behaviour; Neighbourhood instead leads with the customer’s trusted named local vendor and an honest, distance-based fulfilment quote. Blinkit presents grocery and daily-essential shopping as a broad hyper-local catalogue, while Zepto foregrounds category-based grocery discovery. [Blinkit FAQ](https://blinkit.com/faq) · [Zepto](https://www.zeptonow.com/)
 
-- **First screen:** the first mobile viewport is a retail surface, not an editorial landing page: compact sticky location header → wide warm-yellow search field → one horizontally scrollable category rail → preferred-store shortcut or nearby-vendor shelf. Do not place a large proposition/hero ahead of shopping once a location is known.
+- **Functional priority:** borrow persistent location/search, category-to-subcategory drill-down, product-dense shelves, inline `Add`/quantity controls, buy-again entry points, a persistent cart, and compact progressive checkout. Do not reproduce either reference product's exact screen composition, copy, ranking logic, gamification, membership mechanics, or fulfilment promise.
+- **First screen:** the first mobile viewport is a retail surface, not an editorial landing page: compact sticky location/fulfilment header → wide search action → compact category shortcuts → buy-again or preferred-store product shelf. Do not place a large proposition/hero ahead of shopping once a location is known.
 - **Category shortcuts:** use image-led, colourful light-background category tiles for high-frequency needs such as Vegetables, Fruits, Dairy, Staples, Snacks, Personal care, and Home care. Each tile is a 72–88 px square on mobile with a short label below or over a quiet image treatment. Use real product imagery or simple ownable category art, never Blinkit/Zepto mascots, illustrations, copy, or exact tile compositions.
 - **Retail rhythm:** use short, scannable section names (“Buy again”, “Fresh today”, “From Rao Family Kirana”), compact product cards, visible price and unit, and an immediate `Add` button. Avoid long explanatory copy between shelves. The first 5 seconds should answer: where am I ordering, what do I need, and which shop is supplying it?
 - **Store-first feed:** organise results as named vendor sections, not one anonymous cross-store product grid. A section can show a vendor header, delivery-from/distance, and a horizontally scrollable row of its popular products. Opening a product always identifies its vendor before it is added.
-- **Fast add:** product cards show image, name, unit, price, availability, and a high-contrast compact `Add` control. Adding changes it to an inline quantity stepper, gives a brief 120–220 ms confirmation, and exposes a sticky cart bar. A cart may only contain one vendor; adding from another vendor invokes the existing replace-cart confirmation before changing state.
-- **Cart visibility:** show a bright sticky bottom cart bar as soon as the cart is non-empty. It contains only item count, vendor name, current total, and `View cart`; delivery breakdown belongs in cart/checkout. The customer should always have one-tap return to the cart, but the bar must not hide product controls or system navigation.
+- **Fast add:** product cards show image, name, unit, price, availability, and a high-contrast compact `Add` control. Adding validates vendor, price, stock, and serviceability, then updates that vendor group with an inline quantity stepper and brief confirmation. The first line from another vendor creates a new named group.
+- **Cart visibility:** show a bright sticky bottom cart bar as soon as the cart is non-empty. It contains item count, store count, current item subtotal, and `View cart`; per-store delivery breakdown belongs in cart/checkout. It must not imply that all groups share one fee, ETA, or delivery.
 - **Store identity stays visible:** every discovery card and product section includes a named vendor, not a generic fulfilment hub. Use a small real storefront photo or vendor mark where available, plus a “Verified local vendor” treatment when applicable.
 - **Offer treatment:** use warm-yellow for shopping calls to action, coral for genuine limited offers, and pale mint for trusted/preferred-vendor signals. Price reductions, bundles, and category highlights must be truthful, time-bounded, and attributable. Never use fake urgency, misleading crossed-out prices, fabricated stock/discount counters, or a false “minutes” promise.
+- **Checkout restraint:** use saved address, timing, substitution, and payment summaries so valid returning customers do not re-enter information. Speed comes from fewer repeated decisions, never from hiding fees, silently selecting substitutions, or skipping payment recovery states.
 - **Mobile density:** customer cards can be more compact and visual than operational portals, but buttons retain a 48 px minimum target and text/price never fall below the typography tokens. Vendor, partner, and admin portals remain task-first and do not adopt promotional customer tiles. Desktop expands shelves from two to four product cards while retaining their horizontal, vendor-scoped grouping rather than turning the page into an anonymous catalogue grid.
 
 ### 12.3 Visual direction: white/light theme only
@@ -638,7 +703,7 @@ Cross-surface rules:
 
 ## 13. Accessibility and localization
 
-- Launch with English plus the pilot neighbourhood's primary local language, selectable at onboarding and in Profile settings; INR formatting throughout. The exact local language is chosen from the pilot area and applies consistently to customer, vendor, delivery-partner, and Admin surfaces.
+- Launch with English and Hindi, selectable at onboarding and in Profile settings; INR formatting throughout. Both languages apply consistently to customer, vendor, delivery-partner, and Admin surfaces.
 - Translation is task-complete, not decorative: core ordering, fulfilment, payout, safety, support, consent, and error flows must be available in both launch languages. New languages require translated operational copy, language-appropriate Noto Sans script assets, 30% expansion testing, and support-content review before release.
 - Minimum 44×44 px tap targets across all surfaces, with extra spacing for destructive or safety-critical vendor and delivery actions.
 - Body text is at least 16 px; essential text and controls meet WCAG AA contrast against the light background.
@@ -655,8 +720,8 @@ Use content-driven breakpoints, starting with these test widths: compact mobile 
 
 | Surface / workflow | Mobile | Tablet | Desktop / wide |
 |---|---|---|---|
-| Customer Home & search | One vertical hierarchy; horizontally scrollable categories only when every item remains reachable; preferred/reorder feature above nearby results; one store per row on compact mobile | Two-column store results with persistent location/search | Three or four result columns within a max-width content area; relationship/reorder area remains visually dominant rather than becoming another grid row |
-| Storefront catalogue | Trust and feasibility header followed by sticky search/category control; one product row or two compact columns according to image/label length; sticky cart action above bottom nav | Two/three catalogue columns; category rail may become a side list | Persistent category/navigation column where useful, three/four product columns, cart access in top shell; do not stretch text/media beyond defined widths |
+| Customer Home & search | Sticky address/fulfilment header, persistent search action, compact category shortcuts, buy-again/preferred-store shelves, and global cart bar; search results are vendor-grouped with inline `Add` | Two-column vendor sections or wider product shelves with persistent location/search | Three or four product columns per named-vendor section within a max-width area; search may use a results/detail split without creating an anonymous cross-store grid |
+| Storefront catalogue | Compact expandable trust/feasibility header; sticky search and top categories; left subcategory rail with two compact product columns or a readable list; cart bar above bottom nav | Two/three catalogue columns with persistent subcategory navigation | Persistent category/navigation column, three/four product columns, and cart drawer access in the shell; do not stretch text/media beyond defined widths |
 | Cart & checkout | One progressive column; sticky bottom total/contextual action respects keyboard and safe area | Main decision column plus collapsible order summary | Two-column layout with decision flow left and sticky order/fee summary right; tab/focus order follows the visual sequence |
 | Order tracking | Current state/action first; compact timeline; light map only when available, useful, and privacy-approved | Status/timeline beside optional map or fulfilment detail | Timeline/detail and optional map use a balanced split; support/receipt remain secondary |
 | Vendor order queue | Urgency-ranked vertical rows; bottom-reachable actions; one order detail at a time | Queue/detail split when width allows; otherwise preserve mobile navigation | Persistent urgency queue beside selected order/picking detail; metrics occupy a secondary band, not card mosaic |
@@ -720,7 +785,7 @@ Cross-responsive rules:
 
 Matching `README.md` and `rules.md` anti-goals, this design intentionally does **not** include:
 
-- A multi-store/multi-vendor cart or split-fulfilment checkout UI.
+- Automatic combined-route promises, one shared delivery fee, or one shared ETA across several vendor orders before dispatch explicitly confirms consolidation.
 - Any UI implying owned inventory or a platform "dark store."
 - A 10-minute or other fixed fast-delivery promise anywhere in copy or UI.
 - Automated route-optimisation visuals (manual/simple dispatch only, per `architecture.md` §25).
@@ -730,7 +795,7 @@ Matching `README.md` and `rules.md` anti-goals, this design intentionally does *
 
 ## 17. Open design decisions requiring product input
 
-No unresolved design decisions remain for the current MVP UI. Future changes to pricing, service zones, languages, COD, pharmacy, or delivery operations require a new product and design review before they appear in the interface.
+No unresolved interaction-design decisions remain for the current MVP UI. Production business/provider gates remain in `implementation.md` §3 and cannot be resolved by UI implementation. Future changes to pricing, service zones, languages, COD, pharmacy, or delivery operations require a new product and design review before they appear in the interface.
 
 ### 17.1 Resolved during design review
 
@@ -742,12 +807,13 @@ No unresolved design decisions remain for the current MVP UI. Future changes to 
 | MVP payment mode | Prepaid only: UPI, cards, and supported wallets. COD remains hidden until a separate cash-handling, reconciliation, safety, and dispute policy is approved. |
 | Substitution default | Default every new order to **No substitutions**. Customers may explicitly choose best match, contact me, or vendor replacement within a stated price limit at order or item level; vendors never replace silently. |
 | Admin extended-shift theme | Use a warm off-white canvas with white work surfaces, charcoal text, visible neutral borders, and restrained light semantic tints. Dark navigation, dark monitoring panels, and dark mode remain prohibited. |
-| Launch languages | Launch in English plus the pilot neighbourhood's primary local language. Both languages cover core customer, vendor, partner, and Admin tasks and are tested for script rendering and text expansion before release. |
+| Launch languages | Launch in English and Hindi. Both languages cover core customer, vendor, partner, and Admin tasks and are tested for script rendering and text expansion before release. |
 | Pilot delivery fee and radius | Quote ₹15 base plus ₹8 per route kilometre after the first 2 km, up to a 40 route-km outer cap. Show distance, pricing basis, and total before payment; actual eligibility may be smaller due to vendor zones, serviceability, and partner capacity. |
+| Multi-store checkout | One cart may contain several named vendor groups. One checkout creates one independent order per vendor; fees, promises, acceptance, substitutions, cancellation, refund, tracking, and settlement remain vendor-scoped. Separate fulfilments are shown by default. |
 
 ## 18. How this maps to the build sequence
 
-Per `architecture.md` §27, screens should be built in the same order as the backend slices, not all at once:
+Per `implementation.md` §12 and `architecture.md` §27, screens are built inside complete vertical slices, not as an independent screen-first stream:
 
 1. **Pilot:** no production UI — manual order forms and a shared dispatch board substitute for Sections 7–10.
 2. **Foundation + Order core:** 7.1–7.10 (customer auth through tracking), 8.2–8.4 (vendor queue and picking), minimal 10.3–10.4 (vendor approval) so a real vendor can go live.
@@ -756,6 +822,8 @@ Per `architecture.md` §27, screens should be built in the same order as the bac
 5. **Operations:** 10.7–10.12 (monitor, intervention, support, reporting, audit), 8.9–8.11 (fuller vendor self-service), 7.12–7.18 (retention features: reorder, favourites, ratings, notifications centre).
 
 Each slice should ship a complete, supportable set of screens for its scope rather than a partial screen from every surface at once.
+
+Every implemented screen must also satisfy the API/error/idempotency contract in `implementation.md` §7, the role/privacy projection in §10, and the relevant end-to-end scenario in §13.2. A static happy-path screen is not complete.
 
 ## 19. Design review handoff
 
@@ -768,16 +836,21 @@ Each slice should ship a complete, supportable set of screens for its scope rath
 ### 19.2 Explicitly not in scope
 
 - Dark mode, dark navigation, or dark monitoring screens. The product remains light themed across every portal.
-- A multi-vendor cart, dark-store inventory, a fixed fast-delivery promise, sponsored placement, or automated route-optimisation visuals.
+- Automatic multi-pickup route consolidation, dark-store inventory, a fixed fast-delivery promise, sponsored placement, or automated route-optimisation visuals.
 - COD, pharmacy ordering, or a customer-visible pharmacy category until their separately defined risk, compliance, reconciliation, and support policies are approved.
 - A guarantee that every vendor can deliver to the 40 km outer cap. A vendor's zone, route serviceability, and available partner capacity determine actual eligibility.
 
 ### 19.3 Implementation tasks
 
-- [ ] **T1 (P1, human: ~1 day / CC: ~30 min)** — Customer checkout — implement the server-backed fee quote with route distance, included kilometres, per-kilometre rate, expiry, and no duplicate payment path.
+- [ ] **T0 (P1, human: ~3 days / CC: ~2 h)** — Customer quick-shopping shell — implement persistent address/fulfilment header, search, vendor-scoped Home shelves, category/subcategory navigation, inline idempotent `Add` controls, vendor-group creation, and the global multi-store cart bar.
+  - Surfaced by: Sections 3, 6, 7.2–7.8, 12.2, and 13.1.
+  - Files: customer navigation shell, Home/search/storefront/catalogue UI, cart state client, catalogue/serviceability API clients, interaction and accessibility tests.
+  - Verify: a returning customer can add a prior item and open cart without a page transition; every product exposes its vendor; another-vendor add creates an isolated group without changing existing groups; stale price/stock is rejected with recoverable inline feedback.
+
+- [ ] **T1 (P1, human: ~2 days / CC: ~1 h)** — Grouped customer checkout — implement per-vendor server quotes, combined authorization, independent vendor orders, route distance/fees, quote expiry, partial acceptance, allocation/refund recovery, and no duplicate payment path.
   - Surfaced by: Pass 2 and D30 payment recovery and delivery-fee decision.
   - Files: checkout UI, quote API client, pricing configuration, payment recovery tests.
-  - Verify: a 5 km quote displays ₹39; a 40 km quote displays ₹319; unavailable routes block checkout with a clear reason.
+  - Verify: each 5 km delivered group displays ₹39 and each 40 km group displays ₹319 under the pilot formula; unavailable routes block only the affected group; duplicate submit returns the same checkout; one vendor decline leaves accepted siblings active and shows the correct void/refund allocation.
 - [ ] **T2 (P1, human: ~1 day / CC: ~45 min)** — Shared UI foundations — implement the white/light tokens, Anek/Noto typography, component states, focus styles, and role-based density before portal screens.
   - Surfaced by: Passes 4–6 design-system and accessibility decisions.
   - Files: global design tokens, font loader, shared controls, visual regression fixtures.
@@ -786,7 +859,7 @@ Each slice should ship a complete, supportable set of screens for its scope rath
   - Surfaced by: Pass 6 responsive and equivalent-interaction decisions.
   - Files: end-to-end tests, accessibility tests, responsive fixtures, offline queue tests.
   - Verify: every critical task has a keyboard/list/form alternative to maps, cameras, QR scanning, and touch-only gestures.
-- [ ] **T4 (P2, human: ~1 day / CC: ~30 min)** — Localisation foundation — support English plus the pilot area's primary language for all core customer, vendor, partner, and Admin workflows.
+- [ ] **T4 (P2, human: ~1 day / CC: ~30 min)** — Localisation foundation — support English and Hindi for all core customer, vendor, partner, and Admin workflows.
   - Surfaced by: D29 launch-language decision.
   - Files: translation catalogues, locale formatter, font subsets, language QA checklist.
   - Verify: 30% longer translations, script rendering, prices, timers, and error flows fit without clipping.
@@ -805,4 +878,4 @@ Each slice should ship a complete, supportable set of screens for its scope rath
 
 **VERDICT:** Design review cleared. An engineering review is required before implementation.
 
-NO UNRESOLVED DECISIONS
+NO UNRESOLVED INTERACTION-DESIGN DECISIONS
