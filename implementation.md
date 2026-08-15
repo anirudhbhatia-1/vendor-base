@@ -43,24 +43,29 @@ These are product decisions, not suggestions:
 | Money | All values use integer minor units and explicit currency. Ledger history is append-only and balanced. |
 | Admin | Least privilege, attributable actions, and maker-checker approval for protected actions. |
 | Language/theme | English and Hindi; white/light visual theme only. |
+| Development sequence | Build and test locally inside the company first. Cloud non-production and production deployment require later approved gates; local completion never implies production readiness. |
 | Disabled scope | Pharmacy ordering, COD, automatic route optimization, cross-store route consolidation, owned inventory, sponsored ranking, and a 10-minute promise. |
 
 ## 3. Pre-build decision gates
 
 Implementation may build provider-neutral interfaces before these are decided, but production launch cannot pass the named gate.
 
-| ID | Decision | Owner | Blocks | Required evidence/output |
-|---|---|---|---|---|
-| D-01 | Launch neighbourhood and vendor cohort | Product/operations | Pilot recruitment and production zones | Named zones, 3–10 pilot vendors, initial catalogues, support hours |
-| D-02 | Primary client sequence | Product/engineering | Client repository scaffolding | Responsive web/PWA versus staged Android decision record |
-| D-03 | Backend framework and hosting | Engineering | Production foundation | Architecture decision record, cost envelope, rollback path |
-| D-04 | Payment and payout providers | Finance/engineering | Real authorization, capture, refund, payout | Sandbox contract tests and reconciliation statement format |
-| D-05 | Final fee/earning policies | Product/finance | Production quoting and ledger posting | Versioned formulas, rounding, tax, cancellation/refund examples |
-| D-06 | Delivery operating model | Operations/legal | Partner production launch | Engagement, insurance, safety, payout, incident ownership |
-| D-07 | Verification/document policy | Compliance/operations | Vendor/partner publication | Required documents, grace periods, expiry effects, appeal SLAs |
-| D-08 | Privacy and retention | Legal/security | Production personal data | Purpose, viewer, consent, retention/deletion schedule per data class |
-| D-09 | Support and approval thresholds | Operations/finance | Manual refunds/restrictions/config publication | Role matrix, staffed hours, SLAs, maker-checker thresholds |
-| D-10 | Recovery objectives | Engineering/operations | Public launch | RPO, RTO, restore test and incident escalation policy |
+| ID | Decision | Accountable owner | Due date | Blocks | Required evidence/output |
+|---|---|---|---|---|---|
+| D-01 | Launch neighbourhood and vendor cohort | Product/operations | — | Pilot recruitment and production zones | Named zones, 3–10 pilot vendors, initial catalogues, support hours |
+| D-02 | Primary clients and delivery sequence | Engineering Lead | **21 August 2026** | Public client release only; local scaffolding may proceed | Approved simultaneous Next.js PWA and Expo/React Native Android delivery with bounded shared code |
+| D-03 | Internal development technology foundation | Engineering Lead | **28 August 2026** | Hosting, shared cloud test/staging, recovery, and production foundation; local scaffolding may proceed | [ADR-001](docs/architecture/ADR-001-internal-development-stack.md), supported versions, local topology, compatibility and test gates |
+| D-04 | Provider simulators and future real-provider gate | Finance/engineering | **4 September 2026** | Real authorization, messaging, maps, storage, refund, payout, credentials, and external side effects; local simulators may proceed | [Simulator contracts](docs/providers/simulator-contracts.md), real-provider conformance and canary gates |
+| D-05 | Synthetic fee, earning, and settlement policy | Finance Lead | **11 September 2026** | Production quoting, tax, contracts, settlement, and payout; synthetic financial testing may proceed | [Versioned test policy and balanced examples](docs/finance/test-financial-policy.md) |
+| D-06 | Delivery operating model | Operations/legal | — | Partner production launch | Engagement, insurance, safety, payout, incident ownership |
+| D-07 | Verification/document policy | Compliance/operations | — | Vendor/partner publication | Required documents, grace periods, expiry effects, appeal SLAs |
+| D-08 | Privacy and retention | Legal/security | — | Production personal data | Purpose, viewer, consent, retention/deletion schedule per data class |
+| D-09 | Support and approval thresholds | Operations/finance | — | Manual refunds/restrictions/config publication | Role matrix, staffed hours, SLAs, maker-checker thresholds |
+| D-10 | Recovery objectives | Engineering/operations | — | Public launch | RPO, RTO, restore test and incident escalation policy |
+
+D-03 selects the internal server-side software toolkit but intentionally does not select a hosting provider. The implementation sequence is local company development and testing first, followed by a future explicitly approved shared non-production environment, then staging, and only later a separately approved production release.
+
+D-04 and D-05 approve deterministic simulators and synthetic money policy only. Future real adapters must pass the same contracts in sandbox and controlled company-account tests before a limited production canary. No synthetic amount is a production price, tax position, contract, or authorization to move money.
 
 The pilot formula of ₹15 including 2 route km plus ₹8 per additional route km, with a 40 route-km outer cap, is a versioned validation policy until D-05 is approved.
 
@@ -201,10 +206,16 @@ All durations below are launch defaults stored as versioned configuration, not c
 | `fulfilment.consolidated_pickup_enabled` | `false` | Cannot be enabled without routing, custody, fee-allocation, and recovery approval |
 | `substitution.default` | `NONE` | Customer may opt into another rule per item/group |
 | `schedule.window_seconds` | 3600 | Capacity-backed vendor/category override allowed |
-| `delivery.base_fee_minor` | 1500 | Validation formula only until D-05 |
-| `delivery.included_distance_metres` | 2000 | Validation formula only until D-05 |
-| `delivery.per_km_minor` | 800 | Apply after included distance using versioned rounding |
-| `delivery.outer_cap_metres` | 40000 | Outer cap; vendor/zone/capacity may be smaller |
+| `delivery.base_fee_minor` | 1500 | Approved synthetic D-05 policy only; production remains blocked |
+| `delivery.included_distance_metres` | 2000 | Included distance in the approved synthetic D-05 formula |
+| `delivery.per_km_minor` | 800 | Synthetic proportional distance rate using versioned integer rounding |
+| `delivery.outer_cap_metres` | 40000 | Synthetic outer boundary; vendor/zone/capacity may be smaller |
+| `vendor.platform_fee_minor` | 500 | Synthetic completed-order fee; zero on full refund/failure |
+| `partner.wait_included_seconds` | 300 | First 5 trusted-arrival minutes included |
+| `partner.wait_per_minute_minor` | 100 | Synthetic completed-minute earning after included time |
+| `partner.wait_auto_cap_minor` | 1000 | Longer waits require an approved adjustment |
+| `settlement.eligibility_seconds` | 86400 | Synthetic 24-hour hold when no affected exception remains |
+| `payout.batch_local_time` | `18:00` | Daily fake batch in `Asia/Kolkata` |
 | `payment.cod_enabled` | `false` | No client or endpoint exposes COD in MVP |
 | `pharmacy.ordering_enabled` | `false` | Separate future compliance release only |
 
@@ -623,7 +634,7 @@ Each slice must include schema, migration, module logic, API, UI, jobs, permissi
 
 | Slice | Delivers | Depends on | Exit gate |
 |---|---|---|---|
-| S0 Repository foundation | Toolchain, environments, CI, config validation, logging, health, migration framework | D-02, D-03 | Build/test/deploy to non-production; rollback verified |
+| S0 Repository foundation | Toolchain, local environments, config validation, logging, health, migration framework | D-02, D-03 | Local build and tests pass; shared non-production deployment remains gated |
 | S1 Identity and access | OTP, sessions, roles/capabilities, staff membership, consent | S0 | Cross-role authorization tests pass; OTP abuse controls observable |
 | S2 Vendor and catalogue | Vendor/location, publication, zones/hours, product/import, availability freshness | S1 | One approved vendor is discoverable; another vendor cannot access it |
 | S3 Customer discovery/cart | Address eligibility, search, storefront, multi-store groups, preferences | S2 | Three groups persist; stale/invalid line recovery is isolated |

@@ -212,12 +212,11 @@ Improve cross-store delivery consolidation, then consider B2B ordering, more sto
 - Delivery-partner employment or contracting model
 - Payment and payout providers plus reconciliation behavior; COD remains disabled
 - Vendor and partner verification requirements
-- Primary launch client: responsive web, Android app, or both
-- Backend framework and hosting
+- Hosting, shared-environment, rollback, recovery, and production cost direction; the internal client and technology stack are approved in D-02 and D-03
 - Privacy/retention schedule, support/approval thresholds, and recovery objectives
 
 These gates do not permit engineers to invent production policy. Their IDs, owners, blocked stages, and required outputs are maintained in `implementation.md` §3. Provider-neutral interfaces and synthetic test adapters may be built before provider selection.
 
 ## Project status
 
-The next product milestone is a concierge-style pilot, followed by the vertical slices in `implementation.md` §12. No application code or production technology stack exists yet; implementation begins only when the entry gate for a slice is satisfied.
+The next product milestone is a concierge-style pilot, followed by the vertical slices in `implementation.md` §12. Application development and testing will happen locally inside the company first using synthetic data and provider-neutral or sandbox integrations. Shared cloud testing, staging, and production are later gated stages; choosing a hosting provider does not authorize immediate production deployment.

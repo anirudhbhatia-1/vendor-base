@@ -10,7 +10,7 @@
 
 This document describes a practical technical architecture for a vendor-first local commerce platform. Customers order from a named neighbourhood shop, vendors manage and fulfil their own catalogue, delivery partners provide shared last-mile capacity, and administrators control trust, finance, and exceptions.
 
-The project has no production code or selected technology stack yet. The components and technologies below are recommendations. They should be confirmed through architecture decision records before implementation.
+The project has no production code yet. D-02 and D-03 approve the internal-development technology foundation; hosting and every shared or production environment remain undecided. [ADR-001](docs/architecture/ADR-001-internal-development-stack.md) is authoritative where the older recommendations below differ.
 
 ## 2. Architecture goals
 
@@ -620,16 +620,19 @@ Distributed traces cover checkout, order acceptance, dispatch, payment, and sett
 
 ## 22. Environments and delivery pipeline
 
-Use separate development, staging, and production environments with separate data and provider credentials.
+Development starts locally on company-controlled machines using documented, reproducible tooling such as containers, local PostgreSQL/PostGIS, local Redis, synthetic data, and sandbox or fake provider adapters. The team must be able to build, run, test, migrate, seed, and reset the application locally without production credentials or production data.
+
+Local development and tests come before cloud deployment. Passing locally does not authorize publishing the system or imply production readiness. After the relevant decision gates are approved, add a shared non-production environment for integration testing, then staging, and only later production. Shared development, staging, and production use separate data and provider credentials.
 
 The continuous delivery pipeline should:
 
 1. Run formatting, type checks, unit tests, integration tests, dependency scans, and secret scans.
-2. Build immutable application images.
+2. Build immutable application images that use the same application configuration contract verified locally.
 3. Apply backward-compatible database migrations before or alongside deployment.
-4. Deploy to staging and run smoke tests for login, store discovery, order placement, vendor acceptance, assignment, and refund.
-5. Promote the same artifact to production using a controlled rollout.
-6. Verify health metrics and support rollback without reversing already-applied business events.
+4. Deploy first to an approved shared non-production environment and run integration tests with synthetic data and sandbox providers.
+5. Deploy the same artifact to staging and run smoke tests for login, store discovery, order placement, vendor acceptance, assignment, and refund.
+6. Promote the same artifact to production only after separate launch approval using a controlled rollout.
+7. Verify health metrics and support rollback without reversing already-applied business events.
 
 Database migrations follow expand-and-contract changes: add compatible fields first, deploy readers/writers, migrate data, then remove old fields in a later release.
 
@@ -649,19 +652,19 @@ The minimum layer coverage, 15 mandatory end-to-end scenarios, per-slice gates, 
 
 Critical invariants should use property-based tests where practical, especially money conservation, idempotency, and legal state transitions.
 
-## 24. Recommended technology baseline
+## 24. Approved internal-development technology baseline
 
-This is a starting recommendation, not an approved decision:
+The internal-development choices below are approved by D-02, D-03, and [ADR-001](docs/architecture/ADR-001-internal-development-stack.md). Managed services and production deployment remain recommendations only.
 
 | Layer | Recommendation | Reason |
 |---|---|---|
 | Web clients | Next.js with TypeScript | Responsive web, server-rendered store pages, shared language with backend |
-| Delivery client | Progressive web app first; React Native when background capabilities require it | Validates workflow before native-app investment |
-| Backend | TypeScript modular monolith using NestJS or Fastify | Strong module structure, validation, ecosystem, and team accessibility |
-| Database | Managed PostgreSQL with PostGIS | Transactions plus geographic queries |
-| Cache/jobs | Managed Redis with a durable job library | Rate limiting, cache, timeouts, retries, scheduled work |
-| Object storage | S3-compatible managed storage | Private documents, product images, evidence, lifecycle rules |
-| Deployment | Managed containers and managed database | Operational control without early cluster administration |
+| Android client | Expo and React Native with TypeScript, developed alongside the PWA | Native Android path with shared contracts but platform-specific UX |
+| Backend | NestJS with TypeScript and Fastify in a modular monolith | Strong module structure, stateless APIs, independent workers, and later extraction boundaries |
+| Database | Local PostgreSQL 18 with PostGIS 3.6 | Transactions plus geographic queries; future managed provider undecided |
+| Cache/jobs | Valkey preferred with BullMQ; Redis 7.2 compatibility fallback | Free local cache, timeouts, retries, and scheduled work |
+| Object storage | Local filesystem adapter | Free synthetic testing behind a replaceable interface |
+| Deployment | Standard local `compose.yaml` through Podman Desktop or Docker Compose | Reproducible company development; hosting remains undecided |
 | Observability | OpenTelemetry plus managed logs, metrics, traces, and error reporting | Provider-neutral instrumentation and faster incident diagnosis |
 
 A serverless platform is suitable for web rendering and light APIs, but long-running workers, connection limits, queue processing, and background location workloads must be evaluated explicitly.
@@ -676,9 +679,9 @@ One backend reduces deployment, tracing, data-consistency, and on-call complexit
 
 PostgreSQL full-text search plus `pg_trgm` can support initial vendor, brand, category, product, common-misspelling, synonym, and transliteration search. Store normalized recent-search references and privacy-safe funnel events for zero-result, result-click, and search-to-cart analysis. A dedicated search engine may later improve ranking and scale, but adds synchronization and operations work before search volume is known.
 
-### Responsive web before four native apps
+### Simultaneous PWA and Android development
 
-Web clients reduce launch cost and keep workflows easy to change. The trade-off is weaker background processing and device integration, especially for delivery partners. Native delivery functionality should follow evidence from the pilot.
+The owner selected a Next.js PWA and an Expo/React Native Android application in the same development phase. This costs more coordination than a sequential client rollout. Shared contracts reduce semantic drift, while screens, navigation, offline behaviour, accessibility, and device integration remain platform-specific.
 
 ### Manual dispatch before route optimisation
 
@@ -692,8 +695,8 @@ Customers may combine several named stores in one cart and one checkout, but the
 
 The canonical gate register is `implementation.md` §3. The list below explains the architecture subjects that those gates must settle before their affected production slice is enabled:
 
-1. Primary launch client: responsive web, installable PWA, Android app, or a staged combination.
-2. Backend framework and hosting provider.
+1. Public release sequence and distribution controls for the approved PWA and Android clients.
+2. Hosting provider, shared-environment topology, rollback, recovery, operating cost, and production capacity.
 3. Payment gateway, payout provider, grouped-authorization/partial-capture or refund behavior, and allocation reconciliation. COD remains disabled.
 4. Delivery-distance source, fee formula, rounding rules, maximum radius, and quote expiry.
 5. Vendor fee amount and the exact definition of a successfully completed order.
