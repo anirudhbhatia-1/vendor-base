@@ -1,5 +1,5 @@
 # Infrastructure
 
-This directory owns local, free and reproducible infrastructure definitions. Step 2.4 will add the standard `compose.yaml` integration for PostgreSQL/PostGIS and Valkey, with Redis 7.2 in an explicit compatibility profile.
+This directory owns local, free and reproducible infrastructure responsibilities. The root `compose.yaml` provides the Step 2.4 PostgreSQL/PostGIS local and test services. `online-test/` provides the Step 2.6 controlled deployment skeleton for the API and worker on OCI; it does not contain credentials or claim that provider resources exist. Queue infrastructure is intentionally not bundled into the database step; Valkey and the explicit Redis compatibility profile remain later queue-foundation work.
 
-Hosting, shared environments, production secrets, domains, certificates, deployment and paid resources remain blocked. Infrastructure definitions must not contain credentials or real data.
+The online-test account and deployment procedure is in `runbooks/online-test/README.md`. Production secrets, production domains, production certificates, public launch and paid resources remain blocked. Infrastructure definitions must not contain credentials or real data.

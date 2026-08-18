@@ -9,6 +9,7 @@ const ignoredPaths = [
   '**/.pnpm-store/**',
   '**/node_modules/**',
   '**/dist/**',
+  '**/out/**',
   '**/build/**',
   '**/coverage/**',
   '**/test-results/**',
@@ -34,9 +35,15 @@ export default tseslint.config(
     },
   },
   {
-    files: ['eslint.config.mjs', 'tooling/**/*.mjs', 'apps/*/scripts/**/*.mjs'],
+    files: [
+      'eslint.config.mjs',
+      'tooling/**/*.mjs',
+      'apps/*/scripts/**/*.mjs',
+      'database/scripts/**/*.mjs',
+    ],
     languageOptions: {
       globals: {
+        AbortSignal: 'readonly',
         Buffer: 'readonly',
         console: 'readonly',
         fetch: 'readonly',

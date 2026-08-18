@@ -1,6 +1,6 @@
 # Local application entry points
 
-**Scope:** Phase 2 Step 2.3 company-local shells
+**Scope:** Phase 2 Steps 2.3–2.4 company-local entry points
 
 **Production authority:** None
 
@@ -46,7 +46,15 @@ Start the worker process with:
 pnpm --filter @neighbourhood-store/worker dev
 ```
 
-The worker starts a NestJS application context, logs a structured `worker.ready` event, installs SIGINT/SIGTERM shutdown hooks, and logs `worker.stopped` after cleanup. BullMQ is pinned but no queue is registered until the Step 2.4 stateful foundation is approved and available. The readiness event therefore declares `queue: not_configured` and `production_ready: false`.
+The worker starts a NestJS application context, logs a structured `worker.ready` event, installs SIGINT/SIGTERM shutdown hooks, and logs `worker.stopped` after cleanup. BullMQ is pinned but no queue is registered; queue configuration remains later work. The readiness event therefore declares `queue: not_configured` and `production_ready: false`.
+
+## Database and PostGIS
+
+Podman Desktop is the preferred free runtime. `pnpm db:up` starts the persistent local PostgreSQL/PostGIS service on `127.0.0.1:5432`; `pnpm db:down` stops it without deleting its named volume. Apply the reviewed blank baseline with `pnpm db:migrate`, inspect it with `pnpm db:status`, and load deterministic synthetic fixtures with `pnpm db:seed`.
+
+`pnpm db:verify` uses a separate tmpfs-backed database on `127.0.0.1:5433`. It verifies PostgreSQL 18, PostGIS 3.6, forward migration, safe baseline rollback, forward migration again, repeated deterministic seed, fixture reset, and rebuild from zero. See `database/README.md` before using the guarded local rebuild command.
+
+The API remains deliberately disconnected from PostgreSQL at Step 2.4, so its readiness response continues to report `database: not_configured` and `production_ready: false`.
 
 ## Structured logs and sensitive values
 
@@ -54,10 +62,12 @@ API and worker logs are one JSON object per line. Startup events include service
 
 ## Verification
 
-- `pnpm typecheck` checks every executable workspace under the strict TypeScript baseline.
+- `pnpm typecheck` refreshes each PWA's generated production route declarations and checks every executable workspace under the strict TypeScript baseline. This avoids mixing stale development and production route globals after alternating `next dev` and `next build`.
 - `pnpm lint` checks source, imports and exact dependency policy.
 - `pnpm build` proves all four PWAs, all four Android shells, the API and the worker compile/export.
+- `pnpm build:verify` additionally starts each built PWA on its loopback port, requests its role-specific page, verifies each Android Hermes export, and cleans up every process it starts.
 - `pnpm test:integration` probes API liveness/readiness, verifies API and worker graceful shutdown, checks that the log sentinel is absent, and proves `APP_ENV=production` fails closed.
+- `pnpm db:verify` runs the destructive database lifecycle only against the exact disposable test database.
 - `pnpm check` combines formatting, lint, types, repository controls, available tests and secret scanning.
 
-Database migrations, synthetic seeds, queue connectivity, provider adapters, authentication, authorization, real OTP delivery and every product workflow belong to later numbered steps.
+Queue connectivity, API database wiring, provider adapters, authentication, authorization, real OTP delivery and every product workflow belong to later numbered steps.

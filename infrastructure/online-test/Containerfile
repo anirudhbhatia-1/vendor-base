@@ -1,0 +1,22 @@
+# Build with a digest-pinned Node image, for example:
+# --build-arg NODE_IMAGE=node:24-bookworm-slim@sha256:<verified-digest>
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE} AS builder
+
+ARG APP_PACKAGE
+RUN test -n "${APP_PACKAGE}"
+WORKDIR /workspace
+COPY . .
+RUN corepack enable \
+  && corepack prepare pnpm@11.19.0 --activate \
+  && pnpm install --frozen-lockfile \
+  && pnpm --filter "${APP_PACKAGE}" build \
+  && pnpm --filter "${APP_PACKAGE}" deploy --prod /opt/release
+
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production
+WORKDIR /opt/app
+COPY --from=builder --chown=node:node /opt/release/ ./
+USER node
+CMD ["node", "dist/main.js"]

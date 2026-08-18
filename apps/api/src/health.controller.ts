@@ -12,6 +12,7 @@ export class HealthController {
       service: 'marketplace-api',
       version: this.config.version,
       environment: this.config.environment,
+      data_mode: this.config.dataMode,
     } as const;
   }
 
@@ -22,6 +23,7 @@ export class HealthController {
       service: 'marketplace-api',
       version: this.config.version,
       environment: this.config.environment,
+      data_mode: this.config.dataMode,
       production_ready: false,
       checks: {
         process: 'ready',

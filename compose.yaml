@@ -1,0 +1,49 @@
+name: neighbourhood-store-local
+
+services:
+  database:
+    image: postgis/postgis:18-3.6@sha256:db8c151a4e1f4686b1a985a3490cf96f9f8c8c2725f58a46ef7a57e52f167cc3
+    platform: linux/amd64
+    restart: 'no'
+    environment:
+      POSTGRES_DB: neighbourhood_store_local
+      POSTGRES_PASSWORD: marketplace_local_only
+      POSTGRES_USER: marketplace_local
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - marketplace_postgres_local:/var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test "$$(cat /proc/1/comm)" = postgres && pg_isready -U marketplace_local -d neighbourhood_store_local
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  database-test:
+    profiles: ['test']
+    image: postgis/postgis:18-3.6@sha256:db8c151a4e1f4686b1a985a3490cf96f9f8c8c2725f58a46ef7a57e52f167cc3
+    platform: linux/amd64
+    restart: 'no'
+    environment:
+      POSTGRES_DB: neighbourhood_store_test
+      POSTGRES_PASSWORD: marketplace_test_only
+      POSTGRES_USER: marketplace_test
+    ports:
+      - '127.0.0.1:5433:5432'
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test "$$(cat /proc/1/comm)" = postgres && pg_isready -U marketplace_test -d neighbourhood_store_test
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  marketplace_postgres_local:
+    name: neighbourhood_store_postgres_local

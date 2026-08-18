@@ -1,0 +1,31 @@
+{
+  "name": "@neighbourhood-store/database",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Reviewed PostgreSQL/PostGIS migrations and deterministic company-local fixtures.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "migration:up": "tsx scripts/migrate.ts up --target local",
+    "migration:down": "tsx scripts/migrate.ts down --steps 1 --target local",
+    "migration:status": "tsx scripts/migrate.ts status --target local",
+    "migration:online-test:status": "tsx scripts/migrate.ts status --target online-test",
+    "migration:online-test:up": "tsx scripts/migrate.ts up --target online-test",
+    "rebuild": "tsx scripts/rebuild.ts --target local",
+    "reset": "tsx scripts/reset.ts --target local",
+    "seed": "tsx scripts/seed.ts --target local",
+    "test:unit": "tsx scripts/verify-static.ts",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "verify:lifecycle": "tsx scripts/verify-lifecycle.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.2",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.0",
+    "drizzle-kit": "0.31.10",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3"
+  }
+}

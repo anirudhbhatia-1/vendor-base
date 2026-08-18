@@ -9,8 +9,8 @@ Unlike dark-store quick-commerce platforms, this product does not own inventory 
 - Delivery Partner App / Portal
 - Admin Console
 
-> **Status:** Company-local development scaffold. Eight role clients, the API, and the worker have executable shells; domain workflows and production integrations do not exist yet.
-> **Documentation baseline:** 17 August 2026 · Phase 2 Step 2.3
+> **Status:** Phase 2 Steps 2.1–2.5 are repository-complete for company development. Step 2.6 now has a synthetic-only, versioned online-test deployment skeleton; provider accounts, external deployment, backup/restore and rollback evidence are still pending.
+> **Documentation baseline:** 18 August 2026 · Phase 2 Step 2.6 in progress
 
 ## Start here
 
@@ -206,6 +206,10 @@ Improve cross-store delivery consolidation, then consider B2B ordering, more sto
 - [End-to-End Workflow Architecture](workflow.md) joins the customer, vendor, delivery-partner, admin, category, order, payment, settlement, exception, and support journeys from entry through final closure.
 - [Implementation Blueprint](implementation.md) is the executable contract for terminology, IDs, state records, timers, endpoints, persistence, workers, permissions, build slices, tests, releases, and rollback.
 - [Test-to-Production Replacement Register](docs/production/test-to-production-replacement-register.md) lists every known synthetic, fake, local-only, or unproven component and the evidence required before production use.
+- [Free Online Company-Test Migration Plan](docs/production/free-online-company-test-migration-plan.md) maps every local component to a researched free-tier or open-source online candidate, defines the implementation/change structure, and identifies unavoidable production costs.
+- [ADR-003](docs/architecture/ADR-003-free-online-company-test-stack.md) records Cloudflare, Supabase Free, OCI Always Free, FCM/Web Push, Grafana Cloud, PostHog, and GitHub Free as the selected future online company-test provider set; it is not a production or deployment approval.
+- [Continuous Integration](docs/engineering/continuous-integration.md) documents the least-privilege GitHub Actions gate, safe evidence, local equivalent, and external activation requirements.
+- [Online-Test Deployment](docs/engineering/online-test-deployment.md) documents the controlled Cloudflare/Supabase/OCI skeleton, and the [setup runbook](runbooks/online-test/README.md) gives the account, deployment, health, evidence, and rollback sequence.
 - [AI Rules and Boundaries](rules.md) defines what AI contributors may do, must verify, must not do, and when they must stop for approval.
 - Mercato was reviewed as product inspiration for local-store discovery, named merchant selection, pickup/delivery, and merchant ecommerce tooling. It is not a specification to copy.
 
@@ -224,4 +228,4 @@ These gates do not permit engineers to invent production policy. Their IDs, owne
 
 ## Project status
 
-Phase 2 Step 2.3 provides executable company-local shells only. The next numbered engineering step is 2.4, the local PostgreSQL/PostGIS migration and deterministic synthetic-seed flow; it must not begin without the project owner's instruction. Product validation remains a concierge-style pilot followed by the vertical slices in `implementation.md` §12. Shared cloud testing, staging, and production are later gated stages; choosing a hosting provider does not authorize immediate production deployment.
+Phase 2 Steps 2.1–2.5 are verified complete within their approved repository/local scope. Step 2.3 intentionally delivers dependency-free entry-point shells, so `database: not_configured`, `queue: not_configured`, and the absence of domain workflows are later-step boundaries rather than incomplete Step 2.3 work. Step 2.5 defines a blocking GitHub Actions workflow and proves the same commands locally; the workflow and branch protection remain externally unproven until an authorized push and GitHub run. The next numbered engineering step is 2.6 and must not begin without the project owner's instruction. Product validation remains a concierge-style pilot followed by the vertical slices in `implementation.md` §12. Shared online testing, staging, and production are later gated stages; selecting providers does not authorize deployment.

@@ -62,4 +62,26 @@ No version in this document selects a hosting provider or authorizes production 
 | RxJS | `7.8.2` | API and worker manifests and `pnpm-lock.yaml` |
 | reflect-metadata | `0.2.2` | API and worker manifests and `pnpm-lock.yaml` |
 
-Database images and product test-runner patches remain unresolved until their owning numbered step introduces them. Do not add placeholder version claims to the lockfile.
+## Resolved Step 2.4 database pins
+
+| Component | Exact repository pin | Recorded in |
+|---|---:|---|
+| PostgreSQL/PostGIS image | `postgis/postgis:18-3.6@sha256:db8c151a4e1f4686b1a985a3490cf96f9f8c8c2725f58a46ef7a57e52f167cc3` | `compose.yaml` |
+| PostgreSQL/PostGIS contents | PostgreSQL `18.x`, PostGIS `3.6.4` | Image tag plus lifecycle version assertions |
+| Drizzle ORM | `0.45.2` | `database/package.json` and `pnpm-lock.yaml` |
+| Drizzle Kit | `0.31.10` | `database/package.json` and `pnpm-lock.yaml` |
+| node-postgres | `8.23.0` | `database/package.json` and `pnpm-lock.yaml` |
+| node-postgres types | `8.20.0` | `database/package.json` and `pnpm-lock.yaml` |
+
+## Resolved Step 2.5 CI pins
+
+| Component | Exact repository pin | Recorded in |
+|---|---:|---|
+| GitHub hosted runner | `ubuntu-24.04` label with a 30-minute job timeout | `.github/workflows/ci.yml` |
+| `actions/checkout` | `7.0.1` at `3d3c42e5aac5ba805825da76410c181273ba90b1` | `.github/workflows/ci.yml` |
+| `pnpm/setup` | `2.0.2` at `bf5bfae7d43e2b2b1191383f5005cd3fb69b848d` | `.github/workflows/ci.yml` |
+| `actions/upload-artifact` | `7.0.1` at `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | `.github/workflows/ci.yml` |
+
+GitHub Actions remain pinned to reviewed full commit hashes. Dependabot may propose updates, but the CI workflow verifier and mandatory quality gate must pass before an action pin changes.
+
+Product test-runner patches remain unresolved until their owning numbered step introduces them. Do not add placeholder version claims to the lockfile.

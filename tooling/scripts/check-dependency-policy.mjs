@@ -13,7 +13,7 @@ function readJson(file) {
 }
 
 function workspaceManifestFiles(root) {
-  const files = [path.join(root, 'package.json')];
+  const files = [path.join(root, 'package.json'), path.join(root, 'database', 'package.json')];
   for (const group of ['apps', 'packages']) {
     const groupRoot = path.join(root, group);
     for (const entry of fs.readdirSync(groupRoot, { withFileTypes: true })) {

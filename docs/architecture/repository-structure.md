@@ -1,6 +1,6 @@
 # Repository Structure and Import Boundaries
 
-**Status:** Executable through Step 2.3 for company-local development
+**Status:** Phase 2 Steps 2.1–2.5 verified complete within repository/local scope
 
 **Production authority:** None
 
@@ -26,7 +26,7 @@ packages/
 ├── ui-tokens/          Basic cross-platform design tokens
 └── test-data/          Deterministic synthetic builders for tests only
 
-database/               Reviewed migrations, PostGIS and synthetic seed lifecycle
+database/               Reviewed migrations, PostGIS, Drizzle metadata and synthetic seed lifecycle
 infrastructure/         Local Compose and future separately approved environment definitions
 tests/                  Cross-application integration, E2E, conformance and performance tests
 runbooks/               Containment, recovery, reconciliation and rollback procedures
@@ -78,6 +78,7 @@ All local workspace dependencies use explicit `workspace:` versions. No applicat
 | Command | Responsibility |
 |---|---|
 | `pnpm build` | Build every package that defines a build script |
+| `pnpm build:verify` | Build every executable workspace, start and request every PWA shell, and verify every Android export |
 | `pnpm lint` | Run ESLint plus import-boundary and dependency-policy checks |
 | `pnpm typecheck` | Apply the strict root TypeScript configuration |
 | `pnpm test:unit` | Run every package unit-test script |
@@ -87,8 +88,13 @@ All local workspace dependencies use explicit `workspace:` versions. No applicat
 | `pnpm security:secrets` | Scan tracked and unignored files for high-confidence secret shapes |
 | `pnpm security:dependencies` | Query the pnpm advisory service for high-severity dependency issues |
 | `pnpm dev` | Start application development scripts in parallel |
+| `pnpm db:up` / `pnpm db:down` | Start or stop the persistent loopback-only local PostgreSQL/PostGIS service |
+| `pnpm db:migrate` / `pnpm db:rollback` | Apply or safely revert paired reviewed migrations |
+| `pnpm db:seed` / `pnpm db:reset` | Load or clear only deterministic synthetic fixture state |
+| `pnpm db:verify` | Prove up/down/up, deterministic reset and rebuild from zero in the disposable test database |
+| `pnpm verify:entrypoints` | Verify previously built PWA and Android entry-point artifacts without external services |
 
-The commands are stable orchestration entry points. Step 2.2 makes formatting, linting, strict TypeScript defaults, repository-control tests and security checks operational. Step 2.3 adds static PWA builds, Android bundle exports, API/worker compilation, API health smoke tests, worker lifecycle smoke tests, secret-log sentinels and explicit rejection of production mode. Product-level unit tests remain empty until domain modules arrive.
+The commands are stable orchestration entry points. Step 2.2 makes formatting, linting, strict TypeScript defaults, repository-control tests and security checks operational. Step 2.3 adds static PWA builds, Android bundle exports, API/worker compilation, API health smoke tests, worker lifecycle smoke tests, secret-log sentinels and explicit rejection of production mode. Step 2.4 adds isolated database lifecycle commands and static safety controls. Product-level unit tests remain empty until domain modules arrive.
 
 ## Toolchain pins
 

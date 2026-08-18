@@ -17,6 +17,7 @@ async function bootstrap(): Promise<void> {
   await app.listen(config.port, config.host);
   apiLogger.event('api.started', {
     environment: config.environment,
+    data_mode: config.dataMode,
     host: config.host,
     port: config.port,
     version: config.version,

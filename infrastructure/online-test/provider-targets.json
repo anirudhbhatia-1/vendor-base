@@ -1,0 +1,27 @@
+{
+  "environment": "online-test",
+  "dataClassification": "synthetic-only",
+  "status": "selected-not-provisioned",
+  "providers": {
+    "sourceAndCi": "GitHub Free",
+    "pwaAndCdn": "Cloudflare Pages",
+    "objectStorage": "Cloudflare R2",
+    "database": "Supabase Free PostgreSQL/PostGIS",
+    "compute": "OCI Always Free",
+    "queue": "Valkey on OCI",
+    "malwareScanning": "ClamAV on OCI",
+    "push": "FCM and Web Push",
+    "observability": "Grafana Cloud Free",
+    "analytics": "PostHog Free"
+  },
+  "notYetConnected": [
+    "objectStorage",
+    "database",
+    "queue",
+    "malwareScanning",
+    "push",
+    "observability",
+    "analytics"
+  ],
+  "credentialPolicy": "Provider credentials are stored only in provider secret stores or OCI Vault and are never committed."
+}

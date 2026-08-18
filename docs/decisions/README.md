@@ -4,9 +4,9 @@ This directory controls the decisions that must not be invented while building t
 
 ## What these records do
 
-- `register.md` is the overview of decisions D-01 through D-10.
+- `register.md` is the overview of decisions D-01 through D-11.
 - `template.md` defines the required structure for every decision record.
-- `D-01.md` through `D-10.md` contain the evidence and approval history for individual decisions.
+- `D-01.md` through `D-11.md` contain the evidence and approval history for individual decisions.
 
 An accountable owner is responsible for moving a decision to approval. Contributors and reviewers may help, but shared responsibility never replaces the one named owner.
 

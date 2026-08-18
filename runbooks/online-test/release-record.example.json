@@ -1,0 +1,22 @@
+{
+  "environment": "online-test",
+  "dataMode": "synthetic",
+  "releaseVersion": "FULL_LOWERCASE_40_CHARACTER_GIT_SHA",
+  "operator": "COMPANY_ACCOUNT_NAME",
+  "startedAt": "ISO_8601_TIMESTAMP",
+  "completedAt": "ISO_8601_TIMESTAMP",
+  "ciRunUrl": "HTTPS_URL_WITHOUT_CREDENTIALS",
+  "cloudflareDeploymentIds": {
+    "customer": "DEPLOYMENT_ID",
+    "vendor": "DEPLOYMENT_ID",
+    "partner": "DEPLOYMENT_ID",
+    "admin": "DEPLOYMENT_ID"
+  },
+  "apiImageDigest": "sha256:64_HEX_CHARACTERS",
+  "workerImageDigest": "sha256:64_HEX_CHARACTERS",
+  "databaseMigration": "PASSED_OR_NOT_RUN",
+  "healthEvidencePath": ".online-test-evidence/GIT_SHA.json",
+  "rollbackRehearsed": false,
+  "backupRestoreRehearsed": false,
+  "result": "PENDING"
+}

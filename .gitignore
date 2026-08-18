@@ -4,12 +4,15 @@ node_modules/
 
 # Build and test output
 .next/
+out/
 .expo/
 dist/
 build/
 coverage/
 test-results/
 playwright-report/
+.ci-artifacts/
+.online-test-evidence/
 *.tsbuildinfo
 
 # Local runtime data
@@ -21,6 +24,8 @@ uploads/
 .env
 .env.*
 !.env.example
+infrastructure/online-test/release.env
+infrastructure/online-test/secrets/
 *.pem
 *.key
 *.p12

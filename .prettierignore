@@ -3,6 +3,7 @@
 .pnpm-store/
 node_modules/
 .next/
+out/
 next-env.d.ts
 .expo/
 dist/

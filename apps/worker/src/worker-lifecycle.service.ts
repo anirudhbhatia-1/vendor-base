@@ -14,6 +14,7 @@ export class WorkerLifecycleService implements OnApplicationBootstrap, OnApplica
     const config = loadRuntimeConfig();
     workerLogger.event('worker.ready', {
       environment: config.environment,
+      data_mode: config.dataMode,
       version: config.version,
       queue: 'not_configured',
       production_ready: false,
