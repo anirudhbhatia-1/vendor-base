@@ -9,6 +9,16 @@ function available(command, prefix) {
 }
 
 function runtime() {
+  const requested = process.env.COMPOSE_RUNTIME;
+  if (requested !== undefined) {
+    if (requested !== 'podman' && requested !== 'docker') {
+      throw new Error('COMPOSE_RUNTIME must be podman or docker when set');
+    }
+    if (!available(requested, ['compose'])) {
+      throw new Error(`${requested} compose is unavailable`);
+    }
+    return { command: requested, prefix: ['compose'] };
+  }
   if (available('podman', ['compose'])) return { command: 'podman', prefix: ['compose'] };
   if (available('docker', ['compose'])) return { command: 'docker', prefix: ['compose'] };
   throw new Error('Install and start Podman Desktop or Docker before running Compose commands');

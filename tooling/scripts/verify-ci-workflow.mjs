@@ -53,6 +53,15 @@ export function validateWorkflow(text) {
   if (!/retention-days:\s+7/.test(text)) {
     errors.push('safe CI evidence must expire after seven days');
   }
+  if (!/COMPOSE_RUNTIME:\s+docker/.test(text)) {
+    errors.push('hosted CI must explicitly select the running Docker daemon');
+  }
+  if (!/include-hidden-files:\s+true/.test(text)) {
+    errors.push('the reviewed hidden evidence files must be explicitly uploadable');
+  }
+  if (!text.includes('.ci-artifacts/summary.json') || !text.includes('.ci-artifacts/summary.md')) {
+    errors.push('artifact upload must be restricted to the two safe evidence files');
+  }
 
   for (const command of requiredCommands) {
     if (!text.includes(command)) errors.push(`missing mandatory command: ${command}`);
