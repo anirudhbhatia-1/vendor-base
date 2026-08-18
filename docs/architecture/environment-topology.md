@@ -1,6 +1,7 @@
 # Internal local environment topology
 
-**Status:** Approved for future Phase 2 scaffolding  
+**Status:** Host application processes executable; stateful services remain Step 2.4 work
+
 **External exposure:** Prohibited by default
 
 ## Developer workstation
@@ -25,6 +26,8 @@ Repository-local runtime data
 ```
 
 Host-run applications provide fast reload and direct debugging. Compose provides repeatable stateful infrastructure. Podman Desktop is the preferred free runtime, while the file must remain compatible with Docker Compose.
+
+The Step 2.3 API and worker deliberately report `production_ready: false`. Database, PostGIS, Valkey/Redis, BullMQ queue registration, storage, identity and provider adapters are not connected by this step. Their presence in the intended topology is not a claim that they are running.
 
 ## Environment names
 

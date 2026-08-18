@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security or privacy concern
+    url: https://github.com/anirudhbhatia-1/vendor-base/security
+    about: Use the repository's private security reporting path; never open a public issue with sensitive evidence.

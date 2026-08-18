@@ -1,0 +1,8 @@
+{
+  "name": "@neighbourhood-store/test-data",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deterministic synthetic data builders that are prohibited from production runtime imports.",
+  "license": "UNLICENSED",
+  "type": "module"
+}

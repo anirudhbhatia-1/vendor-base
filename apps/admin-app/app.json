@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Neighbourhood Store Admin",
+    "slug": "neighbourhood-admin-internal",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "neighbourhood-admin",
+    "android": {
+      "package": "com.neighbourhoodstore.internal.admin"
+    }
+  }
+}

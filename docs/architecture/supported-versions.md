@@ -35,3 +35,31 @@ This file records approved release families. Phase 2 must resolve exact dependen
 
 No version in this document selects a hosting provider or authorizes production use.
 
+## Resolved Step 2.1 toolchain pins
+
+| Component | Exact repository pin | Recorded in |
+|---|---:|---|
+| Node.js | `24.19.0` | `.node-version`, `.nvmrc`, root `package.json` |
+| pnpm | `11.19.0` | root `package.json` `packageManager` and `engines` |
+| TypeScript | `5.9.3` | root `package.json` and `pnpm-lock.yaml` |
+| ESLint | `10.8.1` | root `package.json` and `pnpm-lock.yaml` |
+| typescript-eslint | `8.67.0` | root `package.json` and `pnpm-lock.yaml` |
+| Prettier | `3.9.6` | root `package.json` and `pnpm-lock.yaml` |
+
+## Resolved Step 2.3 application pins
+
+| Component | Exact repository pin | Recorded in |
+|---|---:|---|
+| Next.js | `16.3.1` | PWA manifests and `pnpm-lock.yaml` |
+| Expo | `56.0.19` | Android manifests and `pnpm-lock.yaml` |
+| Expo Status Bar | `56.0.4` | Android manifests and `pnpm-lock.yaml` |
+| React / React DOM | `19.2.3` | client manifests and `pnpm-lock.yaml` |
+| React Native | `0.85.3` | Android manifests and `pnpm-lock.yaml` |
+| NestJS core/common/Fastify adapter | `11.2.1` | API and worker manifests and `pnpm-lock.yaml` |
+| NestJS BullMQ integration | `11.0.5` | worker manifest and `pnpm-lock.yaml` |
+| Fastify | `5.12.0` | API manifest and `pnpm-lock.yaml` |
+| BullMQ | `6.1.2` | worker manifest and `pnpm-lock.yaml` |
+| RxJS | `7.8.2` | API and worker manifests and `pnpm-lock.yaml` |
+| reflect-metadata | `0.2.2` | API and worker manifests and `pnpm-lock.yaml` |
+
+Database images and product test-runner patches remain unresolved until their owning numbered step introduces them. Do not add placeholder version claims to the lockfile.

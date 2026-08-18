@@ -1,0 +1,14 @@
+.git/
+.gstack/
+.pnpm-store/
+node_modules/
+.next/
+next-env.d.ts
+.expo/
+dist/
+build/
+coverage/
+test-results/
+playwright-report/
+pnpm-lock.yaml
+*.md

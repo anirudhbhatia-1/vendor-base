@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Neighbourhood Store Vendor",
+    "slug": "neighbourhood-vendor-internal",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "neighbourhood-vendor",
+    "android": {
+      "package": "com.neighbourhoodstore.internal.vendor"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "neighbourhood-store-marketplace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local company-development workspace for the Neighbourhood Store Marketplace.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "24.19.0",
+    "pnpm": "11.19.0"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "build": "pnpm -r --if-present run build",
+    "lint": "eslint . && pnpm boundaries:check && pnpm dependencies:check",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test:unit": "pnpm -r --if-present run test:unit",
+    "test:integration": "pnpm -r --if-present run test:integration",
+    "test:controls": "node tooling/scripts/check-boundaries.mjs --self-test && node tooling/scripts/check-dependency-policy.mjs --self-test && node tooling/scripts/scan-secrets.mjs --self-test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "boundaries:check": "node tooling/scripts/check-boundaries.mjs",
+    "dependencies:check": "node tooling/scripts/check-dependency-policy.mjs",
+    "security:secrets": "node tooling/scripts/scan-secrets.mjs",
+    "security:dependencies": "pnpm audit --audit-level high --ignore GHSA-w3rx-r6r6-pgpr --ignore GHSA-5p2g-fcmc-qvqq",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:controls && pnpm test:unit && pnpm test:integration && pnpm security:secrets",
+    "dev": "pnpm --parallel --filter './apps/*' --if-present run dev"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "eslint": "10.8.1",
+    "prettier": "3.9.6",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.67.0"
+  }
+}

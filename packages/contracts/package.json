@@ -1,0 +1,8 @@
+{
+  "name": "@neighbourhood-store/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Versioned HTTP and event contracts shared across applications.",
+  "license": "UNLICENSED",
+  "type": "module"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@neighbourhood-store/customer-pwa",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Customer Next.js PWA shell for company-local development.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev --hostname 127.0.0.1 --port 3100",
+    "start": "next start --hostname 127.0.0.1 --port 3100",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@neighbourhood-store/ui-tokens": "workspace:*",
+    "next": "16.3.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  }
+}

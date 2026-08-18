@@ -1,0 +1,36 @@
+name: Bug report
+description: Report reproducible incorrect behavior using synthetic evidence only.
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: Never include credentials, OTPs, real personal data, bank details, private documents or production exports.
+  - type: input
+    id: phase
+    attributes:
+      label: Phase and step
+      placeholder: '2.2'
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Include the role, state, safe synthetic references and exact mismatch.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Give deterministic commands or steps using synthetic fixtures.
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk and containment
+      description: State any money, privacy, safety, custody, provider or availability impact and the safe stop action.
+    validations:
+      required: true

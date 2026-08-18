@@ -681,7 +681,7 @@ PostgreSQL full-text search plus `pg_trgm` can support initial vendor, brand, ca
 
 ### Simultaneous PWA and Android development
 
-The owner selected a Next.js PWA and an Expo/React Native Android application in the same development phase. This costs more coordination than a sequential client rollout. Shared contracts reduce semantic drift, while screens, navigation, offline behaviour, accessibility, and device integration remain platform-specific.
+The owner selected one Next.js PWA and one Expo/React Native Android app for each of Customer, Vendor, Delivery Partner, and Admin in the same development phase. This creates eight role clients and costs more coordination than a sequential client rollout. Shared contracts reduce semantic drift, while screens, navigation, offline behaviour, accessibility, and device integration remain platform-specific.
 
 ### Manual dispatch before route optimisation
 

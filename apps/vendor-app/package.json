@@ -1,0 +1,22 @@
+{
+  "name": "@neighbourhood-store/vendor-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Vendor Expo/React Native Android shell for company-local development.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "expo/AppEntry.js",
+  "scripts": {
+    "android": "expo start --android --port 8082",
+    "build": "expo export --platform android --output-dir dist",
+    "dev": "expo start --offline --port 8082",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@neighbourhood-store/ui-tokens": "workspace:*",
+    "expo": "56.0.19",
+    "expo-status-bar": "56.0.4",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
+  }
+}

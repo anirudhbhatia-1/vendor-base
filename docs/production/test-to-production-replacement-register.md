@@ -1,0 +1,226 @@
+# Test-to-Production Replacement Register
+
+**Status:** Canonical register; approved as a planning control only
+
+**Current environment:** Free local company development with synthetic data
+
+**Production authority:** None
+
+**Register owner:** Engineering Lead
+
+**Control reviewers:** Operations, Finance, Privacy, Security, Compliance, Product, and qualified legal/tax reviewers where named
+
+**Last reviewed:** 17 August 2026
+
+## 1. Purpose
+
+This is the single source of truth for everything that is fake, synthetic, local-only, manually simulated, or not yet proven for production. It records what must change, where the change belongs, what evidence is required, who must approve it, and how the capability is contained if it fails.
+
+This file does not select a hosting company, provider, price, tax position, contract, legal basis, production service area, or release date. It does not authorize real people, real personal data, real OTPs, real messages, real money, public access, or production deployment.
+
+The current system remains a company-level test project. A production transition is a reviewed migration, not an environment-variable flip.
+
+## 2. How to use this register
+
+### Required update points
+
+Update the affected row in the same change whenever the project:
+
+1. adds or changes synthetic seed data, a fake adapter, a test-only configuration, or a local dependency;
+2. selects a real provider or production policy;
+3. creates an exact repository path for a registered responsibility;
+4. runs sandbox, controlled real-case, staging, recovery, canary, or production evidence;
+5. changes an owner, approval, rollback, or monitoring requirement; or
+6. retires a test fixture or excludes it from production data.
+
+Phase 2.1 must add the exact repository path and configuration key for each implemented responsibility. Until that directory map exists, the **future implementation location** column names the logical owner from `architecture.md` and `implementation.md`; `PATH_PENDING_2_1` means no path may be invented in this prerequisite.
+
+Step 2.1 created the canonical [repository structure and import-boundary map](../architecture/repository-structure.md). That map assigns exact top-level and package paths. A row keeps `PATH_PENDING_2_1` until its code, configuration or runbook is actually introduced; creating an empty responsibility boundary is not evidence that the production replacement exists.
+
+### Allowed statuses
+
+| Status | Meaning |
+|---|---|
+| `TEST_ONLY` | The item is approved only for local or automated synthetic testing. |
+| `BLOCKED` | A production choice, evidence set, or approval is missing. |
+| `REPLACEMENT_SELECTED` | A production replacement is documented, but certification is incomplete. |
+| `SANDBOX_PROVEN` | The common contract suite passes against the provider sandbox or production-like substitute. |
+| `CONTROLLED_REAL_CASE_PROVEN` | Approved company accounts completed bounded real cases without public release. |
+| `STAGING_PROVEN` | Production-shaped deployment, recovery, security, privacy, finance, and operations checks pass. |
+| `CANARY_APPROVED` | Named reviewers approved a small, reversible production exposure. |
+| `PRODUCTION_APPROVED` | All evidence, monitoring, support, rollback, and accountable approvals exist. |
+| `RETIRED` | The test item is excluded from production and retained only as a safe test fixture or historical record. |
+
+No item in this register is currently beyond `TEST_ONLY` or `BLOCKED`.
+
+## 3. Non-negotiable transition sequence
+
+```text
+Free deterministic local test
+        ↓
+Production choice, owner, cost and contract recorded
+        ↓
+Privacy + security + finance + operations + legal/compliance review as applicable
+        ↓
+Provider sandbox / isolated shared non-production contract tests
+        ↓
+Controlled real-provider cases using approved company accounts
+        ↓
+Production-shaped staging with synthetic or explicitly approved bounded data
+        ↓
+Restore + incident + privacy + reconciliation + support + rollback drills
+        ↓
+Small reversible production canary
+        ↓
+Reconciliation and safety review
+        ↓
+Explicit wider-production approval
+```
+
+Skipping a stage requires a written project-owner decision plus the accountable control owners' approval. Passing local simulator tests alone never proves a real provider, production policy, operating model, recovery capability, or scale target.
+
+## 4. Synthetic data and test-control register
+
+| ID | Current test-only item and source | Production replacement or disposition | Future implementation location and change method | Required evidence and approval | Failure containment | Status |
+|---|---|---|---|---|---|---|
+| `DATA-01` | Fictional customer, vendor, partner, staff, and admin identities; synthetic aliases and role assignments in `docs/pilot/` | Verified real accounts with approved minimum identity fields, account lifecycle, role grants, and revocation | Identity/access and tenant modules; `PATH_PENDING_2_1`; replace seed builders with approved onboarding imports/APIs and keep synthetic seeds unavailable in production | Data inventory, purpose, access tests, account recovery, abuse controls; Privacy + Security + Operations | Disable onboarding/login capability, revoke affected sessions/roles, preserve audit evidence | `BLOCKED` |
+| `DATA-02` | Fake phone/contact routes, email addresses, address tokens, coordinates, routes, OTP proofs, and masked payout tokens | Approved real contact, address, location, proof, and beneficiary data with field-level purpose and retention | Identity, customer, fulfilment, privacy, and finance modules; `PATH_PENDING_2_1`; production schema/config must reject fixture namespaces and synthetic routes | Notice/consent or other approved basis, data minimisation, encryption, viewer/expiry tests, deletion and incident drills; Privacy + Security + Finance | Stop collection/provider calls, revoke access, preserve only approved holds, reconcile affected work | `BLOCKED` |
+| `DATA-03` | Three candidate Jaipur test zones, nine fictional fruit-and-vegetable vendors, 20-product synthetic catalogues, fixture prices, stock, and images in `docs/pilot/` | Approved real launch zones, contracted/verified vendors, actual catalogues, licensed images, prices, stock, hours, capacity, and serviceability | Vendor network, catalogue, search, pricing, inventory, zone and media modules; `PATH_PENDING_2_1`; use reviewed onboarding/import workflows, never convert seed rows in place | Serviceability study, consent/contracts, verification, catalogue QA, image rights, staffing and launch sign-off; Operations + Product + Compliance | Unpublish affected vendor/category/zone, stop new checkout, safely complete active work | `BLOCKED` |
+| `DATA-04` | Fictional verification-document types, files, extracted fields, expiry, rejection, appeal, and reviewer records | Legally approved vendor- and partner-specific requirement matrix plus real protected documents only when necessary | Compliance/document modules and private object storage; `PATH_PENDING_2_1`; map each type to purpose, viewers, retention, expiry, restriction and appeal policy | Qualified legal/compliance source per document, privacy review, processor/storage review, two-person high-risk approval and deletion proof; Compliance + Privacy + Security | Stop collection, block new publication/new work, restrict document access, protect active obligations | `BLOCKED` |
+| `DATA-05` | Scripted orders, returns, incidents, support cases, privacy requests, disputes, callbacks, statements and desk-run evidence | Keep as isolated regression fixtures; create real records only through approved live workflows | Test fixtures stay in test packages; production services must fail startup if fixture loading or scenario selection is enabled; exact paths `PATH_PENDING_2_1` | Environment-isolation tests, build-artifact scan, startup deny tests and data-provenance monitoring; Engineering + Security | Fail closed at startup, disable affected build, purge fixture rows from production-shaped environment | `TEST_ONLY` |
+| `DATA-06` | Synthetic payment, refund, ledger, earning, settlement, payout and tax amounts, including desk-run totals | Keep regression fixtures; production ledger is populated only by approved quotes and verified real provider/business events | Pricing, payment, ledger, settlement and reconciliation modules; `PATH_PENDING_2_1`; use separate policy versions and prohibit test policy activation in production | Balanced-ledger tests, provenance checks, real policy approvals, provider reconciliation and controlled real-money cases; Finance + Engineering + legal/tax | Pause quoting/capture/payout, hold affected balances, reconcile without rewriting history | `BLOCKED` |
+| `DATA-07` | Controllable clocks, seeded faults, deterministic outcomes, protected local outboxes, test callback signatures and fictional provider references | Keep only in isolated automated/local test harnesses; production uses trusted server time and verified provider events | Test utilities and adapter harness; `PATH_PENDING_2_1`; compile/package exclusion plus production startup checks for scenario selectors, fake clocks and outboxes | Build inspection, runtime attestation, negative configuration tests, signature and replay tests; Engineering + Security | Fail startup, disable provider ingress, rotate affected keys, inspect for unauthorized state changes | `TEST_ONLY` |
+| `DATA-08` | Synthetic retention periods, deletion holds and seven-test-day privacy workflow in the governance policy | Approved production retention schedule, rights deadlines, hold authority and deletion/anonymisation rules under then-current law | Privacy policy configuration and retention workers; `PATH_PENDING_2_1`; activate versioned production classes only after legal approval and migration rehearsal | Record-of-processing inventory, lawful purpose, notice, rights tests, deletion/hold/resumption evidence; Privacy + Legal + Security | Stop new collection, restrict processing, preserve approved holds, remediate overdue deletion | `BLOCKED` |
+| `DATA-09` | Synthetic metrics, personas, rehearsal outcomes and `NOT_OBSERVED` business measures in `docs/pilot/measurement/` | Preserve as labelled historical test evidence; production decisions use approved real-event definitions and privacy-safe reporting | Analytics/reporting module; `PATH_PENDING_2_1`; enforce evidence-mode and provenance dimensions, suppress small/sensitive groups | Metric contract tests, event completeness, consent/purpose review, aggregation/suppression proof; Product + Privacy + Finance/Operations | Stop affected report, correct provenance, never relabel synthetic values as observed | `BLOCKED` |
+
+## 5. Provider and external-service register
+
+Every real adapter must implement the provider-neutral contracts in `docs/providers/simulator-contracts.md`. Real OTP delivery is required before any real login or handoff test, but it remains blocked until a provider, credentials, privacy/security controls, cost owner, and controlled company-account plan are approved.
+
+| ID | Current test-only item and source | Production replacement | Future implementation location and change method | Required evidence and approval | Failure containment | Status |
+|---|---|---|---|---|---|---|
+| `PRV-01` | Local fake OTP generator and protected test outbox | Approved real OTP delivery/verification provider, real sender/route, abuse controls and delivery telemetry | Identity and fulfilment proof adapters; `PATH_PENDING_2_1`; select adapter by allowlisted environment config with secrets from secret management | Request/verify, expiry, resend, rate, wrong attempt, timeout, reuse, callback and cost tests using approved company numbers; Engineering + Security + Privacy + Finance | Disable affected OTP purpose, rate-limit, preserve active sessions/proofs safely, use an approved alternative proof only if policy exists | `BLOCKED` |
+| `PRV-02` | Fake payment authorization, capture, void, refund, callback and statement simulator | Approved payment provider and merchant account | Payment adapter, callback ingress and reconciliation workers; `PATH_PENDING_2_1`; production keys and signed callbacks only through secret/config control | Sandbox plus controlled company authorization/capture/void/refund, timeout, duplicate, unknown and statement match; Finance + Security + Legal/Tax | Pause checkout/capture/refund as scoped, mark unknown, reconcile in-flight operations, never retry under a new identity | `BLOCKED` |
+| `PRV-03` | Fake payout batches, beneficiaries, callbacks and statements | Approved payout/banking provider, beneficiary verification and company funding process | Payout adapter, beneficiary vault/token mapping and reconciliation workers; `PATH_PENDING_2_1` | Sandbox and controlled company payout/reversal/failure/unknown/statement cases, fraud and maker-checker review; Finance + Security + Legal/Operations | Pause submissions, hold payable balances, protect beneficiary changes, reconcile every unknown result | `BLOCKED` |
+| `PRV-04` | Fixed synthetic Jaipur coordinates, routes, distances, serviceability and failures | Approved maps, geocoding, routing and navigation provider(s), with text/manual fallback | Location/zone/search/fulfilment adapters and mobile map handoff; `PATH_PENDING_2_1`; production API keys remain server/scoped-client managed | Address quality, route accuracy, serviceability, timeout, quota, cost, privacy, cache and fallback tests; Engineering + Privacy + Operations | Disable provider/cached unsafe route, retain text address/landmark, route to manual review | `BLOCKED` |
+| `PRV-05` | Local fake push outbox and delivery receipts | Approved push provider and production app credentials | Notification adapter plus PWA/Android device registration; `PATH_PENDING_2_1` | Opt-in, token lifecycle, duplicate, delayed, rejected, outage, privacy and rate tests; Engineering + Privacy + Operations | Disable push campaign/template, revoke tokens, fall back only to approved channels | `BLOCKED` |
+| `PRV-06` | Local fake SMS and email outboxes | Approved transactional SMS and email providers, sender identities, templates, opt-out and delivery-status handling | Notification adapters and template configuration; `PATH_PENDING_2_1` | Company-account delivery, failure, delay, rate, opt-out, content/privacy, cost and support tests; Engineering + Privacy + Operations + Finance | Disable sender/template/provider, stop retry storm, use in-app/manual approved fallback | `BLOCKED` |
+| `PRV-07` | Repository-local filesystem object adapter and simulated scan outcomes | Approved private object storage plus malware scanning, encryption, signed access, lifecycle and deletion | Storage/document/media adapters; `PATH_PENDING_2_1`; migrate by checksum-verified copy with classification and ownership metadata | Region, processor, access, malware, type/size, deletion, backup/restore, cost and exit tests; Engineering + Privacy + Security | Disable uploads, preserve authorized reads, revoke links, restore verified objects or roll back migration | `BLOCKED` |
+| `PRV-08` | Structured local API/worker stdout logs in `apps/api/src/json-logger.ts` and `apps/worker/src/json-logger.ts`; no external analytics/error service | Approved production observability destinations with redaction, access, retention and cost controls | Add provider-neutral observability/analytics adapters behind runtime configuration; keep the current bounded startup fields and route only allowlisted data, never raw OTP/payment/document/address values | Redaction tests, alert delivery, access/retention review, volume/cost test and incident drill; Engineering + Security + Privacy + Operations | Disable offending export, rotate credentials, delete where permitted, retain safe local operational evidence | `BLOCKED` |
+| `PRV-09` | No selected external identity/document verification service | Approved manual process or provider, only if required by the final verification policy | Compliance adapter and reviewer workflow; `PATH_PENDING_2_1`; do not add a provider merely because one exists | Accuracy, appeal, bias, privacy, processor, cost, security and legal review; Compliance + Privacy + Security + Legal | Stop automated decision, fall back to approved human review, block new publication without harming active obligations | `BLOCKED` |
+
+## 6. Infrastructure, configuration and distribution register
+
+| ID | Current test-only item and source | Production replacement | Future implementation location and change method | Required evidence and approval | Failure containment | Status |
+|---|---|---|---|---|---|---|
+| `INF-01` | Host-run loopback-only Node processes in `apps/*/package.json`; Compose is planned but not introduced before Step 2.4 | Approved production hosting/runtime topology; hosting company remains unselected | Create separate immutable production artifacts and environment declarations under the approved infrastructure boundary; do not promote host development commands | Architecture, cost, capacity, region, network, patching, support and exit review; Engineering + Security + Finance/Operations | Stop rollout, route no public traffic, revert artifact/config, keep local development independent | `BLOCKED` |
+| `INF-02` | PostgreSQL/PostGIS is not connected in Step 2.3; readiness reports `database: not_configured` | Approved hosted/self-managed PostgreSQL/PostGIS topology with encryption, replication, backup and connection controls | Step 2.4 introduces local database migrations/config; later promote reviewed migrations only, never developer volumes | Version compatibility, migration up/down/forward recovery, load, failover, backup/restore and RPO/RTO evidence; Engineering + Security + Operations | Stop writes/checkout, fail over or restore under incident command, reconcile authoritative state | `BLOCKED` |
+| `INF-03` | BullMQ is pinned but no queue is registered; readiness reports `queue: not_configured`; local Valkey and Redis compatibility remain Step 2.4 work | Approved production cache/queue topology using a contract-proven compatible engine | Introduce worker/queue config under `apps/worker/` and local definitions under `infrastructure/`; PostgreSQL/outbox remains authoritative | BullMQ compatibility, eviction/restart, retry, poison-job, queue-delay, capacity and recovery tests; Engineering + Operations | Pause consumers/producers as needed, rebuild from durable state, switch only to tested fallback | `BLOCKED` |
+| `INF-04` | Non-secret defaults in `.env.example` plus allowlisted parsing in `apps/api/src/runtime-config.ts` and `apps/worker/src/runtime-config.ts`; no production secret store | Approved secrets/key/certificate management, rotation and access process | Inject through an approved runtime identity and secret manager; extend the parsers with typed production configuration only after approval and never commit values | Least privilege, rotation/revocation, break-glass, audit and leak-response drills; Security + Engineering | Revoke/rotate, disable affected integration, audit use, redeploy clean configuration | `BLOCKED` |
+| `INF-05` | No shared environment, domain, TLS, CDN, WAF, load balancer or public ingress | Approved network and edge design for isolated non-production, staging and production | Infrastructure/edge configuration; `PATH_PENDING_2_1`; environments require separate accounts/identities/data and explicit ingress | Threat model, TLS, DNS, DDoS/rate protection, isolation, cost and rollback tests; Security + Engineering + Finance | Remove route/DNS, block ingress, revert certificate/config, preserve internal recovery access | `BLOCKED` |
+| `INF-06` | CI definition may be authored and verified locally; no external runner/account/push authorized | Approved CI provider/runners, artifact signing, cache, secret isolation and protected-branch policy | Repository workflow files after Step 2.5; external activation is a separate owner decision | Reproducible clean build, dependency/secret scans, least privilege, artifact provenance, retention and cost review; Engineering + Security | Disable workflow/runner/token, revoke artifacts, require clean rebuild | `BLOCKED` |
+| `INF-07` | Structured local stdout logs from the API/worker loggers, health routes in `apps/api/src/health.controller.ts`, manual inspection and no external alerting | Production metrics, logs, traces, dashboards, SLOs, alerts and staffed ownership | Extend the existing bounded health/log surface through an approved observability package/config and runbooks before traffic | Golden-signal/load evidence, finance/queue/provider/custody alerts, paging drill and dashboard ownership; Engineering + Operations + Security | Stop unsafe traffic/capability, fall back to known-safe version, retain audit trail | `BLOCKED` |
+| `INF-08` | Synthetic backups, isolated restore drills and target-only RPO/RTO | Approved encrypted backup, restore, failover, reconciliation and safe-resumption capability | Database/storage deployment plus recovery runbooks; `PATH_PENDING_2_1`; schedule immutable backups and isolated restore verification | Achieved RPO/RTO, regional/provider failure, permissions, object checksum, ledger/outbox replay and resumption evidence; Engineering + Operations + Security + Finance | Stop writes and checkout, restore/fail over under incident command, reopen only after reconciliation | `BLOCKED` |
+| `INF-09` | Local performance checks; no production capacity or traffic claim | Measured capacity plan for thousands to lakhs of users, including API, database, spatial queries, workers and providers | Performance suites, query plans and scaling/runbook config; `PATH_PENDING_2_1`; scale stateless API/workers first and add complexity only on evidence | Representative load/soak/failure tests, p50/p95/p99, queue age, connection, cost and headroom evidence; Engineering + Finance/Operations | Admission control, rate limit, pause costly features/zones, scale tested components, rollback | `BLOCKED` |
+| `INF-10` | Eight executable local role clients: Customer, Vendor, Delivery Partner, and Admin each have a PWA shell and Expo/Android shell | Approved PWA hosting/release process and signed Android distribution/app-store process for all four roles | `apps/*-pwa/` manifests/config and `apps/*-app/app.json`; replace every internal Android package ID and approve a distinct signing identity, origin, deep-link policy and update channel per production client | Accessibility/device/network tests per role and client, signing custody, store/privacy declarations, rollback/update policy; Engineering + Product + Privacy/Security | Halt the affected role/client rollout, withdraw/revert release where possible, disable incompatible server feature by version gate | `BLOCKED` |
+| `INF-11` | `local`, `test`, and `queue-compat` are the only modes accepted by `apps/api/src/runtime-config.ts` and `apps/worker/src/runtime-config.ts`; smoke tests prove `production` is rejected | Separately approved shared non-production, staging and production configurations | Extend both typed runtime schemas together; deny unknown/mixed modes and validate adapter/data/config compatibility at startup | Environment isolation, configuration diff, fixture exclusion, credential boundary and promotion evidence; Engineering + Security | Fail startup, quarantine environment, revoke credentials, purge unauthorized fixtures/data | `BLOCKED` |
+
+## 7. Money, pricing and commercial-policy register
+
+| ID | Current test-only item and source | Production replacement | Future implementation location and change method | Required evidence and approval | Failure containment | Status |
+|---|---|---|---|---|---|---|
+| `FIN-01` | Synthetic customer delivery fee: ₹15 including 2 route km plus ₹8/additional km, proportional rounding, 40 km outer cap | Approved versioned customer fee and service-radius policy by zone/category/time/capacity as applicable | Pricing/quote configuration; `PATH_PENDING_2_1`; activate only for new quotes and snapshot policy version | Real pilot economics, provider/operations cost, disclosure, rounding, refund and edge-case tests; Finance + Product + Operations + Legal/Tax | Revert to prior approved version or pause quoting; never recalculate historical orders | `BLOCKED` |
+| `FIN-02` | Customer sees the synthetic per-order fee and final total, not internal formula steps | Approved customer price presentation showing the complete end price and required components without exposing internal calculation logic | PWA/Android checkout, quote API and receipt contracts; `PATH_PENDING_2_1`; server returns final amounts and required labels, not editable formulas | Consumer disclosure, localization, accessibility, quote-expiry and mismatch tests; Product + Finance + Legal | Pause checkout when the final price cannot be shown or verified | `BLOCKED` |
+| `FIN-03` | Synthetic flat ₹5 vendor fee per successfully completed order | Approved vendor commercial model, fee, applicability, tax and contract terms | Versioned fee policy, ledger, statements and vendor UI; `PATH_PENDING_2_1` | Vendor evidence, contract/disclosure, refund/cancellation, statement and reconciliation tests; Finance + Product + Legal/Tax | Revert future policy, pause new affected orders/settlements, correct via linked ledger adjustment | `BLOCKED` |
+| `FIN-04` | Synthetic partner base/distance, ₹1 wait minute after five minutes, ₹10 cap, return earning and 100% tip policy | Approved partner compensation, waiting, return, incentive, tip, adjustment and dispute policy | Earnings policy, ledger, partner UI and dispute workflow; `PATH_PENDING_2_1` | Operating-model, fairness, contract, tax, safety, active-hour and reconciliation review; Finance + Operations + Legal | Pause new assignments/payouts as scoped, protect earned amounts, resolve via approved adjustment | `BLOCKED` |
+| `FIN-05` | Synthetic `tax_minor = 0` and positive fictional allocation fixtures | Qualified production GST/TCS/invoice/receipt/registration/return policy | Tax calculation, invoice/receipt, ledger and reporting modules; `PATH_PENDING_2_1`; zero test value must never mean exempt | Qualified Indian tax/legal opinion, registration data, invoice/refund/rounding/reconciliation tests; Finance + Legal/Tax | Pause quoting/invoicing for affected scope, preserve ledger, correct through approved documents/entries | `BLOCKED` |
+| `FIN-06` | Synthetic cancellation, partial/full refund, post-custody return and platform-funded partner earning rules | Approved customer/vendor/partner cancellation, refund, return and loss-allocation policy | Orders, fulfilment, refunds, ledger and support policy; `PATH_PENDING_2_1`; version and snapshot applicable rules | Consumer/vendor/partner terms, provider refund tests, fraud/abuse, custody and reconciliation evidence; Finance + Operations + Legal | Pause automated resolution, hold affected amount, route to staffed review, keep custody visible | `BLOCKED` |
+| `FIN-07` | Synthetic 24-hour settlement eligibility and fake daily 18:00 Asia/Kolkata payout batch | Approved settlement/payout calendar, holds, bank cutoffs, holidays, statements and support promise | Settlement/payout schedulers and configuration; `PATH_PENDING_2_1`; controllable clock remains test-only | Provider and banking evidence, cash/funding model, hold/release, late/failure and reconciliation tests; Finance + Operations | Pause batch, hold balances, reconcile submissions, communicate through approved support path | `BLOCKED` |
+| `FIN-08` | Internal ₹500 single-actor synthetic refund/adjustment threshold and separate approver above it | Risk-based production authority matrix, limits, role separation and emergency process | Authorization/approval policy and admin UI; `PATH_PENDING_2_1`; limits are versioned server policy | Fraud/loss analysis, role staffing, maker-checker, stale-preview, audit and emergency drills; Finance + Security + Operations | Lower/disable authority, require manual dual approval, revoke roles, audit affected actions | `BLOCKED` |
+| `FIN-09` | COD disabled and no cash-handling simulation approved | Keep COD disabled unless a separate cash custody, receipt, collection, fraud, return and reconciliation policy is approved | Checkout capability flag plus ledger/partner/admin workflows if ever authorized; `PATH_PENDING_2_1` | Separate project-owner decision, operations/legal/finance/security design and end-to-end drills | Keep/return flag to disabled; stop cash orders and safely close any explicitly approved active case | `BLOCKED` |
+
+## 8. Operations, privacy, compliance and product-policy register
+
+| ID | Current test-only item and source | Production replacement | Future implementation location and change method | Required evidence and approval | Failure containment | Status |
+|---|---|---|---|---|---|---|
+| `OPS-01` | Company-controlled delivery testers, synthetic routes/custody/proofs/earnings and no public recruitment | Approved delivery operating model, recruitment, engagement, insurance, safety, equipment, training, background checks, pay and support | Partner onboarding, dispatch, safety, earnings and incident workflows; `PATH_PENDING_2_1`; real onboarding stays disabled until policy activation | Legal/operations/finance/privacy/security evidence plus supervised controlled pilot; Operations + Legal + Finance | Pause new assignments, locate and safely close active custody/returns, preserve earnings and incident ownership | `BLOCKED` |
+| `OPS-02` | Internal Monday-Saturday 09:00-19:00 support and synthetic P0-P3 targets | Staffed production hours, channels, SLAs, escalation, handoff and on-call coverage matched to launch scope | Support/incident configuration, queues and runbooks; `PATH_PENDING_2_1` | Staffing roster, training, load forecast, closed-hours and breach drills, public-language review; Operations + Product + Legal | Restrict operating/order hours, pause affected zones/capabilities, name handoff owner | `BLOCKED` |
+| `OPS-03` | Synthetic incident cases and reversible test kill switches | Production incident command, severity, communications, on-call, evidence, safe-resumption and post-incident review | Incident controls/admin console/runbooks; `PATH_PENDING_2_1`; actions remain scoped, time-limited and audited | Tabletop/live drills across safety, privacy, security, finance, provider and recovery failures; Operations + Engineering + Security + Privacy/Finance | Scoped pause, protect active obligations, roll back control only after reconciliation and owner approval | `BLOCKED` |
+| `OPS-04` | Fictional consent/notice records, synthetic location collection and privacy-request workflow | Approved English/Hindi notices, lawful purpose/basis, optional consent, rights handling, processor terms and location policy | Customer/partner clients, identity/privacy/location modules; `PATH_PENDING_2_1`; version notices and purpose-bound access | Then-current legal review, usability/accessibility, withdrawal, export/correction/deletion and incident tests; Privacy + Legal + Security | Stop collection/optional processing, revoke access, preserve only approved obligations/holds | `BLOCKED` |
+| `OPS-05` | Synthetic role/access matrix and emergency-access tests | Production least-privilege roles, joiner/mover/leaver process, periodic review and break-glass control | Server authorization, admin roles and audit; `PATH_PENDING_2_1`; UI hiding never grants/denies authority | Permission matrix tests, cross-tenant isolation, access recertification, emergency review; Security + Privacy + Operations/Finance | Revoke role/session, disable protected action, inspect audit history and affected records | `BLOCKED` |
+| `OPS-06` | Fictional vendor/partner verification lifecycle and category rules | Approved verification, expiry, reverification, restriction, appeal and active-obligation continuity policy | Compliance and vendor/partner modules; `PATH_PENDING_2_1` | Requirement source per role/category/area, reviewer training, expiry/appeal and false-decision tests; Compliance + Legal + Privacy | Block new publication/work, allow safe completion of accepted obligations, restore after approved appeal | `BLOCKED` |
+| `OPS-07` | Fruit-and-vegetable scope; kirana reserved; pharmacy ordering disabled | Approved launch categories and category-specific catalogue, handling, safety, tax and legal rules | Category configuration, catalogue moderation and fulfilment policy; `PATH_PENDING_2_1` | Category owner, prohibited/restricted items, handling, refund, support and legal evidence; Product + Operations + Compliance | Disable category/vendor products, stop new orders, safely resolve active orders | `BLOCKED` |
+| `OPS-08` | Pharmacy and prescription data processing disabled | Keep disabled until a separate regulated-product release with licensed sellers and protected human review | Category capability, document/health-data boundary and fulfilment restrictions; `PATH_PENDING_2_1` | Jurisdiction-specific legal/compliance/privacy/security approval and end-to-end safety audit | Keep global capability disabled; unpublish affected items and protect any approved active obligation | `BLOCKED` |
+| `OPS-09` | Manual rehearsal roles, templates, scripted handoffs and fictional verification register | Staffed operating procedures integrated with product queues, ownership, training and audit | Admin/support/vendor/partner workflows and runbooks; `PATH_PENDING_2_1`; preserve manual fallback with controlled authority | Role assignment, training/assessment, queue load, handoff, duplicate/stale and access tests; Operations + Compliance/Finance | Fall back to approved manual queue, limit intake, stop unowned workflows | `BLOCKED` |
+| `OPS-10` | Candidate Jaipur zones and synthetic service/support assumptions | Approved real launch area, geofence, hours, capacity, vendor/partner coverage and public promise | Zone/capacity/availability configuration; `PATH_PENDING_2_1`; publish only signed versioned config | Field validation, real travel/capacity evidence, maps/serviceability, support and incident coverage; Operations + Product | Unpublish zone, stop new checkout/dispatch, safely complete or refund active orders | `BLOCKED` |
+| `OPS-11` | No production terms, vendor/partner contracts, privacy notice, refund policy or public SLA in force | Approved customer terms and notices plus vendor/partner/provider contracts and operating policies | Versioned policy/document acceptance records and public surfaces; `PATH_PENDING_2_1` | Qualified legal review, language/accessibility, version acceptance, withdrawal/termination and support handling; Legal + Product + Operations/Finance/Privacy | Stop onboarding/checkout for affected version, preserve accepted obligations, activate prior valid version only when lawful | `BLOCKED` |
+
+## 9. Quality and production-release evidence register
+
+These items are not replacements for test frameworks. Local Jest, Supertest, Playwright and Maestro suites remain valuable in production development. What changes is the evidence source, environment, scale and release authority.
+
+| ID | Current evidence | Production requirement and where it changes | Required approval/evidence | Failure containment | Status |
+|---|---|---|---|---|---|
+| `REL-01` | Deterministic fake-provider contract suites | Run the same suites against each selected sandbox, then controlled real company accounts; store safe evidence with adapter/version | Engineering + provider owner; success, decline, timeout, duplicate, replay, malformed, unknown, callback, statement and recovery paths | Keep real adapter disabled and use simulator only outside production | `BLOCKED` |
+| `REL-02` | Synthetic happy/failure/duplicate/offline desk cases | Production-shaped end-to-end staging across PWA, Android, API, worker, database, queue and external adapters | Engineering + QA/Product/Operations; device/network/accessibility/localization and state-integrity evidence | Block promotion; fix or disable affected capability | `BLOCKED` |
+| `REL-03` | Local ESLint/TypeScript controls plus `tooling/scripts/scan-secrets.mjs`, dependency-policy and import-boundary checks; synthetic/no-real-data rule | Threat model, dependency/secret/SAST/DAST testing, penetration review, access/redaction/retention/deletion drills and incident response | Security + Privacy + Engineering, with legal/compliance input | Block release, revoke exposed access/secrets, contain affected data/capability | `BLOCKED` |
+| `REL-04` | Local correctness/performance baselines | Representative load, soak, spatial-query, queue backlog, provider quota, database connection and cost tests with launch headroom | Engineering + Finance/Operations; documented limits, alerts and scaling actions | Rate limit/admission control, reduce zone/capability scope, rollback | `BLOCKED` |
+| `REL-05` | Target-only recovery objectives and synthetic restore drill | Achieved isolated restore/failover, object recovery, outbox replay, ledger/provider reconciliation and safe resumption | Engineering + Operations + Security + Finance | No production release; stop writes and restore under incident command | `BLOCKED` |
+| `REL-06` | Internal manual support and incident scripts | Staffed staging rehearsal for P0-P3, provider outage, unsafe delivery, privacy request, payment unknown, refund, payout, custody and rollback | Operations + Finance + Privacy/Security; named on-call and handoff evidence | Restrict hours/scope or block release | `BLOCKED` |
+| `REL-07` | No production deployment | Reversible canary plan naming users/zones/vendors, duration, success/stop thresholds, dashboards, owner, rollback and reconciliation | Project owner plus Engineering, Operations, Security, Privacy, Finance and Compliance as applicable | Trigger stop threshold, stop new work, safely close in-flight obligations, roll back | `BLOCKED` |
+| `REL-08` | No production approval or public claim | Signed production-readiness review confirms every applicable register row is `PRODUCTION_APPROVED` or explicitly `RETIRED` with no unresolved critical gate | Project owner and all accountable gate owners | Production remains blocked | `BLOCKED` |
+
+## 10. Promotion record required for every row
+
+When a row advances, append or link a record containing all fields below. Do not place credentials, OTPs, personal data, bank details, private documents, or exact addresses in Git.
+
+| Field | Required content |
+|---|---|
+| Register ID | One ID from this file |
+| Old and new status | Exact allowed status values |
+| Production choice/version | Provider, policy, system or disposition and immutable version/reference |
+| Exact repository locations | Code, config, migration, test, runbook and dashboard paths |
+| Environment and scope | Sandbox, controlled real case, staging, canary or production; bounded users/zones/capability |
+| Evidence | Safe test/report references, counts, dates and outcomes |
+| Data/secrets change | Classification, migration/purge, credential location class, rotation and access owner |
+| Cost/contract | Accountable owner and approved commercial/legal reference |
+| Monitoring/support | Dashboard, alert, queue, staffed owner and response target |
+| Rollback/containment | Trigger, command/runbook reference, in-flight handling and reconciliation owner |
+| Approvals | Named accountable roles, decision date and expiry/review date |
+
+## 11. Production configuration safety rules
+
+- Production must refuse to start when fake adapters, scenario selectors, controllable clocks, local outboxes, fixture loaders, universal test OTPs, synthetic policy IDs, repository-local object paths, or non-secret placeholder credentials are enabled.
+- Synthetic IDs and fixture namespaces must never be accepted as production onboarding evidence.
+- Real adapters must be selected from an allowlist. A caller cannot choose an adapter or simulator scenario.
+- Secrets enter at runtime through approved secret management and never through committed files, client bundles, logs or test evidence.
+- Production data is never copied into local development. Production-like tests use synthetic or explicitly approved, minimised and protected data.
+- Test fixtures remain available for regression tests after production launch, but their storage, accounts, credentials, providers and telemetry stay isolated.
+- Historical quotes, orders, ledgers, notices and policies keep their original versions. Promotion never rewrites history.
+- Valkey/cache/queue state is not authoritative. Recovery rebuilds from PostgreSQL and durable outbox/business state.
+- The customer sees the complete final price and required line items before confirmation. Internal fee-calculation logic need not be exposed.
+- Pharmacy and COD remain disabled until their own rows are fully approved.
+
+## 12. Current production blockers summary
+
+As of 17 August 2026:
+
+- Hosting and production environment topology are unselected.
+- Every real external provider, including real OTP delivery, is unselected and disabled.
+- Real personal data, verification documents, participant onboarding and transactions are prohibited.
+- Production prices, taxes, contracts, settlement, payout, support authority and operating model are unresolved.
+- Recovery, scale, security, observability, app distribution, staging and canary evidence do not exist.
+- Phase 1 has synthetic coverage but no observed demand, timing, repeat-order or unit-economics proof.
+- The approved build boundary is Phase 2 Steps 2.1-2.4 locally, with Step 2.5 configuration only; Step 2.6, Phase 3 and production remain blocked.
+
+## 13. Related sources
+
+- [Implementation blueprint](../../implementation.md)
+- [Phased delivery plan](../../phases.md)
+- [Internal development stack](../architecture/ADR-001-internal-development-stack.md)
+- [Provider simulators and synthetic money](../architecture/ADR-002-provider-simulators-and-test-money.md)
+- [Environment topology](../architecture/environment-topology.md)
+- [Provider simulator contracts](../providers/simulator-contracts.md)
+- [Synthetic financial policy](../finance/test-financial-policy.md)
+- [Internal safety, governance and recovery policy](../governance/internal-safety-and-production-transition.md)
+- [Conditional local-foundation build decision](../pilot/build-decision/decision-record.md)

@@ -1,0 +1,15 @@
+{
+  "name": "@neighbourhood-store/ui-tokens",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Basic cross-platform design tokens without shared screens or navigation.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    "./native": "./src/native.ts",
+    "./tokens.css": "./src/tokens.css"
+  },
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  }
+}

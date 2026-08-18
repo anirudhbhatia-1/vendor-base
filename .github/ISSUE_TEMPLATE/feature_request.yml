@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose scoped work tied to an approved product requirement and phase.
+title: '[Feature]: '
+labels: ['enhancement']
+body:
+  - type: input
+    id: requirement
+    attributes:
+      label: Requirement and phase
+      placeholder: 'FEATURES.md ID and phases.md step'
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: User or operational outcome
+      description: Describe what changes for Customer, Vendor, Delivery Partner or Admin.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Scope and non-goals
+      description: Name affected applications/packages and what remains out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: Decisions and safety gates
+      description: Name money, privacy, safety, legal, provider, deployment or production approvals required.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and failure cases
+      description: Include success, denial, timeout, duplicate, retry, recovery and observability where applicable.
+    validations:
+      required: true

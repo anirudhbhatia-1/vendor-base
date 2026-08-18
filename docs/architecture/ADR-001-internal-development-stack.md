@@ -7,7 +7,7 @@
 
 ## Context
 
-The Neighbourhood Store Marketplace is currently a company-level test project. It needs a free local foundation that supports a PWA and an Android application, while preserving a credible route from a Jaipur synthetic pilot to thousands or lakhs (hundreds of thousands) of future users.
+The Neighbourhood Store Marketplace is currently a company-level test project. It needs a free local foundation that supports a PWA and an Android app for each of Customer, Vendor, Delivery Partner, and Admin, while preserving a credible route from a Jaipur synthetic pilot to thousands or lakhs (hundreds of thousands) of future users.
 
 Scale-ready means important boundaries and data-access safeguards are designed now. It does not mean building a costly distributed production platform before usage is measured.
 
@@ -22,7 +22,7 @@ Scale-ready means important boundaries and data-access safeguards are designed n
 
 ### Clients
 
-- Build the PWA in Next.js and the Android app in Expo/React Native simultaneously.
+- Build eight role clients simultaneously: Customer, Vendor, Delivery Partner, and Admin each receive a Next.js PWA and an Expo/React Native Android app.
 - Share contracts, validation schemas, translation keys, canonical state and error names, synthetic-data builders, and basic design tokens.
 - Do not share platform-specific screens, navigation, offline behaviour, accessibility implementations, or device integrations.
 - Treat every client as untrusted: the server recalculates authorization, price, availability, and allowed state transitions.
@@ -151,4 +151,3 @@ Phase 2 can create a reproducible local workspace and test harness. Simultaneous
 - [Expo testing guidance](https://docs.expo.dev/develop/unit-testing/)
 - [NestJS testing guidance](https://docs.nestjs.com/fundamentals/testing)
 - [Maestro local Android testing](https://docs.maestro.dev/getting-started/build-and-install-your-app/android)
-

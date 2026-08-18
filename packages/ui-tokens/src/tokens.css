@@ -1,0 +1,22 @@
+:root {
+  --canvas: #f7f7f2;
+  --surface: #ffffff;
+  --surface-subtle: #f0f3ef;
+  --text-primary: #18221c;
+  --text-secondary: #58635b;
+  --border: #d8ded9;
+  --customer-mango: #ffd84d;
+  --customer-mango-pressed: #e8be27;
+  --evergreen: #1f6b45;
+  --evergreen-pressed: #155438;
+  --evergreen-tint: #e8f3ec;
+  --success: #247a4a;
+  --warning: #8a5700;
+  --danger: #b42318;
+  --information: #245e9b;
+  --font-display: 'Anek', 'Noto Sans Devanagari', 'Noto Sans', system-ui, sans-serif;
+  --font-body: 'Noto Sans', 'Noto Sans Devanagari', system-ui, sans-serif;
+  --radius-control: 10px;
+  --radius-panel: 18px;
+  --focus-ring: #245e9b;
+}

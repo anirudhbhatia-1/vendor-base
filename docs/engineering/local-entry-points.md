@@ -1,0 +1,63 @@
+# Local application entry points
+
+**Scope:** Phase 2 Step 2.3 company-local shells
+
+**Production authority:** None
+
+## Prerequisites
+
+Use Node.js `24.19.0` and pnpm `11.19.0`, then run `pnpm install`. The repository rejects unknown runtime modes and does not define a production mode. No real credential, phone number, address, payment instrument, vendor record or partner record is required.
+
+## Client matrix
+
+| Role | PWA command and loopback URL | Android command and Metro port | Current visible result |
+|---|---|---|---|
+| Customer | `pnpm --filter @neighbourhood-store/customer-pwa dev` · `http://127.0.0.1:3100` | `pnpm --filter @neighbourhood-store/customer-app android` · `8081` | Internal discovery-lane shell; catalogue and ordering are disabled |
+| Vendor | `pnpm --filter @neighbourhood-store/vendor-pwa dev` · `http://127.0.0.1:3101` | `pnpm --filter @neighbourhood-store/vendor-app android` · `8082` | Internal store-operations shell; onboarding and order actions are disabled |
+| Delivery partner | `pnpm --filter @neighbourhood-store/partner-pwa dev` · `http://127.0.0.1:3102` | `pnpm --filter @neighbourhood-store/partner-app android` · `8083` | Internal delivery-lane shell; availability and assignments are disabled |
+| Admin/support | `pnpm --filter @neighbourhood-store/admin-pwa dev` · `http://127.0.0.1:3103` | `pnpm --filter @neighbourhood-store/admin-app android` · `8084` | Internal control-room shell; queues and protected actions are disabled |
+
+Every client makes synthetic/internal status unmistakable. There are no forms, fake success buttons or calls to the API. The PWA shells are server-rendered static pages. Android commands use Expo's local tooling; an emulator or explicitly approved local device is needed to inspect them interactively.
+
+`pnpm build` creates optimized static PWA output, Android Hermes bundles under each app's ignored `dist/`, and compiled API/worker output under ignored `dist/` directories.
+
+## API
+
+Start the development process with:
+
+```sh
+pnpm --filter @neighbourhood-store/api dev
+```
+
+The default address is `http://127.0.0.1:3001`.
+
+| Route | Meaning | Step 2.3 response |
+|---|---|---|
+| `GET /health/live` | The HTTP process is alive | `status: ok`, runtime mode and version |
+| `GET /health/ready` | The Step 2.3 process completed bootstrap | `status: ready`, with database and queue marked `not_configured` and `production_ready: false` |
+
+Readiness does not mean production readiness. It only means the deliberately dependency-free skeleton can serve local requests. `APP_ENV` accepts `local`, `test` or `queue-compat`; `API_PORT` must be an integer from 1 through 65535. Invalid values fail startup with a structured error and a non-zero exit.
+
+## Worker
+
+Start the worker process with:
+
+```sh
+pnpm --filter @neighbourhood-store/worker dev
+```
+
+The worker starts a NestJS application context, logs a structured `worker.ready` event, installs SIGINT/SIGTERM shutdown hooks, and logs `worker.stopped` after cleanup. BullMQ is pinned but no queue is registered until the Step 2.4 stateful foundation is approved and available. The readiness event therefore declares `queue: not_configured` and `production_ready: false`.
+
+## Structured logs and sensitive values
+
+API and worker logs are one JSON object per line. Startup events include service, environment, version and bounded non-secret status fields. Logger calls do not enumerate environment variables or serialize arbitrary configuration objects. Integration smoke tests place a synthetic sentinel in the environment and fail if it appears in output.
+
+## Verification
+
+- `pnpm typecheck` checks every executable workspace under the strict TypeScript baseline.
+- `pnpm lint` checks source, imports and exact dependency policy.
+- `pnpm build` proves all four PWAs, all four Android shells, the API and the worker compile/export.
+- `pnpm test:integration` probes API liveness/readiness, verifies API and worker graceful shutdown, checks that the log sentinel is absent, and proves `APP_ENV=production` fails closed.
+- `pnpm check` combines formatting, lint, types, repository controls, available tests and secret scanning.
+
+Database migrations, synthetic seeds, queue connectivity, provider adapters, authentication, authorization, real OTP delivery and every product workflow belong to later numbered steps.

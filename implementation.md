@@ -53,19 +53,21 @@ Implementation may build provider-neutral interfaces before these are decided, b
 | ID | Decision | Accountable owner | Due date | Blocks | Required evidence/output |
 |---|---|---|---|---|---|
 | D-01 | Launch neighbourhood and vendor cohort | Product/operations | — | Pilot recruitment and production zones | Named zones, 3–10 pilot vendors, initial catalogues, support hours |
-| D-02 | Primary clients and delivery sequence | Engineering Lead | **21 August 2026** | Public client release only; local scaffolding may proceed | Approved simultaneous Next.js PWA and Expo/React Native Android delivery with bounded shared code |
+| D-02 | Primary clients and delivery sequence | Engineering Lead | **21 August 2026** | Public client release only; local scaffolding may proceed | Approved PWA and Android app for each of Customer, Vendor, Delivery Partner, and Admin, with bounded shared code |
 | D-03 | Internal development technology foundation | Engineering Lead | **28 August 2026** | Hosting, shared cloud test/staging, recovery, and production foundation; local scaffolding may proceed | [ADR-001](docs/architecture/ADR-001-internal-development-stack.md), supported versions, local topology, compatibility and test gates |
 | D-04 | Provider simulators and future real-provider gate | Finance/engineering | **4 September 2026** | Real authorization, messaging, maps, storage, refund, payout, credentials, and external side effects; local simulators may proceed | [Simulator contracts](docs/providers/simulator-contracts.md), real-provider conformance and canary gates |
 | D-05 | Synthetic fee, earning, and settlement policy | Finance Lead | **11 September 2026** | Production quoting, tax, contracts, settlement, and payout; synthetic financial testing may proceed | [Versioned test policy and balanced examples](docs/finance/test-financial-policy.md) |
-| D-06 | Delivery operating model | Operations/legal | — | Partner production launch | Engagement, insurance, safety, payout, incident ownership |
-| D-07 | Verification/document policy | Compliance/operations | — | Vendor/partner publication | Required documents, grace periods, expiry effects, appeal SLAs |
-| D-08 | Privacy and retention | Legal/security | — | Production personal data | Purpose, viewer, consent, retention/deletion schedule per data class |
-| D-09 | Support and approval thresholds | Operations/finance | — | Manual refunds/restrictions/config publication | Role matrix, staffed hours, SLAs, maker-checker thresholds |
-| D-10 | Recovery objectives | Engineering/operations | — | Public launch | RPO, RTO, restore test and incident escalation policy |
+| D-06 | Internal delivery testing and future operating-model gate | Operations Lead | **18 September 2026** | Real recruitment, delivery, contracting, insurance, payout and partner production launch | Company-controlled synthetic cohort; production legal/operations evidence remains blocked |
+| D-07 | Synthetic verification-document lifecycle | Compliance Lead | **25 September 2026** | Real document collection and vendor/partner publication | Fictional category-aware lifecycle; production requirements remain blocked |
+| D-08 | Internal privacy, access, and synthetic retention | Privacy Lead | **2 October 2026** | Production personal data | [Synthetic schedule, access, consent, rights and location](docs/governance/internal-safety-and-production-transition.md); [production replacement register](docs/production/test-to-production-replacement-register.md) |
+| D-09 | Internal support, incidents, and approval thresholds | Operations Lead | **9 October 2026** | Public service promises and production action authority | Internal hours, P0–P3 targets, maker-checker and synthetic thresholds |
+| D-10 | Recovery targets and synthetic restore drills | Engineering Lead | **16 October 2026** | Public launch until recovery targets are proven | Tiered RPO/RTO, isolated restore, reconciliation and safe-resumption evidence |
 
 D-03 selects the internal server-side software toolkit but intentionally does not select a hosting provider. The implementation sequence is local company development and testing first, followed by a future explicitly approved shared non-production environment, then staging, and only later a separately approved production release.
 
 D-04 and D-05 approve deterministic simulators and synthetic money policy only. Future real adapters must pass the same contracts in sandbox and controlled company-account tests before a limited production canary. No synthetic amount is a production price, tax position, contract, or authorization to move money.
+
+D-06 through D-09 approve only internal company testing with synthetic participants, documents, personal data, cases, incidents, and authority. D-10 approves recovery design targets and synthetic drills, not an achieved production capability. The canonical [test-to-production replacement register](docs/production/test-to-production-replacement-register.md) identifies every known fake, synthetic, local-only or unproven component; where and how it changes; the evidence and owner required; and its rollback or containment path.
 
 The pilot formula of ₹15 including 2 route km plus ₹8 per additional route km, with a 40 route-km outer cap, is a versioned validation policy until D-05 is approved.
 
@@ -234,8 +236,15 @@ Every quote snapshots all pricing, zone, capacity, timer, substitution, refund, 
 | `vendor.wait_first_seconds` | 300 s | Fulfilment | Notify vendor/customer; show revised ETA |
 | `vendor.wait_leave_seconds` | 600 s | Fulfilment | Allow compensated leave/reassignment |
 | `offline_proof.retry_seconds` | 15, 30, 60, 120, 300 | Workers | Escalate after exhausted bounded retries |
-| `support.p1_ack_seconds` | 300 s | Operations | Escalate to on-duty lead |
-| `support.p2_ack_seconds` | 900 s | Operations | Escalate queue ownership |
+| `support.p0_ack_seconds` | 300 s | Operations | Immediate escalation; test acknowledgement within 5 minutes |
+| `support.p1_ack_seconds` | 900 s | Operations | Escalate to on-duty lead after 15 minutes |
+| `support.p2_staffed_ack_seconds` | 14400 s | Operations | Escalate queue ownership after 4 staffed hours |
+| `support.p3_ack_policy` | `NEXT_STAFFED_DAY` | Operations | Escalate when next staffed-day target is missed |
+| `support.staffed_timezone` | `Asia/Kolkata` | Operations | Monday–Saturday 09:00–19:00 internal testing only |
+| `approval.synthetic_refund_single_actor_max_minor` | 50000 | Finance/Operations | More than ₹500 requires a different Finance approver |
+| `privacy.synthetic_request_seconds` | 604800 s | Privacy | Escalate after 7 test days; not a production legal deadline |
+| `recovery.critical_backup_rpo_seconds` | 300 s | Engineering | Target only; public launch requires restore evidence |
+| `recovery.critical_rto_seconds` | 3600 s | Engineering | Target only; reconcile before safe resumption |
 
 ### 6.1 Checkout through vendor response
 

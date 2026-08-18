@@ -9,8 +9,8 @@ Unlike dark-store quick-commerce platforms, this product does not own inventory 
 - Delivery Partner App / Portal
 - Admin Console
 
-> **Status:** Product definition and validation stage. This repository currently contains planning documentation, not application code.
-> **Documentation baseline:** 13 August 2026 · implementation-ready structure v0.2
+> **Status:** Company-local development scaffold. Eight role clients, the API, and the worker have executable shells; domain workflows and production integrations do not exist yet.
+> **Documentation baseline:** 17 August 2026 · Phase 2 Step 2.3
 
 ## Start here
 
@@ -199,8 +199,13 @@ Improve cross-store delivery consolidation, then consider B2B ordering, more sto
 - [Product Requirements Document](prd.md) contains the complete product requirements, workflows, business rules, data model, risks, and phased scope.
 - [Product Design](design.md) translates the requirements into navigation, screens, interaction states, shared components, accessibility rules, and the white/light visual direction.
 - [Architecture](architecture.md) defines the proposed system boundaries, domain modules, data model, state machines, integrations, security, deployment, and scaling path.
+- [Repository Structure and Import Boundaries](docs/architecture/repository-structure.md) defines the Phase 2 workspace directories, package responsibilities, import direction, root commands, and pinned toolchain.
+- [Contributing](CONTRIBUTING.md) defines the local quality, safety, review, and verification workflow.
+- [Testing Conventions](docs/engineering/testing-conventions.md) defines test layers, locations, synthetic fixtures, and mandatory failure coverage.
+- [Local Application Entry Points](docs/engineering/local-entry-points.md) lists every PWA, Android, API, and worker command, port, health route, and current limitation.
 - [End-to-End Workflow Architecture](workflow.md) joins the customer, vendor, delivery-partner, admin, category, order, payment, settlement, exception, and support journeys from entry through final closure.
 - [Implementation Blueprint](implementation.md) is the executable contract for terminology, IDs, state records, timers, endpoints, persistence, workers, permissions, build slices, tests, releases, and rollback.
+- [Test-to-Production Replacement Register](docs/production/test-to-production-replacement-register.md) lists every known synthetic, fake, local-only, or unproven component and the evidence required before production use.
 - [AI Rules and Boundaries](rules.md) defines what AI contributors may do, must verify, must not do, and when they must stop for approval.
 - Mercato was reviewed as product inspiration for local-store discovery, named merchant selection, pickup/delivery, and merchant ecommerce tooling. It is not a specification to copy.
 
@@ -219,4 +224,4 @@ These gates do not permit engineers to invent production policy. Their IDs, owne
 
 ## Project status
 
-The next product milestone is a concierge-style pilot, followed by the vertical slices in `implementation.md` §12. Application development and testing will happen locally inside the company first using synthetic data and provider-neutral or sandbox integrations. Shared cloud testing, staging, and production are later gated stages; choosing a hosting provider does not authorize immediate production deployment.
+Phase 2 Step 2.3 provides executable company-local shells only. The next numbered engineering step is 2.4, the local PostgreSQL/PostGIS migration and deterministic synthetic-seed flow; it must not begin without the project owner's instruction. Product validation remains a concierge-style pilot followed by the vertical slices in `implementation.md` §12. Shared cloud testing, staging, and production are later gated stages; choosing a hosting provider does not authorize immediate production deployment.
