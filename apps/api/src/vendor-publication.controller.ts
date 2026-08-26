@@ -192,9 +192,27 @@ export class VendorPublicationController {
   async unpublish(@Param('publication_case_id') caseId: string, @Body() raw: unknown) {
     return this.operatorTransition('unpublish', caseId, raw);
   }
+  @Post(':publication_case_id/restore')
+  @managePublication
+  @HttpCode(200)
+  async restore(@Param('publication_case_id') caseId: string, @Body() raw: unknown) {
+    return this.operatorTransition('restore', caseId, raw);
+  }
+  @Get(':publication_case_id/impact')
+  @managePublication
+  async impact(@Param('publication_case_id') caseId: string) {
+    try {
+      return await this.publication.impact({
+        context: currentRequestContext(),
+        publication_case_id: uuid(caseId),
+      });
+    } catch (error) {
+      translate(error);
+    }
+  }
 
   private async operatorTransition(
-    method: 'pause' | 'publish' | 'submit' | 'unpublish',
+    method: 'pause' | 'publish' | 'restore' | 'submit' | 'unpublish',
     caseId: string,
     raw: unknown,
   ) {

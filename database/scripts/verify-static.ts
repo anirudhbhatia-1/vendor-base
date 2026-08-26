@@ -94,6 +94,7 @@ assert(
       '0019_customer_addresses',
       '0020_customer_discovery_and_preferences',
       '0021_customer_cart',
+      '0022_vendor_staff_settings',
     ]),
   'Unexpected reviewed migrations',
 );

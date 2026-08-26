@@ -22,6 +22,8 @@ test('separates publication preparation from approval', () => {
     'publish',
     'pause',
     'unpublish',
+    'restore',
+    'impact',
   ] as const)
     assert.equal(authorization(method)?.capability, 'admin.vendor_publication.manage');
   assert.equal(authorization('decide')?.capability, 'admin.vendor_publication.review');

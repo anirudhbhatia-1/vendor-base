@@ -30,12 +30,16 @@ alias rather than silently renumbered.
 | `0019` | Customer address management | 6.1 | "Phase 6.1" | agrees; documented in [customer address management](customer-address-management.md) |
 | `0020` | Customer discovery, search, favourites, storefront | 6.2–6.5 | named, not numbered | documented in [customer discovery and storefront](customer-discovery-and-storefront.md) |
 | `0021` | Vendor-grouped cart, validation, and recovery | 6.6–6.7 | named, not numbered | documented in [customer cart and validation](customer-cart-and-validation.md) |
+| `0022` | Vendor publication restore/impact (app layer) + vendor staff and settings | 5.3 remainder + 5.4 | named, not numbered | documented in [vendor publication restore and impact](vendor-publication-restore-and-impact.md) and [vendor staff and settings](vendor-staff-and-settings.md) |
 
 ## Consequences to carry forward
 
-- `phases.md` steps **5.4** (vendor staff and settings) and parts of **5.3** (admin vendor
-  pipeline views, test-order gate) are **not** delivered by any migration above. They remain open
-  Phase 5 work despite Phase 5 otherwise being complete at the persistence and service layer.
+- `phases.md` step **5.4** (vendor staff and settings) and the restore/impact remainder of **5.3**
+  are now delivered by migration `0022` and the application-layer additions to
+  `vendor-publication.ts` documented above. The 5.3 **test-order gate** remains open by design — it
+  depends on the order aggregate, which is Phase 7's job; see
+  [vendor publication restore and impact](vendor-publication-restore-and-impact.md) for why building
+  it early would fabricate evidence.
 - Phases 7, 9 and 10 each have persistence foundations in place but none of their workflow,
   API, or UI steps. A future Phase 7/9/10 must treat `0013`/`0014`/`0015` as groundwork already
   laid, not as those phases being started.

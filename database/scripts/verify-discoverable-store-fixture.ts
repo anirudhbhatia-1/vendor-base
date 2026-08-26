@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 
@@ -24,6 +25,7 @@ export async function createDiscoverableStoreFixture(
   readonly locationId: UuidV7;
   readonly ownerUserId: UuidV7;
   readonly approverUserId: UuidV7;
+  readonly publicationCaseId: UuidV7;
 }> {
   const vendorId = createUuidV7();
   const locationId = createUuidV7();
@@ -89,6 +91,29 @@ export async function createDiscoverableStoreFixture(
      VALUES ($1,'LEAD','APPROVED',$2,$3,'SYNTH_FIXTURE_APPROVED',$4,$4,$5)`,
     [onboardingCaseId, vendorId, locationId, requestId, now],
   );
+  // Readiness (and any later restore()) requires two current VENDOR_PUBLICATION
+  // documents, so the fixture provisions both rather than bypassing the gate.
+  for (const kind of ['BUSINESS_REGISTRATION', 'FOOD_SAFETY_DECLARATION'] as const) {
+    const documentId = createUuidV7();
+    const objectKey = `vendor-onboarding/${onboardingCaseId}/${documentId}/object`;
+    await pool.query(
+      `INSERT INTO marketplace.vendor_verification_documents
+         (verification_document_id, onboarding_case_id, document_kind, document_version,
+          lifecycle_state, object_key, content_sha256, content_length, media_type, scan_state,
+          affected_capability, uploaded_by_user_id, request_id, correlation_id)
+       VALUES ($1,$2,$3,1,'APPROVED',$4,$5,1024,'application/pdf','CLEAN',
+               'VENDOR_PUBLICATION',$6,$7,$7)`,
+      [
+        documentId,
+        onboardingCaseId,
+        kind,
+        objectKey,
+        createHash('sha256').update(objectKey).digest('hex'),
+        approverUserId,
+        requestId,
+      ],
+    );
+  }
   await pool.query(
     `INSERT INTO marketplace.vendor_publication_cases
        (publication_case_id, onboarding_case_id, vendor_id, vendor_location_id, lifecycle_state,
@@ -108,5 +133,24 @@ export async function createDiscoverableStoreFixture(
     ],
   );
 
-  return { vendorId, locationId, ownerUserId, approverUserId };
+  // The onboarding workflow does not yet auto-grant staff membership on
+  // approval (a separately tracked gap), so this fixture grants it directly:
+  // ownerUserId genuinely holds VENDOR_OWNER at this location, matching what
+  // a real approved applicant should end up with.
+  const ownerRoleAssignmentId = createUuidV7();
+  await pool.query(
+    `INSERT INTO marketplace.role_assignments
+       (role_assignment_id, user_id, role_key, valid_from, granted_by_user_id,
+        request_id, correlation_id)
+     VALUES ($1,$2,'VENDOR_OWNER',$3,$4,$5,$5)`,
+    [ownerRoleAssignmentId, ownerUserId, now, approverUserId, requestId],
+  );
+  await pool.query(
+    `INSERT INTO marketplace.staff_memberships
+       (staff_membership_id, role_assignment_id, user_id, vendor_location_id)
+     VALUES ($1,$2,$3,$4)`,
+    [createUuidV7(), ownerRoleAssignmentId, ownerUserId, locationId],
+  );
+
+  return { vendorId, locationId, ownerUserId, approverUserId, publicationCaseId };
 }

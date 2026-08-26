@@ -21,6 +21,7 @@ import {
   CustomerAddressService,
   CustomerDiscoveryService,
   CustomerCartService,
+  VendorStaffService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -48,10 +49,16 @@ import {
   CUSTOMER_ADDRESSES,
   CUSTOMER_DISCOVERY,
   CUSTOMER_CART,
+  VENDOR_STAFF,
 } from './tokens.js';
 import { CustomerAddressesController } from './customer-addresses.controller.js';
 import { CustomerDiscoveryController } from './customer-discovery.controller.js';
 import { CustomerCartController } from './customer-cart.controller.js';
+import {
+  VendorStaffController,
+  VendorAccessController,
+  VendorSettingsController,
+} from './vendor-staff.controller.js';
 import { CatalogueImportController } from './catalogue-import.controller.js';
 import { CatalogueProductsController } from './catalogue-products.controller.js';
 import {
@@ -77,6 +84,9 @@ import {
     CustomerAddressesController,
     CustomerDiscoveryController,
     CustomerCartController,
+    VendorStaffController,
+    VendorAccessController,
+    VendorSettingsController,
   ],
   providers: [
     LifecycleService,
@@ -179,6 +189,12 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new CustomerCartService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: VENDOR_STAFF,
+      inject: [RUNTIME_CONFIG, ACCESS_IDENTITY],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, access: IdentityAccessService) =>
+        new VendorStaffService({ connection_string: config.databaseUrl, access }),
     },
     {
       provide: ASSIGNMENT_CUSTODY,

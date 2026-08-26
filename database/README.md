@@ -1,6 +1,6 @@
 # Database migration and synthetic-fixture workflow
 
-**Scope:** Phase 2.4 database lifecycle, Phase 3 shared persistence controls, Phase 4 synthetic identity/access controls, and Phase 5.1–5.7 vendor/catalogue/delivery/money domain, company-local and isolated test databases only
+**Scope:** Phase 2.4 database lifecycle, Phase 3 shared persistence controls, Phase 4 synthetic identity/access controls, Phase 5.1–5.7 vendor/catalogue/delivery/money domain, and Phase 6.1–6.7 customer address/discovery/cart domain, company-local and isolated test databases only
 
 **Production authority:** None
 

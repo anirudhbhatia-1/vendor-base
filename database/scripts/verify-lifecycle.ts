@@ -42,6 +42,7 @@ import { verifyCatalogueProducts } from './verify-catalogue-products.js';
 import { verifyCustomerAddresses } from './verify-customer-addresses.js';
 import { verifyCustomerDiscovery } from './verify-customer-discovery.js';
 import { verifyCustomerCart } from './verify-customer-cart.js';
+import { verifyVendorStaff } from './verify-vendor-staff.js';
 
 async function assertVersions(client: Client): Promise<void> {
   const result = await client.query<{
@@ -633,6 +634,7 @@ await withDatabaseClient(config, async (client) => {
   await verifyCustomerAddresses(config.connectionString);
   await verifyCustomerDiscovery(config.connectionString);
   await verifyCustomerCart(config.connectionString);
+  await verifyVendorStaff(config.connectionString);
   await verifyAssignmentCustody(config.connectionString);
   await verifyMoneyLifecycle(config.connectionString);
   await verifyIdentityAccess(config.connectionString);
@@ -655,7 +657,8 @@ await withDatabaseClient(config, async (client) => {
   // Domain verifiers intentionally leave evidence for their assertions. Clear
   // that synthetic evidence before rehearsing schema rollback/forward cycles so
   // a Phase 4 staff row cannot outlive the Phase 5 location it references.
-  await client.query(`TRUNCATE marketplace.cart_events, marketplace.cart_lines,
+  await client.query(`TRUNCATE marketplace.vendor_staff_events,
+    marketplace.cart_events, marketplace.cart_lines,
     marketplace.cart_vendor_groups, marketplace.carts,
     marketplace.customer_discovery_events, marketplace.customer_recent_searches,
     marketplace.customer_shop_requests, marketplace.customer_preferred_store,
@@ -989,6 +992,7 @@ await withDatabaseClient(config, async (client) => {
     customer_address_scenarios: 12,
     customer_discovery_scenarios: 9,
     customer_cart_scenarios: 9,
+    vendor_staff_scenarios: 10,
     assignment_custody_scenarios: 11,
     money_lifecycle_scenarios: 12,
     target: 'test',

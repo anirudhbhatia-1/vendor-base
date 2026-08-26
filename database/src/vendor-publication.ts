@@ -598,6 +598,62 @@ export class VendorPublicationService {
     });
   }
 
+  /**
+   * Restores an unpublished location straight back to PUBLISHED, re-checking
+   * readiness the same way publish() does. The resulting event is recorded
+   * with event_type PUBLISHED and previous_state UNPUBLISHED, so the audit
+   * trail already distinguishes a restore from a first publish without a new
+   * event-type value.
+   */
+  async restore(input: {
+    readonly context: RequestContext;
+    readonly expected_version: number;
+    readonly note: string;
+    readonly publication_case_id: UuidV7;
+    readonly reason_code: string;
+  }) {
+    return this.#operate({
+      ...input,
+      event: 'PUBLISHED',
+      from: ['UNPUBLISHED'],
+      to: 'PUBLISHED',
+    });
+  }
+
+  /**
+   * Impact preview for pause/unpublish/restore: how many currently active
+   * shopping-cart groups reference this location right now. Informational
+   * only - it never blocks the transition, and cart state is unaffected by
+   * this call; the customer's own revalidate() call is what later resolves
+   * the impact this surfaces.
+   */
+  async impact(input: {
+    readonly context: RequestContext;
+    readonly publication_case_id: UuidV7;
+  }): Promise<{ readonly active_cart_groups: number; readonly active_products: number }> {
+    admin(input.context);
+    const result = await this.#pool.query<{
+      vendor_location_id: string;
+    }>(
+      'SELECT vendor_location_id FROM marketplace.vendor_publication_cases WHERE publication_case_id=$1',
+      [input.publication_case_id],
+    );
+    const locationId = result.rows[0]?.vendor_location_id;
+    if (!locationId) throw new VendorPublicationNotFoundError();
+    const counts = await this.#pool.query<{ active_cart_groups: string; active_products: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM marketplace.cart_vendor_groups
+           WHERE vendor_location_id=$1 AND lifecycle_state='ACTIVE') AS active_cart_groups,
+         (SELECT count(*)::text FROM marketplace.catalogue_products
+           WHERE vendor_location_id=$1 AND lifecycle_state='ACTIVE') AS active_products`,
+      [locationId],
+    );
+    return Object.freeze({
+      active_cart_groups: Number(counts.rows[0]?.active_cart_groups ?? '0'),
+      active_products: Number(counts.rows[0]?.active_products ?? '0'),
+    });
+  }
+
   async #operate(input: {
     readonly context: RequestContext;
     readonly event: 'PAUSED' | 'PUBLISHED' | 'UNPUBLISHED';
