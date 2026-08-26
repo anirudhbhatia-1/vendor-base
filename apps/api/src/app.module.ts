@@ -18,6 +18,7 @@ import {
   MoneyLifecycleService,
   CatalogueFreshnessModerationService,
   CatalogueProductService,
+  CustomerAddressService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -40,7 +41,8 @@ import {
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
 import { CATALOGUE_FRESHNESS_MODERATION } from './tokens.js';
-import { CATALOGUE_PRODUCTS } from './tokens.js';
+import { CATALOGUE_PRODUCTS, CUSTOMER_ADDRESSES } from './tokens.js';
+import { CustomerAddressesController } from './customer-addresses.controller.js';
 import { CatalogueImportController } from './catalogue-import.controller.js';
 import { CatalogueProductsController } from './catalogue-products.controller.js';
 import {
@@ -63,6 +65,7 @@ import {
     AdminCatalogueModerationController,
     CatalogueImportController,
     CatalogueProductsController,
+    CustomerAddressesController,
   ],
   providers: [
     LifecycleService,
@@ -147,6 +150,12 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new CatalogueProductService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: CUSTOMER_ADDRESSES,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new CustomerAddressService({ connection_string: config.databaseUrl }),
     },
     {
       provide: ASSIGNMENT_CUSTODY,

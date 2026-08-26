@@ -27,6 +27,7 @@ alias rather than silently renumbered.
 | `0015` | Synthetic money lifecycle | **Phase 10** | "Phase 5.6" | built early; label conflicts with `phases.md` 5.6 *CSV import* |
 | `0016` | Catalogue freshness and moderation | 5.7 | "Phase 5.7" | agrees |
 | `0017`, `0018` | Catalogue products, CSV import, substitutions | 5.5 and 5.6 | named, not numbered | documented in [catalogue products and import](catalogue-products-and-import.md) |
+| `0019` | Customer address management | 6.1 | "Phase 6.1" | agrees; documented in [customer address management](customer-address-management.md) |
 
 ## Consequences to carry forward
 

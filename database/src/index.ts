@@ -15,6 +15,7 @@ export * from './vendor-publication.js';
 export * from './inventory-reservations.js';
 export * from './catalogue-freshness-moderation.js';
 export * from './catalogue-products.js';
+export * from './customer-addresses.js';
 export * from './assignment-custody.js';
 export * from './money-policy.js';
 export * from './money-lifecycle.js';

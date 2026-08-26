@@ -39,6 +39,7 @@ import { verifyAssignmentCustody } from './verify-assignment-custody.js';
 import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
 import { verifyCatalogueFreshnessModeration } from './verify-catalogue-freshness-moderation.js';
 import { verifyCatalogueProducts } from './verify-catalogue-products.js';
+import { verifyCustomerAddresses } from './verify-customer-addresses.js';
 
 async function assertVersions(client: Client): Promise<void> {
   const result = await client.query<{
@@ -627,6 +628,7 @@ await withDatabaseClient(config, async (client) => {
   await verifyInventoryReservations(config.connectionString);
   await verifyCatalogueFreshnessModeration(config.connectionString);
   await verifyCatalogueProducts(config.connectionString);
+  await verifyCustomerAddresses(config.connectionString);
   await verifyAssignmentCustody(config.connectionString);
   await verifyMoneyLifecycle(config.connectionString);
   await verifyIdentityAccess(config.connectionString);
@@ -649,7 +651,8 @@ await withDatabaseClient(config, async (client) => {
   // Domain verifiers intentionally leave evidence for their assertions. Clear
   // that synthetic evidence before rehearsing schema rollback/forward cycles so
   // a Phase 4 staff row cannot outlive the Phase 5 location it references.
-  await client.query(`TRUNCATE marketplace.finance_exceptions, marketplace.provider_statement_rows,
+  await client.query(`TRUNCATE marketplace.customer_address_events, marketplace.customer_addresses,
+    marketplace.finance_exceptions, marketplace.provider_statement_rows,
     marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
     marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,
     marketplace.payment_events, marketplace.payment_allocations, marketplace.payment_transactions,
@@ -973,6 +976,7 @@ await withDatabaseClient(config, async (client) => {
     inventory_reservation_scenarios: 11,
     catalogue_freshness_moderation_scenarios: 6,
     catalogue_product_scenarios: 11,
+    customer_address_scenarios: 12,
     assignment_custody_scenarios: 11,
     money_lifecycle_scenarios: 12,
     target: 'test',

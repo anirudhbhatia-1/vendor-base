@@ -91,6 +91,7 @@ assert(
       '0016_catalogue_freshness_moderation',
       '0017_catalogue_products_and_imports',
       '0018_catalogue_substitutions',
+      '0019_customer_addresses',
     ]),
   'Unexpected reviewed migrations',
 );

@@ -70,7 +70,8 @@ export async function verifyIdentitySessions(connectionString: string): Promise<
   const base = new Date();
   try {
     await pool.query(
-      `TRUNCATE marketplace.finance_exceptions, marketplace.provider_statement_rows,
+      `TRUNCATE marketplace.customer_address_events, marketplace.customer_addresses,
+    marketplace.finance_exceptions, marketplace.provider_statement_rows,
         marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
         marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,
         marketplace.payment_events, marketplace.payment_allocations, marketplace.payment_transactions,
