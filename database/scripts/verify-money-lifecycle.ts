@@ -13,7 +13,7 @@ function check(value: unknown, message: string): asserts value {
 const TABLES = `marketplace.finance_exceptions, marketplace.provider_statement_rows,
   marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
   marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,
-  marketplace.payment_events, marketplace.payment_allocations, marketplace.payment_transactions`;
+  marketplace.payment_events, marketplace.payment_allocations, marketplace.payment_transactions CASCADE`;
 
 export async function verifyMoneyLifecycle(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, application_name: 'money-lifecycle-verifier' });

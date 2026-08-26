@@ -35,7 +35,12 @@ export async function verifyOtpIdentity(connectionString: string): Promise<void>
   const base = new Date();
   try {
     await pool.query(
-      `TRUNCATE marketplace.customer_address_events, marketplace.customer_addresses,
+      `TRUNCATE marketplace.cart_events, marketplace.cart_lines,
+    marketplace.cart_vendor_groups, marketplace.carts,
+    marketplace.customer_discovery_events, marketplace.customer_recent_searches,
+    marketplace.customer_shop_requests, marketplace.customer_preferred_store,
+    marketplace.customer_favourite_stores,
+    marketplace.customer_address_events, marketplace.customer_addresses,
     marketplace.finance_exceptions, marketplace.provider_statement_rows,
         marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
         marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,
@@ -71,7 +76,8 @@ export async function verifyOtpIdentity(connectionString: string): Promise<void>
         marketplace.sessions, marketplace.devices, marketplace.phone_identities,
         marketplace.users, marketplace.otp_verification_attempts,
         marketplace.otp_provider_events, marketplace.otp_protected_test_outbox,
-        marketplace.otp_challenges`,
+        marketplace.otp_challenges CASCADE
+      `,
     );
 
     const device = createUuidV7();

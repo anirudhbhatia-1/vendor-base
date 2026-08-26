@@ -88,6 +88,10 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
         marketplace.staff_memberships,
         marketplace.role_assignments,
         marketplace.catalogue_moderation_events, marketplace.catalogue_moderation_cases,
+        marketplace.cart_events, marketplace.cart_lines, marketplace.cart_vendor_groups, marketplace.carts,
+    marketplace.customer_discovery_events, marketplace.customer_recent_searches,
+    marketplace.customer_shop_requests, marketplace.customer_preferred_store,
+    marketplace.customer_favourite_stores,
         marketplace.catalogue_product_substitutions, marketplace.catalogue_product_images,
         marketplace.catalogue_prices, marketplace.catalogue_product_variants,
         marketplace.catalogue_import_rows, marketplace.catalogue_imports, marketplace.catalogue_products,
@@ -105,7 +109,8 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
         marketplace.vendor_location_calendar_exceptions,
         marketplace.vendor_location_operating_hours,
         marketplace.vendor_locations,
-        marketplace.vendors`,
+        marketplace.vendors CASCADE
+      `,
     );
     for (const userId of userIds) {
       await pool.query(
@@ -145,10 +150,11 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
          (SELECT count(*)::text FROM marketplace.roles) AS roles,
          (SELECT count(*)::text FROM marketplace.role_separation_rules) AS separation_rules`,
     );
-    // 26 capabilities: the 25 identity/vendor/catalogue/finance grants plus
-    // customer.address.manage from Phase 6.1 (migration 0019).
+    // 28 capabilities: the 25 identity/vendor/catalogue/finance grants plus
+    // customer.address.manage (0019), customer.discovery.use (0020), and
+    // customer.cart.manage (0021).
     if (
-      catalog.rows[0]?.capabilities !== '26' ||
+      catalog.rows[0]?.capabilities !== '28' ||
       catalog.rows[0].roles !== '19' ||
       catalog.rows[0].separation_rules !== '5'
     ) {

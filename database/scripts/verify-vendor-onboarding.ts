@@ -38,6 +38,10 @@ marketplace.assignment_events, marketplace.delivery_assignments,
 marketplace.catalogue_moderation_events, marketplace.catalogue_moderation_cases,
 marketplace.inventory_events, marketplace.inventory_reservations,
 marketplace.inventory_items, marketplace.vendor_publication_events, marketplace.vendor_publication_cases,
+  marketplace.cart_events, marketplace.cart_lines, marketplace.cart_vendor_groups, marketplace.carts,
+    marketplace.customer_discovery_events, marketplace.customer_recent_searches,
+    marketplace.customer_shop_requests, marketplace.customer_preferred_store,
+    marketplace.customer_favourite_stores,
   marketplace.catalogue_product_substitutions, marketplace.catalogue_product_images,
   marketplace.catalogue_prices, marketplace.catalogue_product_variants,
   marketplace.catalogue_import_rows, marketplace.catalogue_imports, marketplace.catalogue_products,
@@ -54,7 +58,7 @@ marketplace.inventory_items, marketplace.vendor_publication_events, marketplace.
   marketplace.vendor_location_operating_hours,
   marketplace.staff_memberships,
   marketplace.vendor_locations,
-  marketplace.vendors`;
+  marketplace.vendors CASCADE`;
 
 export async function verifyVendorOnboarding(connectionString: string): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'vendor-onboarding-verifier-'));

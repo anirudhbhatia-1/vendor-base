@@ -29,7 +29,8 @@ export async function verifyIdentityPreferences(connectionString: string): Promi
     await pool.query(
       `TRUNCATE marketplace.notification_preference_events,
         marketplace.notification_preferences, marketplace.consents,
-        marketplace.customer_profiles`,
+        marketplace.customer_profiles CASCADE
+      `,
     );
     for (const userId of [customer, otherCustomer]) {
       await pool.query(

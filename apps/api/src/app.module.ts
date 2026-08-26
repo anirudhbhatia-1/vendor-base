@@ -19,6 +19,8 @@ import {
   CatalogueFreshnessModerationService,
   CatalogueProductService,
   CustomerAddressService,
+  CustomerDiscoveryService,
+  CustomerCartService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -41,8 +43,15 @@ import {
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
 import { CATALOGUE_FRESHNESS_MODERATION } from './tokens.js';
-import { CATALOGUE_PRODUCTS, CUSTOMER_ADDRESSES } from './tokens.js';
+import {
+  CATALOGUE_PRODUCTS,
+  CUSTOMER_ADDRESSES,
+  CUSTOMER_DISCOVERY,
+  CUSTOMER_CART,
+} from './tokens.js';
 import { CustomerAddressesController } from './customer-addresses.controller.js';
+import { CustomerDiscoveryController } from './customer-discovery.controller.js';
+import { CustomerCartController } from './customer-cart.controller.js';
 import { CatalogueImportController } from './catalogue-import.controller.js';
 import { CatalogueProductsController } from './catalogue-products.controller.js';
 import {
@@ -66,6 +75,8 @@ import {
     CatalogueImportController,
     CatalogueProductsController,
     CustomerAddressesController,
+    CustomerDiscoveryController,
+    CustomerCartController,
   ],
   providers: [
     LifecycleService,
@@ -156,6 +167,18 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new CustomerAddressService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: CUSTOMER_DISCOVERY,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new CustomerDiscoveryService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: CUSTOMER_CART,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new CustomerCartService({ connection_string: config.databaseUrl }),
     },
     {
       provide: ASSIGNMENT_CUSTODY,

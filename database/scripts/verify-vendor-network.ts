@@ -33,6 +33,10 @@ const TABLES = `marketplace.finance_exceptions, marketplace.provider_statement_r
   marketplace.assignment_events, marketplace.delivery_assignments,
   marketplace.vendor_network_events,
   marketplace.catalogue_moderation_events, marketplace.catalogue_moderation_cases,
+  marketplace.cart_events, marketplace.cart_lines, marketplace.cart_vendor_groups, marketplace.carts,
+    marketplace.customer_discovery_events, marketplace.customer_recent_searches,
+    marketplace.customer_shop_requests, marketplace.customer_preferred_store,
+    marketplace.customer_favourite_stores,
   marketplace.catalogue_product_substitutions, marketplace.catalogue_product_images,
   marketplace.catalogue_prices, marketplace.catalogue_product_variants,
   marketplace.catalogue_import_rows, marketplace.catalogue_imports, marketplace.catalogue_products,
@@ -50,7 +54,7 @@ const TABLES = `marketplace.finance_exceptions, marketplace.provider_statement_r
   marketplace.vendor_location_operating_hours,
   marketplace.staff_memberships,
   marketplace.vendor_locations,
-  marketplace.vendors`;
+  marketplace.vendors CASCADE`;
 
 export async function verifyVendorNetwork(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, application_name: 'vendor-network-verifier' });

@@ -40,6 +40,8 @@ import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
 import { verifyCatalogueFreshnessModeration } from './verify-catalogue-freshness-moderation.js';
 import { verifyCatalogueProducts } from './verify-catalogue-products.js';
 import { verifyCustomerAddresses } from './verify-customer-addresses.js';
+import { verifyCustomerDiscovery } from './verify-customer-discovery.js';
+import { verifyCustomerCart } from './verify-customer-cart.js';
 
 async function assertVersions(client: Client): Promise<void> {
   const result = await client.query<{
@@ -629,6 +631,8 @@ await withDatabaseClient(config, async (client) => {
   await verifyCatalogueFreshnessModeration(config.connectionString);
   await verifyCatalogueProducts(config.connectionString);
   await verifyCustomerAddresses(config.connectionString);
+  await verifyCustomerDiscovery(config.connectionString);
+  await verifyCustomerCart(config.connectionString);
   await verifyAssignmentCustody(config.connectionString);
   await verifyMoneyLifecycle(config.connectionString);
   await verifyIdentityAccess(config.connectionString);
@@ -651,7 +655,12 @@ await withDatabaseClient(config, async (client) => {
   // Domain verifiers intentionally leave evidence for their assertions. Clear
   // that synthetic evidence before rehearsing schema rollback/forward cycles so
   // a Phase 4 staff row cannot outlive the Phase 5 location it references.
-  await client.query(`TRUNCATE marketplace.customer_address_events, marketplace.customer_addresses,
+  await client.query(`TRUNCATE marketplace.cart_events, marketplace.cart_lines,
+    marketplace.cart_vendor_groups, marketplace.carts,
+    marketplace.customer_discovery_events, marketplace.customer_recent_searches,
+    marketplace.customer_shop_requests, marketplace.customer_preferred_store,
+    marketplace.customer_favourite_stores,
+    marketplace.customer_address_events, marketplace.customer_addresses,
     marketplace.finance_exceptions, marketplace.provider_statement_rows,
     marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
     marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,
@@ -676,7 +685,8 @@ await withDatabaseClient(config, async (client) => {
     marketplace.vendor_location_temporary_closures,
     marketplace.vendor_location_calendar_exceptions,
     marketplace.vendor_location_operating_hours, marketplace.vendor_locations,
-    marketplace.vendors`);
+    marketplace.vendors CASCADE
+      `);
 
   await revertThrough(client, '0015_money_lifecycle');
   const moneyTablesAfterRollback = await client.query<{
@@ -977,6 +987,8 @@ await withDatabaseClient(config, async (client) => {
     catalogue_freshness_moderation_scenarios: 6,
     catalogue_product_scenarios: 11,
     customer_address_scenarios: 12,
+    customer_discovery_scenarios: 9,
+    customer_cart_scenarios: 9,
     assignment_custody_scenarios: 11,
     money_lifecycle_scenarios: 12,
     target: 'test',

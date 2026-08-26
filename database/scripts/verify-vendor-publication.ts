@@ -18,6 +18,10 @@ marketplace.payment_events, marketplace.payment_allocations, marketplace.payment
 marketplace.return_tasks, marketplace.custody_events,
 marketplace.assignment_events, marketplace.delivery_assignments,
 marketplace.catalogue_moderation_events, marketplace.catalogue_moderation_cases,
+marketplace.cart_events, marketplace.cart_lines, marketplace.cart_vendor_groups, marketplace.carts,
+    marketplace.customer_discovery_events, marketplace.customer_recent_searches,
+    marketplace.customer_shop_requests, marketplace.customer_preferred_store,
+    marketplace.customer_favourite_stores,
 marketplace.catalogue_product_substitutions, marketplace.catalogue_product_images,
 marketplace.catalogue_prices, marketplace.catalogue_product_variants,
 marketplace.catalogue_import_rows, marketplace.catalogue_imports, marketplace.catalogue_products,
@@ -29,7 +33,7 @@ marketplace.inventory_items, marketplace.vendor_publication_events, marketplace.
   marketplace.vendor_location_fulfilment_modes, marketplace.vendor_service_zones,
   marketplace.vendor_location_temporary_closures, marketplace.vendor_location_calendar_exceptions,
   marketplace.vendor_location_operating_hours, marketplace.staff_memberships,
-  marketplace.vendor_locations, marketplace.vendors`;
+  marketplace.vendor_locations, marketplace.vendors CASCADE`;
 
 function context(actorId: UuidV7) {
   return createRequestContext({

@@ -245,7 +245,7 @@ export async function verifyInventoryReservations(connectionString: string): Pro
     await service.close();
     await pool
       .query(
-        'TRUNCATE marketplace.catalogue_moderation_events, marketplace.catalogue_moderation_cases, marketplace.inventory_events, marketplace.inventory_reservations, marketplace.inventory_items',
+        'TRUNCATE marketplace.catalogue_moderation_events, marketplace.catalogue_moderation_cases, marketplace.inventory_events, marketplace.inventory_reservations, marketplace.inventory_items CASCADE',
       )
       .catch(() => undefined);
     await pool

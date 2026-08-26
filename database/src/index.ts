@@ -16,6 +16,8 @@ export * from './inventory-reservations.js';
 export * from './catalogue-freshness-moderation.js';
 export * from './catalogue-products.js';
 export * from './customer-addresses.js';
+export * from './customer-discovery.js';
+export * from './customer-cart.js';
 export * from './assignment-custody.js';
 export * from './money-policy.js';
 export * from './money-lifecycle.js';
