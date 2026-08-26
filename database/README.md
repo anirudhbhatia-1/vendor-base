@@ -1,6 +1,6 @@
 # Database migration and synthetic-fixture workflow
 
-**Scope:** Phase 2 Step 2.4 company-local and isolated test databases only
+**Scope:** Phase 2.4 database lifecycle, Phase 3 shared persistence controls, Phase 4 synthetic identity/access controls, and Phase 5.1–5.7 vendor/catalogue/delivery/money domain, company-local and isolated test databases only
 
 **Production authority:** None
 
@@ -60,7 +60,7 @@ The runner:
 
 Migration SQL must not contain `BEGIN`, `COMMIT`, or `ROLLBACK`; transaction ownership belongs to the runner. Use additive expand-and-contract migrations. A destructive or irreversible change needs a separately approved recovery plan and must not be disguised as an empty down file.
 
-The `0000_baseline` migration activates PostGIS and creates an otherwise empty `marketplace` domain schema. Its down migration is safe only while that baseline contains no domain tables. Later migrations must roll back before the baseline.
+The `0000_baseline` migration activates PostGIS and creates the `marketplace` domain schema. The `0001_idempotent_commands` migration adds the shared command-result store. The `0002_aggregate_versions` migration adds optimistic aggregate heads and append-only transition history. The `0003_transactional_messaging` migration adds durable outbox events, inbox receipts and attributable dead-letter recovery. The `0004_durable_jobs` migration adds scheduled jobs, leased ownership, immutable attempt history and attributable recovery. The `0005_versioned_configuration` migration adds scoped configuration versions, maker-checker lifecycle history, overlap protection and immutable business-record snapshots. The `0006_otp_identity` migration adds hashed challenges, a protected local test outbox, and deduplicated fake-provider events. The `0007_identity_sessions` migration adds minimal principals, hashed phone identities, safe devices, opaque hashed sessions, rotating refresh history and append-only session events. The `0008_identity_roles` migration adds the reviewed role/capability catalog, scoped memberships, partner eligibility/current-assignment evidence, admin maker-checker exclusion, and append-only access lifecycle evidence. The `0009_identity_preferences` migration adds optional profiles, versioned consent, reviewed notification policy/preferences, append-only preference history, and retention metadata on sensitive identity rows. The `0010_vendor_network` migration adds versioned vendors and locations, schedules, closures, PostGIS service zones, approved fulfilment methods and real location references for staff membership. The `0011_vendor_onboarding` migration adds lead/invitation/application cases, protected-document metadata and versions, maker-checker reviews, appeals, expiry/grace/reverification state, and append-only onboarding evidence. The `0012_vendor_publication` migration adds computed readiness snapshots, separate publication operator/reviewer roles, maker-checker approval, storefront lifecycle and append-only publication evidence. The `0013_inventory_reservations` migration adds counted and vendor-confirms stock, expiring reservation states, atomic stock application/restoration and append-only inventory evidence. The `0014_assignment_custody` migration adds one-active-attempt enforcement, offer expiry, exact partner memberships, package custody evidence, controlled returns, and append-only assignment/custody histories. The `0015_money_lifecycle` migration adds synthetic payment allocation, maker-checker refunds, deferred balanced-ledger enforcement, settlements, fake payouts, provider statements, and finance exceptions. The `0016_catalogue_freshness_moderation` migration adds customer-safe freshness reads, an audited moderation queue, correction reasons, restricted-product suppression, and the scoped catalogue-moderator capability. Later migrations must roll back before the baseline.
 
 Drizzle configuration lives in `drizzle.config.ts`, and typed schema declarations start in `schema.ts`. Drizzle-generated SQL must be converted into a paired reviewed migration before execution. Never apply automatic schema synchronization.
 
@@ -103,3 +103,81 @@ It starts `database-test`, proves PostgreSQL 18 and PostGIS 3.6, runs up, repeat
 6. Record data backfill, lock duration, rollback limits, query/index impact, and operational ownership in the change.
 
 Database migrations never select hosting, production credentials, backup policy, recovery objectives, or permission to process real data.
+
+## Vendor and location domain
+
+The compiled database package exports `VendorNetworkService`. It keeps business profiles, weekly hours, calendar exceptions, temporary closures, service zones, approved fulfilment modes, integer INR minimums, and preparation durations in one location-version transaction boundary. Operational status applies timezone and closure precedence and optionally proves PostGIS zone containment. See [Vendor and Location Domain](../docs/engineering/vendor-and-location-domain.md).
+
+## Vendor onboarding and verification
+
+The database package exports `VendorOnboardingService` and the `ProtectedObjectStorage` contract. The company-local adapter accepts only marked synthetic documents, applies deterministic scan scenarios, verifies checksums, contains filesystem paths, and issues read grants lasting no more than five minutes. Onboarding supports leads, invitations, applications, separate operator/reviewer decisions, appeals, and expiry/grace/reverification while preserving append-only evidence. See [Vendor Onboarding and Verification](../docs/engineering/vendor-onboarding-and-verification.md).
+
+## Vendor publication
+
+The database package exports `VendorPublicationService`. It computes a six-check launch strip from authoritative onboarding, profile, schedule, PostGIS zone, fulfilment, and document state; applies maker-checker submission/approval; and atomically publishes, pauses, restores, or unpublishes the vendor network with append-only evidence. See [Vendor Publication Workflow](../docs/engineering/vendor-publication-workflow.md).
+
+## Inventory reservations
+
+The database package exports `InventoryReservationService`. Counted inventory uses row locking to prevent over-reservation and restores exact units once on release or expiry. Vendor-confirms inventory records intent without an exact quantity. Vendor APIs are location-contained; checkout/order transitions remain internal until their owning aggregates exist. See [Inventory Reservation Lifecycle](../docs/engineering/inventory-reservation-lifecycle.md).
+
+## Assignment and custody
+
+The database package exports `AssignmentCustodyService`. It enforces one active synthetic attempt per source order, eligibility before offer acceptance, exact active-assignment membership after acceptance, optimistic transitions, verified package count at pickup, uninterrupted custody, terminal membership closure, and admin-authorized returns after failed delivery. See [Assignment and Custody Lifecycle](../docs/engineering/assignment-and-custody-lifecycle.md).
+
+## Synthetic money lifecycle
+
+The database package exports `MoneyLifecycleService`, the deterministic `LocalFakeMoneyProvider`, and integer-paise policy functions. Payment, refund, settlement, and payout mutations preserve synthetic-reference boundaries; every posted ledger transaction balances before commit; and unknown payouts resolve only through a matching statement under the same provider operation. See [Synthetic Money Lifecycle](../docs/engineering/synthetic-money-lifecycle.md).
+
+## Idempotent command boundary
+
+The compiled database package exports canonical request hashing, `executeIdempotentCommand`, and `reconcileUncertainCommand`. Claims are unique by actor, command scope, and opaque retry key. Exact status/body results are replayed for the same canonical request; a changed request is rejected. Expired leases and ambiguous provider calls become `UNCERTAIN` and are retained for reconciliation instead of being executed again.
+
+See `docs/engineering/idempotent-command-handling.md` for the command contract, retention rules, and test coverage. Domain endpoints will adopt this boundary as they are introduced; no business command endpoint exists in Phase 3.3.
+
+## Aggregate versioning and transition history
+
+The database package exports policy definition, versioned aggregate creation and expected-version transitions. Accepted changes advance the aggregate head and append fully attributable history in one transaction. A domain mutation callback can participate in that transaction; callback failure rolls back the mutation, version and history together. Stale concurrent edits return stable `VERSION_CONFLICT` details instead of overwriting newer state.
+
+See `docs/engineering/aggregate-versioning-and-transitions.md` for policy rules, attribution fields and disposable-database concurrency coverage. Domain-specific aggregate policies begin in later phases.
+
+## Transactional outbox and inbox
+
+Domain code can enqueue an event through the aggregate transaction callback, so business state, version history and outbox state commit or roll back together. Workers claim committed events in bounded `SKIP LOCKED` batches and dispatch with expiring ownership, capped retry and safe dead-letter state. Consumers use a per-scope inbox receipt to commit their handler effect once despite at-least-once delivery.
+
+Dead letters have bounded list and attributable recovery operations. Event content and durable messaging history reject direct mutation/deletion. See `docs/engineering/transactional-outbox-and-inbox.md` for delivery semantics and verification.
+
+## Durable scheduler and jobs
+
+The database package exports replay-safe job scheduling, concurrent bounded claiming, expiring ownership, capped retry execution, dead-letter listing/recovery and queue metrics. Every claim creates a lifetime-numbered attempt; abandoned leases and classified failures remain visible instead of being overwritten.
+
+Execution is at least once, so handlers must use the shared idempotency, inbox or equivalent domain deduplication boundary. See `docs/engineering/durable-scheduler-and-jobs.md` for the handler contract, metrics and disposable-database verification.
+
+## Versioned configuration and feature flags
+
+The database package exports immutable configuration drafts, validation, different-actor approval, scheduling, activation/supersession, rollback-as-new-version, deterministic scoped resolution and business-record version snapshots. Database constraints allow only one scheduled and one active version for each key/scope.
+
+Feature flags are boolean, server-authoritative and default to disabled when no version matches. See `docs/engineering/versioned-configuration-and-feature-flags.md` for lifecycle, scope precedence, snapshot semantics and verification.
+
+## Phase 3 reference module
+
+The synthetic `reference_submission` module proves the shared foundations as one correlated vertical slice: idempotent request, atomic aggregate/configuration/outbox creation, inbox worker consumption, durable job transition, stable concurrent conflict, metrics and audit evidence. It adds no product API or real-data authority.
+
+See `docs/engineering/phase-3-reference-module.md` for the exact flow, failure proof and boundary before Phase 4.
+
+## OTP identity boundary
+
+The database package exports the local synthetic OTP request/verify service. It enforces phone, device, resend, attempt, expiry, replay and callback-deduplication controls transactionally. It accepts fictional `SYNTH-PHONE-*` identifiers only, stores keyed hashes in the general identity table, and destroys protected test-outbox content on verification, expiry, or lockout.
+
+See `docs/engineering/otp-request-and-verification.md` for the API, privacy, simulator and Phase 4.2 boundaries.
+
+See `docs/engineering/roles-capabilities-and-memberships.md` for the Phase 4.3 catalog, default-deny evaluator, scoped membership rules, and Phase 4.4 enforcement boundary.
+
+See `docs/engineering/customer-profile-consent-and-preferences.md` for Phase 4.5 optional profiles, versioned consent, language/channel preferences, and retention classification.
+
+See `docs/engineering/identity-isolation-proof.md` for the Phase 4.6 cross-role, cross-tenant, opaque-reference, and log-redaction abuse matrix.
+
+## Sessions and devices
+
+The compiled database package exports transactional OTP-to-session issuance, access authentication, refresh rotation with replay-family revocation, access/refresh expiry, same-user session listing/revocation, current sign-out, and hashed notification-token lifecycle. Raw credentials are returned only to the immediate caller and are never stored.
+
+See `docs/engineering/sessions-and-devices.md` for token lifetimes, API contracts, transaction guarantees, threat tests, and the boundary before roles.

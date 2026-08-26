@@ -11,6 +11,7 @@ build/
 coverage/
 test-results/
 playwright-report/
+outputs/
 .ci-artifacts/
 .online-test-evidence/
 *.tsbuildinfo
@@ -41,3 +42,4 @@ infrastructure/online-test/secrets/
 *.log
 npm-debug.log*
 pnpm-debug.log*
+.gstack/

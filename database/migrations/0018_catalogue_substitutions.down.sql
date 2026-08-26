@@ -1,0 +1,1 @@
+DROP TABLE marketplace.catalogue_product_substitutions;

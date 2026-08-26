@@ -5,7 +5,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Delivery Partner · Neighbourhood Store',
-  description: 'Internal delivery-partner PWA shell for local company development.',
+  description: 'Synthetic assignment and custody workbench for local company development.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

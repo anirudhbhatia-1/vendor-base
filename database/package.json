@@ -5,7 +5,14 @@
   "description": "Reviewed PostgreSQL/PostGIS migrations and deterministic company-local fixtures.",
   "license": "UNLICENSED",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
+    "build": "tsc --project tsconfig.build.json",
     "migration:up": "tsx scripts/migrate.ts up --target local",
     "migration:down": "tsx scripts/migrate.ts down --steps 1 --target local",
     "migration:status": "tsx scripts/migrate.ts status --target local",
@@ -14,11 +21,12 @@
     "rebuild": "tsx scripts/rebuild.ts --target local",
     "reset": "tsx scripts/reset.ts --target local",
     "seed": "tsx scripts/seed.ts --target local",
-    "test:unit": "tsx scripts/verify-static.ts",
+    "test:unit": "pnpm --filter @neighbourhood-store/domain-types build && tsx scripts/verify-static.ts && node --import tsx --test src/*.spec.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "verify:lifecycle": "tsx scripts/verify-lifecycle.ts"
+    "verify:lifecycle": "pnpm --filter @neighbourhood-store/domain-types build && tsx scripts/verify-lifecycle.ts"
   },
   "dependencies": {
+    "@neighbourhood-store/domain-types": "workspace:*",
     "drizzle-orm": "0.45.2",
     "pg": "8.23.0"
   },

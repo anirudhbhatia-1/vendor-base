@@ -14,6 +14,7 @@ const ignoredPaths = [
   '**/coverage/**',
   '**/test-results/**',
   '**/playwright-report/**',
+  '**/outputs/**',
 ];
 
 export default tseslint.config(

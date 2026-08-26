@@ -1,6 +1,6 @@
 # Free Online Company-Test Migration Plan
 
-**Status:** Provider set approved; Step 2.6 repository deployment skeleton implemented; provider resources not yet provisioned or deployed
+**Status:** Paused by D-12; local company development active; future migration reference only
 **Target environment described:** A private, bounded, online company-test environment
 **Production authority:** None
 **Owner:** Engineering Lead
@@ -8,11 +8,11 @@
 
 ## 1. Decision and limits
 
-The local system will keep provider-neutral interfaces so that each local dependency can be replaced by an online service without rewriting marketplace domain logic. D-11 and ADR-003 select the first online company-test provider set. The local stack remains available for offline development, deterministic tests and provider simulators.
+The local system will keep provider-neutral interfaces so that each local dependency can later be replaced without rewriting marketplace domain logic. D-11 and ADR-003 preserve the researched online company-test provider set. D-12 pauses its execution and makes the local stack the only active environment for development, deterministic tests and provider simulators.
 
 This is **not** a promise that a public marketplace serving thousands or lakhs of people can run permanently for zero cost. Free tiers have quotas, can change, usually lack production service-level agreements, and may suspend or reject work at their limits. Real SMS OTP, payment processing, payouts, a branded domain, and unrestricted Google Play distribution have no safe, dependable, permanently free route. Those are explicit cost gates, not missing research.
 
-No provider account or resource has yet been created or deployed. The repository now contains the controlled `online-test` build, database, container, health-evidence, and rollback skeleton plus its setup runbook. The named core providers are selected only for `online_test`; other entries remain candidates. Production replacements remain unselected until the corresponding row in the [canonical replacement register](test-to-production-replacement-register.md) passes its owners, evidence, security, privacy, finance, recovery, and operational gates.
+Before D-12, four synthetic Cloudflare Pages snapshots and an empty Supabase/PostGIS baseline were created. They are paused and non-authoritative. Cloudflare R2 was not activated, OCI was not provisioned, and no API, worker, queue, storage, identity, notification, analytics, or observability adapter was connected online. The repository retains the controlled `online-test` build, database, container, health-evidence, and rollback skeleton as future reference. Production replacements remain unselected until the corresponding row in the [canonical replacement register](test-to-production-replacement-register.md) passes its owners, evidence, security, privacy, finance, recovery, and operational gates.
 
 ### Terms used below
 
@@ -157,7 +157,7 @@ Production startup must reject `DATA_MODE=synthetic`, all fake/sandbox money ada
 
 ## 5. Migration sequence
 
-This plan does not start the next engineering step. When the project owner authorizes online-test work, use this order:
+This plan does not start the next engineering step. D-12 currently prohibits executing it. After a new explicit resume decision inventories existing resources and rotates credentials, use this order:
 
 1. **Approve the environment boundary.** Name the owner, users, data mode, access method, region, quota ceilings, stop conditions, deletion date, and incident route.
 2. **Create accounts and cost guards.** Use company-owned accounts, least privilege, MFA, recovery owners, provider budgets/quotas, and no automatic paid overage where the provider permits it.

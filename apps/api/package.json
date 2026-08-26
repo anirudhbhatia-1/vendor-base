@@ -9,10 +9,13 @@
     "build": "tsc --project tsconfig.json",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
-    "test:integration": "pnpm build && node scripts/health-smoke.mjs",
+    "test:unit": "pnpm --filter @neighbourhood-store/domain-types build && pnpm --filter @neighbourhood-store/database build && node --import tsx --test src/*.spec.ts",
+    "test:integration": "pnpm --filter @neighbourhood-store/domain-types build && pnpm --filter @neighbourhood-store/database build && pnpm build && node scripts/health-smoke.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@neighbourhood-store/database": "workspace:*",
+    "@neighbourhood-store/domain-types": "workspace:*",
     "@nestjs/common": "11.2.1",
     "@nestjs/core": "11.2.1",
     "@nestjs/platform-fastify": "11.2.1",

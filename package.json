@@ -38,6 +38,8 @@
     "db:up": "node database/scripts/compose.mjs up",
     "db:verify": "node database/scripts/verify-stack.mjs",
     "db:verify:connected": "pnpm --filter @neighbourhood-store/database verify:lifecycle",
+    "local:catalogue-access": "tsx database/scripts/create-local-catalogue-access.ts",
+    "local:moderator-access": "tsx database/scripts/create-local-moderator-access.ts",
     "dependencies:check": "node tooling/scripts/check-dependency-policy.mjs",
     "online-test:health": "node tooling/scripts/online-test-health.mjs",
     "online-test:verify": "node tooling/scripts/verify-online-test-deployment.mjs",

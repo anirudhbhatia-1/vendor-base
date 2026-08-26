@@ -6,11 +6,16 @@ import { apiLogger } from './json-logger.js';
 import { RUNTIME_CONFIG, type RuntimeConfig } from './runtime-config.js';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestFastifyApplication>(
-    AppModule,
-    new FastifyAdapter({ logger: false }),
-    { logger: apiLogger },
-  );
+  const adapter = new FastifyAdapter({ bodyLimit: 7 * 1024 * 1024, logger: false });
+  const { installRequestContextHook } = await import('./request-context-hook.js');
+  installRequestContextHook(adapter.getInstance());
+  const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, {
+    logger: apiLogger,
+  });
+  app.enableCors({
+    methods: ['GET', 'POST', 'PUT'],
+    origin: /^http:\/\/(?:127\.0\.0\.1|localhost):31(?:00|01|02|03)$/,
+  });
   app.enableShutdownHooks(['SIGINT', 'SIGTERM']);
 
   const config = app.get<RuntimeConfig>(RUNTIME_CONFIG);

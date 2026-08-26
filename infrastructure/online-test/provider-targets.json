@@ -1,7 +1,8 @@
 {
   "environment": "online-test",
   "dataClassification": "synthetic-only",
-  "status": "selected-not-provisioned",
+  "status": "paused-local-primary",
+  "activeEnvironment": "local",
   "providers": {
     "sourceAndCi": "GitHub Free",
     "pwaAndCdn": "Cloudflare Pages",
@@ -23,5 +24,12 @@
     "observability",
     "analytics"
   ],
+  "externalResourceState": {
+    "pwaAndCdn": "provisioned-synthetic-snapshots-non-authoritative",
+    "database": "provisioned-empty-baseline-non-authoritative",
+    "objectStorage": "not-activated",
+    "compute": "not-provisioned",
+    "remainingProviders": "not-connected"
+  },
   "credentialPolicy": "Provider credentials are stored only in provider secret stores or OCI Vault and are never committed."
 }

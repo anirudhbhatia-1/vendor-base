@@ -14,14 +14,14 @@ const clients = [
   },
   {
     appDirectory: 'apps/vendor-app/dist',
-    expected: 'Vendor PWA · Internal build',
+    expected: 'Vendor desk · Jaipur company test',
     filter: '@neighbourhood-store/vendor-pwa',
     role: 'vendor',
     url: 'http://127.0.0.1:3101',
   },
   {
     appDirectory: 'apps/partner-app/dist',
-    expected: 'Delivery Partner PWA · Internal build',
+    expected: 'Delivery Partner · Internal build',
     filter: '@neighbourhood-store/partner-pwa',
     role: 'partner',
     url: 'http://127.0.0.1:3102',

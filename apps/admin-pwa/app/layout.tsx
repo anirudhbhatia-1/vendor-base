@@ -5,7 +5,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Admin · Neighbourhood Store',
-  description: 'Internal admin PWA shell for local company development.',
+  description: 'Synthetic vendor publication control room for local company development.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

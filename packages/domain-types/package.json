@@ -4,5 +4,16 @@
   "private": true,
   "description": "Framework-free shared identifiers, value shapes, states and error names.",
   "license": "UNLICENSED",
-  "type": "module"
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test:unit": "node --import tsx --test src/*.spec.ts"
+  }
 }

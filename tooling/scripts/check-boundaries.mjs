@@ -12,6 +12,7 @@ const skippedDirectories = new Set([
   'dist',
   'build',
   'coverage',
+  'outputs',
 ]);
 const packageImportAllowlist = {
   contracts: new Set(['domain-types']),
@@ -21,6 +22,7 @@ const packageImportAllowlist = {
 function ownerOf(relativeFile) {
   const [group, name] = relativeFile.split(path.sep);
   if ((group === 'apps' || group === 'packages') && name) return { group, name };
+  if (group === 'database') return { group: 'database', name: 'database' };
   return null;
 }
 
@@ -38,6 +40,12 @@ function localPackageName(specifier) {
 export function validatePackageEdge(source, target, testFile = false) {
   if (!source) return null;
   if (target.group === 'apps') return 'applications may not be imported by another workspace';
+  if (
+    target.group === 'database' &&
+    (source.group !== 'apps' || (source.name !== 'api' && source.name !== 'worker'))
+  ) {
+    return 'the database runtime may be imported only by server applications';
+  }
   if (target.name === 'test-data' && !testFile) {
     return 'test-data may be imported only from test files';
   }
@@ -85,11 +93,13 @@ export function validateBoundaries(root) {
       if (localName) {
         const appExists = fs.existsSync(path.join(root, 'apps', localName));
         const packageExists = fs.existsSync(path.join(root, 'packages', localName));
-        if (!appExists && !packageExists) {
+        const databaseExists =
+          localName === 'database' && fs.existsSync(path.join(root, 'database', 'package.json'));
+        if (!appExists && !packageExists && !databaseExists) {
           errors.push(`${relativeFile}: ${specifier}: unknown internal workspace package`);
           continue;
         }
-        const targetGroup = appExists ? 'apps' : 'packages';
+        const targetGroup = appExists ? 'apps' : databaseExists ? 'database' : 'packages';
         const reason = validatePackageEdge(
           sourceOwner,
           { group: targetGroup, name: localName },
@@ -120,6 +130,8 @@ function runSelfTest() {
   const contracts = { group: 'packages', name: 'contracts' };
   const domain = { group: 'packages', name: 'domain-types' };
   const testData = { group: 'packages', name: 'test-data' };
+  const database = { group: 'database', name: 'database' };
+  const api = { group: 'apps', name: 'api' };
 
   if (!validatePackageEdge(app, otherApp)) throw new Error('app-to-app import was accepted');
   if (validatePackageEdge(app, contracts)) throw new Error('app-to-package import was rejected');
@@ -130,6 +142,23 @@ function runSelfTest() {
     throw new Error('runtime test-data import passed');
   if (validatePackageEdge(app, testData, true))
     throw new Error('test-only test-data import failed');
+  if (validatePackageEdge(api, database)) throw new Error('server-to-database import was rejected');
+  if (!validatePackageEdge(app, database))
+    throw new Error('client-to-database import was accepted');
+
+  const root = process.cwd();
+  const gitIgnore = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+  const prettierIgnore = fs.readFileSync(path.join(root, '.prettierignore'), 'utf8');
+  const eslintConfig = fs.readFileSync(path.join(root, 'eslint.config.mjs'), 'utf8');
+  if (!gitIgnore.split(/\r?\n/).includes('outputs/')) {
+    throw new Error('generated outputs are not excluded from Git');
+  }
+  if (!prettierIgnore.split(/\r?\n/).includes('outputs/')) {
+    throw new Error('generated outputs are not excluded from formatting');
+  }
+  if (!eslintConfig.includes("'**/outputs/**'")) {
+    throw new Error('generated outputs are not excluded from linting');
+  }
 }
 
 function main() {

@@ -5,7 +5,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Vendor · Neighbourhood Store',
-  description: 'Internal vendor PWA shell for local company development.',
+  description: 'Synthetic vendor inventory reservations for local company development.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

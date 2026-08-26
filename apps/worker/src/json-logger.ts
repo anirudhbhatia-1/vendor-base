@@ -1,9 +1,11 @@
 import type { LoggerService } from '@nestjs/common';
+import { redactProtectedFields, type SafeLogValue } from '@neighbourhood-store/domain-types';
+import { optionalMessageContext } from './message-context.js';
 
 type LogLevel = 'debug' | 'error' | 'fatal' | 'info' | 'verbose' | 'warn';
 
 function safeMessage(message: unknown): string {
-  if (message instanceof Error) return message.message;
+  if (message instanceof Error) return message.name;
   if (typeof message === 'string') return message;
   return 'framework event';
 }
@@ -11,7 +13,7 @@ function safeMessage(message: unknown): string {
 export class JsonLogger implements LoggerService {
   constructor(private readonly service: string) {}
 
-  event(event: string, metadata: Readonly<Record<string, boolean | number | string>> = {}): void {
+  event(event: string, metadata: Readonly<Record<string, unknown>> = {}): void {
     this.write('info', event, metadata);
   }
 
@@ -51,17 +53,26 @@ export class JsonLogger implements LoggerService {
     return typeof context === 'string' ? context : 'application';
   }
 
-  private write(
-    level: LogLevel,
-    event: string,
-    metadata: Readonly<Record<string, boolean | number | string>>,
-  ): void {
+  private write(level: LogLevel, event: string, metadata: Readonly<Record<string, unknown>>): void {
+    const messageContext = optionalMessageContext();
+    const safeMetadata = redactProtectedFields(metadata) as Readonly<Record<string, SafeLogValue>>;
     const line = `${JSON.stringify({
+      ...safeMetadata,
       timestamp: new Date().toISOString(),
       level,
       service: this.service,
       event,
-      ...metadata,
+      ...(messageContext
+        ? {
+            request_id: messageContext.request_id,
+            correlation_id: messageContext.correlation_id,
+            causation_id: messageContext.causation_id,
+            trace_id: messageContext.trace.trace_id,
+            span_id: messageContext.trace.span_id,
+            actor_id: messageContext.actor?.actor_id ?? null,
+            actor_kind: messageContext.actor?.actor_kind ?? null,
+          }
+        : {}),
     })}\n`;
     if (level === 'error' || level === 'fatal') process.stderr.write(line);
     else process.stdout.write(line);

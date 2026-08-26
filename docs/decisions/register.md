@@ -2,7 +2,7 @@
 
 **Register status:** Active  
 **Established:** 13 August 2026  
-**Scope:** D-01 through D-11 from `implementation.md` §3
+**Scope:** D-01 through D-12 from `implementation.md` §3
 
 The owner and due date columns assign responsibility for producing evidence and a recommendation. They do not approve the underlying decision.
 
@@ -19,10 +19,11 @@ The owner and due date columns assign responsibility for producing evidence and 
 | [D-09](D-09.md) | Internal support, incidents, and approval thresholds | Operations Lead | 9 October 2026 | APPROVED — INTERNAL TEST OPERATIONS ONLY | Public support promises and production authority remain blocked | P0–P3 targets, staffed hours, handoff, maker-checker, incident and audit tests |
 | [D-10](D-10.md) | Recovery targets and synthetic restore drills | Engineering Lead | 16 October 2026 | APPROVED TARGETS — PRODUCTION CAPABILITY UNPROVEN | Public launch remains blocked until recovery is proven | Tiered RPO/RTO, isolated restore, reconciliation and resumption evidence |
 | [D-11](D-11.md) | Free online company-test provider selection | Engineering Lead | 18 August 2026 | APPROVED — ONLINE COMPANY TEST TARGETS; NOT DEPLOYED | Shared online testing remains blocked until its implementation and control gates pass; production remains blocked | [ADR-003](../architecture/ADR-003-free-online-company-test-stack.md) and the [free online migration plan](../production/free-online-company-test-migration-plan.md) |
+| [D-12](D-12.md) | Return to local-only active development | Project Owner with Engineering Lead | 18 August 2026 | APPROVED — LOCAL ACTIVE; ONLINE TEST PAUSED | Further online provisioning, integration, deployment, and credential use remain blocked until an explicit resume decision | Local entry points, paused-resource inventory, credential cleanup, and preserved online reference files |
 
 ## Governance defaults
 
-D-01 through D-04 owners and dates were explicitly approved by the project owner. D-01 through D-09 approve only internal company testing: synthetic pilot data, clients, local stack, provider simulators, test-money rules, company delivery testers, fictional documents, synthetic privacy controls, and internal support. D-10 approves recovery targets and synthetic drills but does not claim production capability. D-11 selects the online company-test provider targets but does not create or deploy an environment. Every production portion remains deferred. These owners may be reassigned by the project owner; reassignment does not approve or alter product policy.
+D-01 through D-04 owners and dates were explicitly approved by the project owner. D-01 through D-09 approve only internal company testing: synthetic pilot data, clients, local stack, provider simulators, test-money rules, company delivery testers, fictional documents, synthetic privacy controls, and internal support. D-10 approves recovery targets and synthetic drills but does not claim production capability. D-11 preserves the researched online provider target. D-12 pauses its execution and makes local company development the only active path. Every production portion remains deferred. These owners may be reassigned by the project owner; reassignment does not approve or alter product policy.
 
 ## Validation-only assumptions
 

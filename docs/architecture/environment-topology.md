@@ -1,6 +1,6 @@
 # Internal environment topology
 
-**Status:** Local topology executable; online company-test providers selected but not deployed
+**Status:** Local topology executable and active; online company-test work paused by D-12
 
 **External exposure:** Prohibited by default
 
@@ -36,15 +36,15 @@ The Step 2.3 API and worker still report `production_ready: false`; Step 2.4 doe
 | `local` | Normal developer work | Synthetic data; local filesystem; fake providers only |
 | `test` | Automated isolated verification | Ephemeral synthetic fixtures; fake providers only |
 | `queue-compat` | BullMQ compatibility verification | Synthetic jobs; Valkey and Redis profiles tested separately |
-| `online_test` | Future private company online testing using the D-11 provider set | Synthetic data by default; controlled real cases require separate approval |
+| `online_test` | Paused future private company online testing using the D-11 provider set | No active execution; synthetic data only if D-12 is later superseded |
 
-`online_test` is a selected target, not an implemented runtime mode. `development`, `staging`, and `production` remain undefined as deployable environments. Naming a configuration or provider does not create an environment.
+`online_test` is a paused target, not an active environment. `development`, `staging`, and `production` remain undefined as deployable environments. Naming a configuration, provider, or external snapshot does not activate an environment.
 
 ## Selected online company-test target
 
-Per [ADR-003](ADR-003-free-online-company-test-stack.md), the future private `online_test` topology uses Cloudflare for the four PWAs/CDN/R2, Supabase Free for PostgreSQL/PostGIS, OCI Always Free for the API/worker/Valkey/ClamAV, FCM/Web Push for notifications, Grafana Cloud and PostHog for telemetry, and GitHub Free for source hosting and future CI.
+Per [ADR-003](ADR-003-free-online-company-test-stack.md), the paused future `online_test` topology researched Cloudflare for the four PWAs/CDN/R2, Supabase Free for PostgreSQL/PostGIS, OCI Always Free for the API/worker/Valkey/ClamAV, FCM/Web Push for notifications, Grafana Cloud and PostHog for telemetry, and GitHub Free for source hosting and future CI.
 
-Step 2.5 now supplies a locally proven GitHub Actions definition; its first external run and branch enforcement still need authorized GitHub activation. The local topology remains the default until Step 2.6 separately provisions and verifies the online skeleton. No cloud credential or live adapter belongs in local configuration.
+Four synthetic Cloudflare Pages snapshots and an empty Supabase/PostGIS baseline were created before the pause. They are non-authoritative and not connected to the API or workers. R2, OCI and the remaining online adapters were not activated. The local topology is the only active environment. No cloud credential or live adapter belongs in local configuration.
 
 ## Network and credential rules
 
@@ -63,4 +63,4 @@ Step 2.5 now supplies a locally proven GitHub Actions definition; its first exte
 
 ## Future gate
 
-Before any shared company server or external deployment, D-11 and ADR-003 require company-owned accounts, identity, secrets, encryption, network isolation, observability, backup, restore, rollback, quota, regional, and capacity evidence. D-10 separately governs recovery objectives. Production provider selection remains blocked.
+Before online work resumes, [D-12](../decisions/D-12.md) requires a new explicit resume decision plus an inventory and credential rotation. D-11 and ADR-003 then still require company-owned accounts, identity, secrets, encryption, network isolation, observability, backup, restore, rollback, quota, regional, and capacity evidence. D-10 separately governs recovery objectives. Production provider selection remains blocked.

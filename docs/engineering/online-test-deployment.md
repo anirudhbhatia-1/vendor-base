@@ -3,7 +3,9 @@
 **Environment:** `online-test` only
 **Data:** synthetic only
 **Production approval:** none
-**Current state:** repository controls implemented; provider resources and external evidence pending
+**Current state:** paused by D-12; reference and verification controls only
+
+> Do not provision, migrate, deploy, connect credentials, or run online health commands while D-12 is active. Four static Cloudflare snapshots and an empty Supabase/PostGIS baseline may remain externally, but they are not the active application. Local entry points are the working environment.
 
 ## What is deployable now
 

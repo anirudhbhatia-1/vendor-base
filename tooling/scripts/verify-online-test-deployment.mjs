@@ -39,8 +39,17 @@ function verifyRepository() {
   if (targets.environment !== 'online-test' || targets.dataClassification !== 'synthetic-only') {
     errors.push('provider targets must be synthetic-only online-test');
   }
-  if (targets.status !== 'selected-not-provisioned') {
-    errors.push('provider status must remain honest until resources are provisioned');
+  if (targets.status !== 'paused-local-primary' || targets.activeEnvironment !== 'local') {
+    errors.push('provider targets must remain paused while local is the active environment');
+  }
+  if (
+    targets.externalResourceState?.pwaAndCdn !==
+      'provisioned-synthetic-snapshots-non-authoritative' ||
+    targets.externalResourceState?.database !== 'provisioned-empty-baseline-non-authoritative' ||
+    targets.externalResourceState?.objectStorage !== 'not-activated' ||
+    targets.externalResourceState?.compute !== 'not-provisioned'
+  ) {
+    errors.push('paused external resource inventory is incomplete or inaccurate');
   }
 
   for (const application of ['customer', 'vendor', 'partner', 'admin']) {

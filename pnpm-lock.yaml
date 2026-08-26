@@ -71,6 +71,12 @@ importers:
 
   apps/api:
     dependencies:
+      '@neighbourhood-store/database':
+        specifier: workspace:*
+        version: link:../../database
+      '@neighbourhood-store/domain-types':
+        specifier: workspace:*
+        version: link:../../packages/domain-types
       '@nestjs/common':
         specifier: 11.2.1
         version: 11.2.1(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1)
@@ -191,6 +197,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@neighbourhood-store/domain-types':
+        specifier: workspace:*
+        version: link:../../packages/domain-types
       '@nestjs/bullmq':
         specifier: 11.0.5
         version: 11.0.5(@nestjs/common@11.2.1(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@11.2.1(@nestjs/common@11.2.1(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(reflect-metadata@0.2.2)(rxjs@7.8.2))(bullmq@6.1.2(pg@8.23.0))
@@ -212,6 +221,9 @@ importers:
 
   database:
     dependencies:
+      '@neighbourhood-store/domain-types':
+        specifier: workspace:*
+        version: link:../packages/domain-types
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@types/pg@8.20.0)(pg@8.23.0)

@@ -1,6 +1,6 @@
 # ADR-003 — Free online company-test stack
 
-**Status:** Accepted for a private online company-test environment
+**Status:** Accepted as historical provider research; execution paused by D-12
 **Decision date:** 18 August 2026
 **Owner:** Engineering Lead
 **Production authority:** None
@@ -10,6 +10,8 @@
 The local foundation is reproducible, but the company also needs an online test target for the eight clients, API, worker, database, queue, storage, notifications, observability, analytics, and future CI. The selected services must remain free within bounded company-test quotas and preserve a credible provider-replacement path.
 
 The local environment remains necessary for offline development, deterministic tests, provider simulators, and recovery when a free service is unavailable. This decision changes the selected **online-test target**, not the local test runner and not the production architecture.
+
+[D-12](../decisions/D-12.md) subsequently returned the project to local-only active development. The provider selection below remains reference material and does not authorize further provisioning or integration.
 
 ## Decision
 

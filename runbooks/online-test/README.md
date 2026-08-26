@@ -1,5 +1,7 @@
 # Online-Test Account Setup, Deployment, and Rollback
 
+> **PAUSED:** D-12 makes local company development the only active path. Do not execute this runbook, create resources, connect credentials, apply remote migrations, or deploy until an explicit superseding decision is recorded. Existing Cloudflare snapshots and the empty Supabase baseline are non-authoritative paused resources; R2 and OCI were not activated.
+
 This runbook establishes the selected free online company-test stack. It does not establish production. Use company-owned accounts, enable MFA, keep recovery codes in the company's approved password manager, and never paste passwords, OTPs, private keys, database URLs, or tokens into chat or Git.
 
 ## Stop conditions

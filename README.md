@@ -9,8 +9,8 @@ Unlike dark-store quick-commerce platforms, this product does not own inventory 
 - Delivery Partner App / Portal
 - Admin Console
 
-> **Status:** Phase 2 Steps 2.1–2.5 are repository-complete for company development. Step 2.6 now has a synthetic-only, versioned online-test deployment skeleton; provider accounts, external deployment, backup/restore and rollback evidence are still pending.
-> **Documentation baseline:** 18 August 2026 · Phase 2 Step 2.6 in progress
+> **Status:** Local company development is the only active path. Phases 2–4 and Phase 5 (5.1–5.7) are implemented and verified locally, through the vendor catalogue, CSV import, and availability moderation boundary. Phase 6 has not started. The Step 2.6 online-test skeleton and partially created synthetic cloud resources are paused under D-12.
+> **Documentation baseline:** 18 August 2026 · online-test work paused; local development active
 
 ## Start here
 
@@ -207,7 +207,7 @@ Improve cross-store delivery consolidation, then consider B2B ordering, more sto
 - [Implementation Blueprint](implementation.md) is the executable contract for terminology, IDs, state records, timers, endpoints, persistence, workers, permissions, build slices, tests, releases, and rollback.
 - [Test-to-Production Replacement Register](docs/production/test-to-production-replacement-register.md) lists every known synthetic, fake, local-only, or unproven component and the evidence required before production use.
 - [Free Online Company-Test Migration Plan](docs/production/free-online-company-test-migration-plan.md) maps every local component to a researched free-tier or open-source online candidate, defines the implementation/change structure, and identifies unavoidable production costs.
-- [ADR-003](docs/architecture/ADR-003-free-online-company-test-stack.md) records Cloudflare, Supabase Free, OCI Always Free, FCM/Web Push, Grafana Cloud, PostHog, and GitHub Free as the selected future online company-test provider set; it is not a production or deployment approval.
+- [ADR-003](docs/architecture/ADR-003-free-online-company-test-stack.md) records Cloudflare, Supabase Free, OCI Always Free, FCM/Web Push, Grafana Cloud, PostHog, and GitHub Free as researched future online company-test targets; [D-12](docs/decisions/D-12.md) pauses their execution and keeps local development active.
 - [Continuous Integration](docs/engineering/continuous-integration.md) documents the least-privilege GitHub Actions gate, safe evidence, local equivalent, and external activation requirements.
 - [Online-Test Deployment](docs/engineering/online-test-deployment.md) documents the controlled Cloudflare/Supabase/OCI skeleton, and the [setup runbook](runbooks/online-test/README.md) gives the account, deployment, health, evidence, and rollback sequence.
 - [AI Rules and Boundaries](rules.md) defines what AI contributors may do, must verify, must not do, and when they must stop for approval.
@@ -228,4 +228,4 @@ These gates do not permit engineers to invent production policy. Their IDs, owne
 
 ## Project status
 
-Phase 2 Steps 2.1–2.5 are verified complete within their approved repository/local scope. Step 2.3 intentionally delivers dependency-free entry-point shells, so `database: not_configured`, `queue: not_configured`, and the absence of domain workflows are later-step boundaries rather than incomplete Step 2.3 work. Step 2.5 defines a blocking GitHub Actions workflow and proves the same commands locally; the workflow and branch protection remain externally unproven until an authorized push and GitHub run. The next numbered engineering step is 2.6 and must not begin without the project owner's instruction. Product validation remains a concierge-style pilot followed by the vertical slices in `implementation.md` §12. Shared online testing, staging, and production are later gated stages; selecting providers does not authorize deployment.
+Phase 2 Steps 2.1–2.5, Phase 3, Phase 4, and Phase 5 Steps 5.1–5.7 are verified complete within their approved local scope. The current head migration is `0018_catalogue_substitutions`; `pnpm db:verify` rehearses all 19 migrations forward and back and runs 174 connected scenarios. Phase 6 (customer address, discovery, storefront, and grouped cart) has not started. The Step 2.6 repository skeleton remains for reference, but D-12 pauses all further online setup. Four synthetic Cloudflare snapshots and an empty Supabase/PostGIS baseline may still exist externally; neither is an active environment. R2 and OCI were not activated. Product validation remains a local, concierge-style pilot followed by the vertical slices in `implementation.md` §12. Shared online testing, staging, and production remain separately gated.

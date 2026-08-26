@@ -14,7 +14,7 @@ Use Node.js `24.19.0` and pnpm `11.19.0`, then run `pnpm install`. The repositor
 |---|---|---|---|
 | Customer | `pnpm --filter @neighbourhood-store/customer-pwa dev` · `http://127.0.0.1:3100` | `pnpm --filter @neighbourhood-store/customer-app android` · `8081` | Internal discovery-lane shell; catalogue and ordering are disabled |
 | Vendor | `pnpm --filter @neighbourhood-store/vendor-pwa dev` · `http://127.0.0.1:3101` | `pnpm --filter @neighbourhood-store/vendor-app android` · `8082` | Internal store-operations shell; onboarding and order actions are disabled |
-| Delivery partner | `pnpm --filter @neighbourhood-store/partner-pwa dev` · `http://127.0.0.1:3102` | `pnpm --filter @neighbourhood-store/partner-app android` · `8083` | Internal delivery-lane shell; availability and assignments are disabled |
+| Delivery partner | `pnpm --filter @neighbourhood-store/partner-pwa dev` · `http://127.0.0.1:3102` | `pnpm --filter @neighbourhood-store/partner-app android` · `8083` | Interactive synthetic assignment/custody fixture; controls do not send API commands |
 | Admin/support | `pnpm --filter @neighbourhood-store/admin-pwa dev` · `http://127.0.0.1:3103` | `pnpm --filter @neighbourhood-store/admin-app android` · `8084` | Internal control-room shell; queues and protected actions are disabled |
 
 Every client makes synthetic/internal status unmistakable. There are no forms, fake success buttons or calls to the API. The PWA shells are server-rendered static pages. Android commands use Expo's local tooling; an emulator or explicitly approved local device is needed to inspect them interactively.
