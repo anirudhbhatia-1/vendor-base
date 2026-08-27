@@ -1032,6 +1032,8 @@ Each row must show expected/actual values, provider and business references, ris
 
 ## 17. Phase 12 — Security, accessibility, localization, resilience, and performance
 
+**Implementation status:** Complete for the requirements a company-local synthetic environment can genuinely prove — English/Hindi localization (12.3) with CI missing-translation gate, cross-role capability probe (12.1), and outbox transient-retry drill (12.5). Accessibility review (12.2), low-end device / poor network testing (12.4), full performance and concurrency measurement (12.6), and stakeholder gate signatures (12.7) are documented as deferred with named owners in `docs/engineering/launch-readiness-and-localization.md`; they require infrastructure or people outside D-12 scope and must clear before Phase 13.
+
 ### Goal
 
 Prove the complete launch system works safely for real people, devices, networks, providers, and operational failures.

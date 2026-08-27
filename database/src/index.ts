@@ -29,3 +29,4 @@ export * from './money-policy.js';
 export * from './money-lifecycle.js';
 export * from './complete-money-lifecycle.js';
 export * from './admin-control-plane.js';
+export * from './locale-registry.js';

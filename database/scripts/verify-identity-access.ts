@@ -156,7 +156,7 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
     // admin.partner_earnings.resolve (0027), and five Phase 11 control-plane
     // capabilities (0030).
     if (
-      catalog.rows[0]?.capabilities !== '46' ||
+      catalog.rows[0]?.capabilities !== '47' ||
       catalog.rows[0].roles !== '19' ||
       catalog.rows[0].separation_rules !== '5'
     ) {

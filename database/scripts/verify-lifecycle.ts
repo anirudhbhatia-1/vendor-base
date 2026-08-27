@@ -47,6 +47,7 @@ import { verifyVendorStaff } from './verify-vendor-staff.js';
 import { verifyGroupedCheckout } from './verify-grouped-checkout.js';
 import { verifyVendorFulfilment } from './verify-vendor-fulfilment.js';
 import { verifyPartnerLifecycle } from './verify-partner-lifecycle.js';
+import { verifyLaunchReadiness } from './verify-launch-readiness.js';
 
 async function assertVersions(client: Client): Promise<void> {
   const result = await client.query<{
@@ -642,6 +643,7 @@ await withDatabaseClient(config, async (client) => {
   await verifyVendorFulfilment(config.connectionString);
   await verifyAdminControlPlane(config.connectionString);
   await verifyPartnerLifecycle(config.connectionString);
+  await verifyLaunchReadiness(config.connectionString);
   await verifyVendorStaff(config.connectionString);
   await verifyAssignmentCustody(config.connectionString);
   await verifyMoneyLifecycle(config.connectionString);
@@ -1009,6 +1011,7 @@ await withDatabaseClient(config, async (client) => {
     assignment_custody_scenarios: 11,
     vendor_fulfilment_scenarios: 14,
     partner_lifecycle_scenarios: 25,
+    launch_readiness_scenarios: 12,
     money_lifecycle_scenarios: 22,
     admin_control_plane_scenarios: 12,
     target: 'test',

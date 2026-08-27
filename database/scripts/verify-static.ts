@@ -105,6 +105,7 @@ assert(
       '0030_admin_control_plane',
       '0031_admin_control_completion',
       '0032_discovery_search_index',
+      '0033_locale_registry',
     ]),
   'Unexpected reviewed migrations',
 );

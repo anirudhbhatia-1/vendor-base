@@ -9,7 +9,7 @@ Unlike dark-store quick-commerce platforms, this product does not own inventory 
 - Delivery Partner App / Portal
 - Admin Console
 
-> **Status:** Local company development is the only active path. Phases 2–11 are implemented within that approved scope. Phase 11 provides the role-scoped admin control plane for support, finance, trust, incidents, audit, reporting, and protected synthetic exports. The Step 2.6 online-test skeleton and partially created synthetic cloud resources are paused under D-12.
+> **Status:** Local company development is the only active path. Phases 2–12 are implemented within that approved scope: Phases 2–11 as governed vertical slices, and Phase 12 as the subset a company-local synthetic environment can genuinely prove — English/Hindi localization (migration `0033`) with a CI missing-translation gate, cross-role capability probe, and an outbox transient-retry drill. Deferred Phase 12 items — accessibility review, low-end device / poor network testing, production-scale performance measurement, and stakeholder gate signatures — are documented with named owners in [`docs/engineering/launch-readiness-and-localization.md`](docs/engineering/launch-readiness-and-localization.md). The Step 2.6 online-test skeleton and partially created synthetic cloud resources are paused under D-12.
 > **Documentation baseline:** 18 August 2026 · online-test work paused; local development active
 
 ## Start here
