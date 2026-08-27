@@ -13,5 +13,6 @@ export const CUSTOMER_DISCOVERY = Symbol('CUSTOMER_DISCOVERY');
 export const CUSTOMER_CART = Symbol('CUSTOMER_CART');
 export const GROUPED_CHECKOUT = Symbol('GROUPED_CHECKOUT');
 export const VENDOR_STAFF = Symbol('VENDOR_STAFF');
+export const VENDOR_FULFILMENT = Symbol('VENDOR_FULFILMENT');
 export const ASSIGNMENT_CUSTODY = Symbol('ASSIGNMENT_CUSTODY');
 export const MONEY_LIFECYCLE = Symbol('MONEY_LIFECYCLE');

@@ -713,6 +713,8 @@ Test duplicate taps, last-unit competition, three-store partial failure, expired
 
 ## 13. Phase 8 — Vendor fulfilment, customer decisions, and pickup
 
+**Implementation status:** Complete and verified for the approved company-local synthetic environment. Real capture, ledger posting for authorization deltas, and outbox-driven cross-service orchestration remain gated by Phase 10 and D-12.
+
 ### Goal
 
 Complete the first real vertical transaction: customer checkout, vendor preparation, verified customer pickup, and financial closure inputs.

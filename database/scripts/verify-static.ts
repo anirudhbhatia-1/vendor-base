@@ -98,6 +98,7 @@ assert(
       '0023_grouped_checkout',
       '0024_checkout_line_snapshots',
       '0025_checkout_resilience',
+      '0026_vendor_fulfilment_and_pickup',
     ]),
   'Unexpected reviewed migrations',
 );

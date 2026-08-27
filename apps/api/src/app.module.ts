@@ -23,6 +23,7 @@ import {
   CustomerCartService,
   GroupedCheckoutService,
   VendorStaffService,
+  VendorFulfilmentService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -52,6 +53,7 @@ import {
   CUSTOMER_CART,
   GROUPED_CHECKOUT,
   VENDOR_STAFF,
+  VENDOR_FULFILMENT,
 } from './tokens.js';
 import { CustomerAddressesController } from './customer-addresses.controller.js';
 import { CustomerDiscoveryController } from './customer-discovery.controller.js';
@@ -62,6 +64,11 @@ import {
   VendorAccessController,
   VendorSettingsController,
 } from './vendor-staff.controller.js';
+import {
+  VendorOrderFulfilmentController,
+  CustomerDecisionsController,
+  CustomerOrderHistoryController,
+} from './vendor-fulfilment.controller.js';
 import { CatalogueImportController } from './catalogue-import.controller.js';
 import { CatalogueProductsController } from './catalogue-products.controller.js';
 import {
@@ -91,6 +98,9 @@ import {
     VendorStaffController,
     VendorAccessController,
     VendorSettingsController,
+    VendorOrderFulfilmentController,
+    CustomerDecisionsController,
+    CustomerOrderHistoryController,
   ],
   providers: [
     LifecycleService,
@@ -205,6 +215,14 @@ import {
       inject: [RUNTIME_CONFIG, ACCESS_IDENTITY],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>, access: IdentityAccessService) =>
         new VendorStaffService({ connection_string: config.databaseUrl, access }),
+    },
+    {
+      provide: VENDOR_FULFILMENT,
+      inject: [RUNTIME_CONFIG, INVENTORY_RESERVATIONS],
+      useFactory: (
+        config: ReturnType<typeof loadRuntimeConfig>,
+        inventory: InventoryReservationService,
+      ) => new VendorFulfilmentService({ connection_string: config.databaseUrl, inventory }),
     },
     {
       provide: ASSIGNMENT_CUSTODY,
