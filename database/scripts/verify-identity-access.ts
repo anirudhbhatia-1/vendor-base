@@ -150,11 +150,12 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
          (SELECT count(*)::text FROM marketplace.roles) AS roles,
          (SELECT count(*)::text FROM marketplace.role_separation_rules) AS separation_rules`,
     );
-    // 36 capabilities: the 31 pre-Phase-8 grants plus vendor.order.fulfil,
-    // customer.order.decide, customer.order.read, customer.order.rate, and
-    // customer.support.open (0026).
+    // 41 capabilities: the 36 pre-Phase-9-remainder grants plus
+    // partner.application.manage, partner.earnings.read,
+    // partner.earnings.dispute, admin.partner_application.review, and
+    // admin.partner_earnings.resolve (0027).
     if (
-      catalog.rows[0]?.capabilities !== '36' ||
+      catalog.rows[0]?.capabilities !== '41' ||
       catalog.rows[0].roles !== '19' ||
       catalog.rows[0].separation_rules !== '5'
     ) {

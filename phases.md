@@ -784,6 +784,8 @@ Complete the first real vertical transaction: customer checkout, vendor preparat
 
 ## 14. Phase 9 — Delivery partner, custody, delivery, and returns
 
+**Implementation status:** Complete and verified for the approved company-local synthetic environment. Real earnings payouts (Phase 10 ledger) and admin dispute negotiation queues (Phase 11) remain gated by their respective phases and D-12.
+
 ### Goal
 
 Add platform-managed delivery without losing assignment ownership, physical custody, proof, safety, or partner-pay history.

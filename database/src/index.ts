@@ -22,6 +22,8 @@ export * from './checkout-pricing.js';
 export * from './grouped-checkout.js';
 export * from './vendor-staff.js';
 export * from './vendor-fulfilment.js';
+export * from './partner-lifecycle.js';
+export * from './partner-field-ops.js';
 export * from './assignment-custody.js';
 export * from './money-policy.js';
 export * from './money-lifecycle.js';

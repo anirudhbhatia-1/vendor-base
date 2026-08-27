@@ -33,6 +33,7 @@ alias rather than silently renumbered.
 | `0022` | Vendor publication restore/impact (app layer) + vendor staff and settings | 5.3 remainder + 5.4 | named, not numbered | documented in [vendor publication restore and impact](vendor-publication-restore-and-impact.md) and [vendor staff and settings](vendor-staff-and-settings.md) |
 | `0023`–`0025` | Grouped checkout: quotes, checkout groups, vendor orders, line snapshots, blocked groups | Phase 7 | named, not numbered | documented in [grouped checkout](grouped-checkout.md) |
 | `0026` | Vendor fulfilment, customer decisions, pickup OTP, receipt/rating/support | Phase 8 | named, not numbered | documented in [vendor fulfilment and pickup](vendor-fulfilment-and-pickup.md) |
+| `0027` | Partner onboarding, offline proof, guided exceptions, earnings + disputes | Phase 9 remainder (9.1, 9.7, 9.8, 9.10) | named, not numbered | documented in [partner lifecycle and earnings](partner-lifecycle-and-earnings.md) |
 
 ## Consequences to carry forward
 

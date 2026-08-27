@@ -24,6 +24,8 @@ import {
   GroupedCheckoutService,
   VendorStaffService,
   VendorFulfilmentService,
+  PartnerLifecycleService,
+  PartnerFieldOpsService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -54,6 +56,8 @@ import {
   GROUPED_CHECKOUT,
   VENDOR_STAFF,
   VENDOR_FULFILMENT,
+  PARTNER_LIFECYCLE,
+  PARTNER_FIELD_OPS,
 } from './tokens.js';
 import { CustomerAddressesController } from './customer-addresses.controller.js';
 import { CustomerDiscoveryController } from './customer-discovery.controller.js';
@@ -69,6 +73,13 @@ import {
   CustomerDecisionsController,
   CustomerOrderHistoryController,
 } from './vendor-fulfilment.controller.js';
+import {
+  PartnerApplicationController,
+  AdminPartnerApplicationController,
+  PartnerEarningsController,
+  AdminPartnerDisputeController,
+  PartnerFieldOpsController,
+} from './partner-lifecycle.controller.js';
 import { CatalogueImportController } from './catalogue-import.controller.js';
 import { CatalogueProductsController } from './catalogue-products.controller.js';
 import {
@@ -101,6 +112,11 @@ import {
     VendorOrderFulfilmentController,
     CustomerDecisionsController,
     CustomerOrderHistoryController,
+    PartnerApplicationController,
+    AdminPartnerApplicationController,
+    PartnerEarningsController,
+    AdminPartnerDisputeController,
+    PartnerFieldOpsController,
   ],
   providers: [
     LifecycleService,
@@ -223,6 +239,18 @@ import {
         config: ReturnType<typeof loadRuntimeConfig>,
         inventory: InventoryReservationService,
       ) => new VendorFulfilmentService({ connection_string: config.databaseUrl, inventory }),
+    },
+    {
+      provide: PARTNER_LIFECYCLE,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new PartnerLifecycleService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: PARTNER_FIELD_OPS,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new PartnerFieldOpsService({ connection_string: config.databaseUrl }),
     },
     {
       provide: ASSIGNMENT_CUSTODY,

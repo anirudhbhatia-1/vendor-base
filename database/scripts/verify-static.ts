@@ -99,6 +99,7 @@ assert(
       '0024_checkout_line_snapshots',
       '0025_checkout_resilience',
       '0026_vendor_fulfilment_and_pickup',
+      '0027_partner_lifecycle_and_earnings',
     ]),
   'Unexpected reviewed migrations',
 );
