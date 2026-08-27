@@ -712,7 +712,7 @@ export class VendorFulfilmentService {
       await client.query(
         `UPDATE marketplace.vendor_order_line_picks
             SET pick_state=$2,
-                actual_quantity=CASE WHEN $3='APPROVED' THEN $4 ELSE NULL END,
+                actual_quantity=CASE WHEN $3='APPROVED' THEN $4::integer ELSE NULL END,
                 actual_unit_price_minor=CASE WHEN $3='APPROVED' THEN $5::bigint ELSE NULL END,
                 substitution_variant_id=CASE WHEN $3='APPROVED' THEN $6::uuid ELSE NULL END,
                 version=version+1, updated_at=$7

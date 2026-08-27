@@ -523,6 +523,221 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       'Zero package count was accepted',
     );
 
+    // 8.4 -- customer decision path (required E2E scenario #4). Build a fresh
+    // 3-line order at storeA plus a spare substitution-target variant, then
+    // drive substitution->approve, weight->reject, and weight->timeout on
+    // separate lines. storeA is already published and in the customer's zone,
+    // so no new eligibility setup is needed.
+    const decisionBase = new Date(now.getTime() + 40_000);
+    const decisionProducts = [];
+    for (let index = 0; index < 4; index += 1) {
+      const suffix = `${Date.now()}D${index}`;
+      const product = await catalogue.createProduct({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_location_id: storeA.locationId,
+        product_reference: `SYNTH-PROD-D${suffix}`,
+        title: `SYNTH Decision Product ${index}`,
+        category: 'FRUIT_VEGETABLE',
+        unit_label: 'EACH',
+        tax_basis: 'EXEMPT',
+        variable_weight: false,
+        sku: `SYNTH-SKU-D${suffix}`,
+        variant_title: `SYNTH Decision Variant ${index}`,
+        price_minor: 15_000,
+        now: decisionBase,
+      });
+      decisionProducts.push(product);
+      await inventory.createItem({
+        context: vendorContext(storeA.ownerUserId),
+        display_name: `SYNTH Decision Stock ${index}`,
+        exact_available_quantity: 5,
+        low_stock_threshold: 1,
+        now: decisionBase,
+        product_reference: `SYNTH-PROD-D${suffix}`,
+        quantity_basis: 'COUNTED',
+        reason_code: 'DECISION_FIXTURE',
+        vendor_location_id: storeA.locationId,
+      });
+    }
+    // Products 0-2 become order lines; product 3 is the substitution target.
+    const substitutionTarget = decisionProducts[3];
+    check(substitutionTarget !== undefined, 'Substitution target variant missing');
+    const decisionCart = await carts.currentCart({
+      context: customerContext(customerId),
+      now: decisionBase,
+    });
+    await carts.setCartAddress({
+      context: customerContext(customerId),
+      customer_address_id: addressId,
+      now: decisionBase,
+    });
+    for (let index = 0; index < 3; index += 1) {
+      const product = decisionProducts[index];
+      check(product !== undefined, 'Decision fixture product missing');
+      await carts.addLine({
+        context: customerContext(customerId),
+        vendor_location_id: storeA.locationId,
+        catalogue_variant_id: product.catalogue_variant_id,
+        quantity: 1,
+        now: decisionBase,
+      });
+    }
+    const decisionQuote = await checkout.createQuote({
+      context: customerContext(customerId),
+      cart_id: decisionCart.cart_id,
+      now: decisionBase,
+    });
+    const decisionPlaced = await checkout.place({
+      context: customerContext(customerId),
+      checkout_quote_id: decisionQuote.checkout_quote_id,
+      provider_scenario: 'SUCCESS',
+      idempotency_key: 'phase8-decision-001',
+      now: new Date(decisionBase.getTime() + 1_000),
+    });
+    const orderC = decisionPlaced.orders.find(
+      (o: { readonly vendor_location_id: UuidV7 }) => o.vendor_location_id === storeA.locationId,
+    );
+    check(orderC !== undefined, 'Decision order was not placed at storeA');
+    const acceptedC = await fulfilment.accept({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: orderC.version,
+      preparation_estimate_seconds: 900,
+      now: new Date(decisionBase.getTime() + 2_000),
+    });
+    const pickingC = await fulfilment.startPicking({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: acceptedC.version,
+      now: new Date(decisionBase.getTime() + 3_000),
+    });
+    const decisionLines = await pool.query<{ id: string }>(
+      `SELECT vendor_order_line_id AS id FROM marketplace.vendor_order_lines
+        WHERE vendor_order_id=$1 ORDER BY vendor_order_line_id`,
+      [orderC.vendor_order_id],
+    );
+    check(decisionLines.rows.length === 3, 'Decision order did not have three lines');
+    const [line1, line2, line3] = decisionLines.rows.map((r) => r.id as UuidV7);
+    check(
+      line1 !== undefined && line2 !== undefined && line3 !== undefined,
+      'Decision line ids missing',
+    );
+
+    // Line 1: substitution proposal -> customer APPROVES.
+    const subProposal = await fulfilment.proposeSubstitution({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: line1,
+      substitution_variant_id: substitutionTarget.catalogue_variant_id,
+      proposed_quantity: 1,
+      proposed_unit_price_minor: 18_000,
+      reason_note: 'SYNTH out of the exact item, close substitute available.',
+      now: new Date(decisionBase.getTime() + 4_000),
+    });
+    check(
+      subProposal.decision.authorization_delta_minor === 3_000,
+      'Substitution authorization delta was not recorded (18000 - 15000)',
+    );
+    const subAnswer = await fulfilment.answerDecision({
+      context: customerContext(customerId),
+      decision_id: subProposal.decision.decision_id,
+      answer: 'APPROVED',
+      now: new Date(decisionBase.getTime() + 5_000),
+    });
+    check(subAnswer.answer === 'APPROVED', 'Substitution decision was not APPROVED');
+    // Second answer on an already-answered decision is refused.
+    await rejects(
+      () =>
+        fulfilment.answerDecision({
+          context: customerContext(customerId),
+          decision_id: subProposal.decision.decision_id,
+          answer: 'REJECTED',
+          now: new Date(decisionBase.getTime() + 5_500),
+        }),
+      FulfilmentConflictError,
+      'A decision was answered twice',
+    );
+
+    // Line 2: weight proposal -> customer REJECTS. A foreign customer cannot answer.
+    const weightProposal = await fulfilment.proposeWeight({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: line2,
+      proposed_quantity: 1,
+      proposed_unit_price_minor: 16_500,
+      reason_note: 'SYNTH weighed heavier than ordered.',
+      now: new Date(decisionBase.getTime() + 6_000),
+    });
+    await rejects(
+      () =>
+        fulfilment.answerDecision({
+          context: customerContext(strangerCustomerId),
+          decision_id: weightProposal.decision.decision_id,
+          answer: 'APPROVED',
+          now: new Date(decisionBase.getTime() + 6_500),
+        }),
+      FulfilmentNotFoundError,
+      'A foreign customer answered another customer decision',
+    );
+    const weightAnswer = await fulfilment.answerDecision({
+      context: customerContext(customerId),
+      decision_id: weightProposal.decision.decision_id,
+      answer: 'REJECTED',
+      now: new Date(decisionBase.getTime() + 7_000),
+    });
+    check(weightAnswer.answer === 'REJECTED', 'Weight decision was not REJECTED');
+
+    // Line 3: weight proposal -> deadline passes -> system times it out.
+    const timeoutProposal = await fulfilment.proposeWeight({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: line3,
+      proposed_quantity: 1,
+      proposed_unit_price_minor: 16_000,
+      reason_note: 'SYNTH weight proposal that the customer never sees.',
+      decision_deadline_seconds: 60,
+      now: new Date(decisionBase.getTime() + 8_000),
+    });
+    const timedOut = await fulfilment.timeoutOverdueDecisions({
+      context: systemContext(systemActorId),
+      now: new Date(decisionBase.getTime() + 80_000),
+    });
+    check(
+      timedOut.some((id) => id === timeoutProposal.decision.decision_id),
+      'Overdue decision was not timed out',
+    );
+    const timedOutState = await pool.query<{ answer: string; pick_state: string }>(
+      `SELECT d.answer, p.pick_state
+         FROM marketplace.vendor_order_customer_decisions d
+         JOIN marketplace.vendor_order_line_picks p USING (pick_id)
+        WHERE d.decision_id=$1`,
+      [timeoutProposal.decision.decision_id],
+    );
+    check(
+      timedOutState.rows[0]?.answer === 'TIMED_OUT' &&
+        timedOutState.rows[0]?.pick_state === 'WEIGHT_REJECTED',
+      'Timed-out decision did not roll the pick to a rejected state',
+    );
+
+    // All three lines are now resolved, so ready succeeds.
+    const readyC = await fulfilment.markReady({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: pickingC.version,
+      package_count: 2,
+      now: new Date(decisionBase.getTime() + 90_000),
+    });
+    check(
+      readyC.lifecycle_state === 'READY',
+      'Order with resolved decisions could not reach ready',
+    );
+
     // Confirm the immutable event trail was written.
     const events = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM marketplace.vendor_order_events WHERE vendor_order_id=$1`,

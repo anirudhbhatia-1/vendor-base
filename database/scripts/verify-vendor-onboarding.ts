@@ -271,6 +271,21 @@ export async function verifyVendorOnboarding(connectionString: string): Promise<
       throw new Error('Onboarding approval did not create draft vendor/location aggregates');
     }
 
+    // Onboarding -> access loop: the approved applicant must now hold an active
+    // VENDOR_OWNER staff membership at the new location, so they can reach
+    // vendor staff/settings/order routes without an out-of-band grant.
+    const ownerGrant = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM marketplace.staff_memberships sm
+         JOIN marketplace.role_assignments ra USING (role_assignment_id)
+        WHERE sm.user_id=$1 AND sm.vendor_location_id=$2
+          AND ra.role_key='VENDOR_OWNER' AND ra.state='ACTIVE'`,
+      [applicantId, approved.vendor_location_id],
+    );
+    if (ownerGrant.rows[0]?.count !== '1') {
+      throw new Error('Onboarding approval did not grant the applicant a VENDOR_OWNER membership');
+    }
+
     const expiringChanged = await onboarding.advanceDocumentDeadlines({
       at: new Date('2026-09-01T00:00:00.000Z'),
       context: createRequestContext(),

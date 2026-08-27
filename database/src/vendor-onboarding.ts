@@ -954,6 +954,40 @@ export class VendorOnboardingService {
           version,
         ],
       );
+      // Close the onboarding -> access loop: grant the applicant a
+      // VENDOR_OWNER staff membership at the new location, inline in this
+      // transaction so an approved vendor can never be ownerless. Mirrors the
+      // grant shape in verify-discoverable-store-fixture.ts. A lead approved
+      // without a claimed applicant (applicant_user_id null) has no user to
+      // own it, so the grant is skipped in that case.
+      if (row.applicant_user_id) {
+        const ownerRoleAssignmentId = createUuidV7({ now_ms: now.getTime() });
+        await client.query(
+          `INSERT INTO marketplace.role_assignments
+             (role_assignment_id, user_id, role_key, valid_from, granted_by_user_id,
+              request_id, correlation_id)
+           VALUES ($1,$2,'VENDOR_OWNER',$3,$4,$5,$6)`,
+          [
+            ownerRoleAssignmentId,
+            row.applicant_user_id,
+            now,
+            reviewer,
+            contextIds.requestId,
+            contextIds.correlationId,
+          ],
+        );
+        await client.query(
+          `INSERT INTO marketplace.staff_memberships
+             (staff_membership_id, role_assignment_id, user_id, vendor_location_id)
+           VALUES ($1,$2,$3,$4)`,
+          [
+            createUuidV7({ now_ms: now.getTime() }),
+            ownerRoleAssignmentId,
+            row.applicant_user_id,
+            locationId,
+          ],
+        );
+      }
       await event(client, {
         actor_user_id: reviewer,
         case_version: version,

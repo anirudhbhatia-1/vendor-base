@@ -794,6 +794,35 @@ export class PartnerLifecycleService {
           now,
         ],
       );
+      // Close the onboarding -> access loop: on approval, grant the applicant
+      // the DELIVERY_PARTNER role and mark them ELIGIBLE, inline in this
+      // transaction so an approved partner can actually go online and receive
+      // offers. Mirrors IdentityAccessService.setPartnerEligibility. Approval
+      // is a one-shot terminal transition (UNDER_REVIEW -> APPROVED) guarded by
+      // the state machine, so a plain insert cannot double-grant.
+      if (input.to === 'APPROVED') {
+        const applicantUserId = row['applicant_user_id'] as string;
+        const partnerRoleAssignmentId = createUuidV7({ now_ms: now.getTime() });
+        await client.query(
+          `INSERT INTO marketplace.role_assignments
+             (role_assignment_id, user_id, role_key, valid_from, granted_by_user_id,
+              request_id, correlation_id)
+           VALUES ($1,$2,'DELIVERY_PARTNER',$3,$4,$5,$6)`,
+          [partnerRoleAssignmentId, applicantUserId, now, actorId, ids.request, ids.correlation],
+        );
+        await client.query(
+          `INSERT INTO marketplace.partner_eligibilities
+             (partner_eligibility_id, role_assignment_id, user_id, state, eligible_from, reason_code)
+           VALUES ($1,$2,$3,'ELIGIBLE',$4,$5)`,
+          [
+            createUuidV7({ now_ms: now.getTime() }),
+            partnerRoleAssignmentId,
+            applicantUserId,
+            now,
+            input.reason_code,
+          ],
+        );
+      }
       await appendApplicationEvent(client, {
         partner_application_id: input.partner_application_id,
         event_type: input.event_type,

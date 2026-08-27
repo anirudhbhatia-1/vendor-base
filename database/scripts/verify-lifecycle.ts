@@ -999,7 +999,7 @@ await withDatabaseClient(config, async (client) => {
     preference_scenarios: 12,
     session_scenarios: 9,
     vendor_network_scenarios: 12,
-    vendor_onboarding_scenarios: 14,
+    vendor_onboarding_scenarios: 15,
     vendor_publication_scenarios: 10,
     inventory_reservation_scenarios: 11,
     catalogue_freshness_moderation_scenarios: 6,
@@ -1009,11 +1009,11 @@ await withDatabaseClient(config, async (client) => {
     customer_cart_scenarios: 9,
     vendor_staff_scenarios: 10,
     assignment_custody_scenarios: 11,
-    vendor_fulfilment_scenarios: 14,
-    partner_lifecycle_scenarios: 25,
+    vendor_fulfilment_scenarios: 20,
+    partner_lifecycle_scenarios: 26,
     launch_readiness_scenarios: 12,
     money_lifecycle_scenarios: 22,
-    admin_control_plane_scenarios: 12,
+    admin_control_plane_scenarios: 13,
     target: 'test',
   });
 });

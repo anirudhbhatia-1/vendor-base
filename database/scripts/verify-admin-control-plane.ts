@@ -5,7 +5,11 @@ import {
   parseUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
-import { AdminControlNotFoundError, AdminControlPlaneService } from '../src/admin-control-plane.js';
+import {
+  AdminControlNotFoundError,
+  AdminControlPlaneService,
+  AdminControlStateError,
+} from '../src/admin-control-plane.js';
 function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
 }
@@ -90,6 +94,20 @@ export async function verifyAdminControlPlane(connectionString: string): Promise
       effective_until: new Date(Date.now() + 86_400_000),
       review_at: new Date(Date.now() + 3_600_000),
     });
+    // Maker-checker: the admin who proposed the restriction cannot approve it.
+    // adminA proposed it (context() default); a self-approval must be refused.
+    let selfApprovalBlocked = false;
+    try {
+      await service.approveTrust({
+        context: context(adminA),
+        trust_restriction_case_id: parseUuidV7(String(proposed.trust_restriction_case_id)),
+        expected_version: 1,
+        reason_code: 'RISK_SELF_APPROVED',
+      });
+    } catch (error) {
+      selfApprovalBlocked = error instanceof AdminControlStateError;
+    }
+    check(selfApprovalBlocked, 'Trust restriction maker-checker allowed self-approval');
     const active = await service.approveTrust({
       context: context(adminB),
       trust_restriction_case_id: parseUuidV7(String(proposed.trust_restriction_case_id)),

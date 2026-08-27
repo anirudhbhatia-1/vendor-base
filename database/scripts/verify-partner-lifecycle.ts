@@ -177,6 +177,22 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     check(approved.lifecycle_state === 'APPROVED', 'approve did not transition');
     check(approved.decided_at !== null, 'decided_at not set');
 
+    // Onboarding -> access loop: approval must grant the applicant the
+    // DELIVERY_PARTNER role and mark them ELIGIBLE, so they can go online and
+    // receive offers without an out-of-band grant.
+    const partnerGrant = await pool.query<{ role_count: string; eligible: string }>(
+      `SELECT
+         (SELECT count(*)::text FROM marketplace.role_assignments
+           WHERE user_id=$1 AND role_key='DELIVERY_PARTNER' AND state='ACTIVE') AS role_count,
+         (SELECT count(*)::text FROM marketplace.partner_eligibilities
+           WHERE user_id=$1 AND state='ELIGIBLE') AS eligible`,
+      [applicantId],
+    );
+    check(
+      partnerGrant.rows[0]?.role_count === '1' && partnerGrant.rows[0]?.eligible === '1',
+      'Partner approval did not grant DELIVERY_PARTNER role + ELIGIBLE eligibility',
+    );
+
     // Cannot approve an already-decided application (version guard)
     await rejects(
       () =>
