@@ -1,0 +1,15 @@
+DROP TRIGGER IF EXISTS operational_audit_events_append_only ON marketplace.operational_audit_events;
+DROP TRIGGER IF EXISTS support_case_evidence_append_only ON marketplace.support_case_evidence;
+DROP TRIGGER IF EXISTS support_case_messages_append_only ON marketplace.support_case_messages;
+DROP TRIGGER IF EXISTS support_case_events_append_only ON marketplace.support_case_events;
+DROP TABLE IF EXISTS marketplace.report_exports;
+DROP TABLE IF EXISTS marketplace.operational_audit_events;
+DROP TABLE IF EXISTS marketplace.incident_controls;
+DROP TABLE IF EXISTS marketplace.trust_restriction_cases;
+DROP TABLE IF EXISTS marketplace.support_case_evidence;
+DROP TABLE IF EXISTS marketplace.support_case_messages;
+DROP TABLE IF EXISTS marketplace.support_case_events;
+ALTER TABLE marketplace.support_cases DROP CONSTRAINT IF EXISTS support_case_severity;
+ALTER TABLE marketplace.support_cases DROP COLUMN IF EXISTS severity, DROP COLUMN IF EXISTS merged_into_case_id, DROP COLUMN IF EXISTS response_due_at, DROP COLUMN IF EXISTS owner_team, DROP COLUMN IF EXISTS owner_user_id;
+DELETE FROM marketplace.role_capabilities WHERE capability_key IN ('admin.control.dashboard_read','admin.order.intervene','admin.audit.read','admin.reporting.read','admin.reporting.export');
+DELETE FROM marketplace.capabilities WHERE capability_key IN ('admin.control.dashboard_read','admin.order.intervene','admin.audit.read','admin.reporting.read','admin.reporting.export');

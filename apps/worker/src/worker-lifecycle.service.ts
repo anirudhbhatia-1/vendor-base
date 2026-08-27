@@ -16,11 +16,13 @@ export class WorkerLifecycleService implements OnApplicationBootstrap, OnApplica
       environment: config.environment,
       data_mode: config.dataMode,
       version: config.version,
-      queue: 'not_configured',
+      queues: ['finance.payout', 'marketplace.operations', 'marketplace.outbox'],
       production_ready: false,
     });
     this.heartbeat = setInterval(() => {
-      workerLogger.event('worker.heartbeat', { queue: 'not_configured' });
+      workerLogger.event('worker.heartbeat', {
+        queues: ['finance.payout', 'marketplace.operations', 'marketplace.outbox'],
+      });
     }, 30_000);
   }
 

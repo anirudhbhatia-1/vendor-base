@@ -2,22 +2,27 @@ import {
   createAuthenticatedActor,
   createRequestContext,
   createUuidV7,
+  parseUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import { MoneyLifecycleService } from '../src/money-lifecycle.js';
+import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
 
 function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
 }
 
-const TABLES = `marketplace.finance_exceptions, marketplace.provider_statement_rows,
-  marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
+const TABLES = `marketplace.financial_correction_events, marketplace.financial_corrections,
+  marketplace.finance_exceptions, marketplace.provider_statement_rows,
+  marketplace.provider_statement_imports, marketplace.payouts, marketplace.payout_batches,
+  marketplace.settlement_lines, marketplace.settlements, marketplace.ledger_entries,
   marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,
   marketplace.payment_events, marketplace.payment_allocations, marketplace.payment_transactions CASCADE`;
 
 export async function verifyMoneyLifecycle(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, application_name: 'money-lifecycle-verifier' });
   const service = new MoneyLifecycleService({ connection_string: connectionString });
+  const complete = new CompleteMoneyLifecycleService({ connection_string: connectionString });
   const now = new Date('2026-08-24T06:00:00.000Z');
   const admin = createUuidV7({ now_ms: now.getTime() });
   const approver = createUuidV7({ now_ms: now.getTime() + 1 });
@@ -106,6 +111,10 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       now: new Date(now.getTime() + 2_000),
     });
     check(captured.payment_state === 'CAPTURED', 'Synthetic capture did not succeed');
+    check(
+      Number(captured.captured_amount_minor) === 34_900,
+      'Capture did not retain its resolved amount',
+    );
 
     const proposedRefund = await service.proposeRefund({
       command_reference: 'SYNTH-CMD-REFUND-PROPOSE-0001',
@@ -166,6 +175,11 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
         Number(settlement.platform_remainder_minor) === 500,
       'Refunded settlement did not preserve the approved policy balance',
     );
+    const settlementLines = await pool.query<{ count: string }>(
+      'SELECT count(*)::text count FROM marketplace.settlement_lines WHERE settlement_id=$1',
+      [settlement.settlement_id],
+    );
+    check(settlementLines.rows[0]?.count === '7', 'Settlement component lines are incomplete');
 
     const payoutTime = new Date(new Date(settlement.eligible_at).getTime() + 1_000);
     const vendorPayout = await service.schedulePayout({
@@ -244,6 +258,180 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       uncertain.payment_state === 'UNKNOWN_REQUIRES_RECONCILIATION',
       'Unknown provider result was not contained',
     );
+
+    const voidPayment = await service.createPayment({
+      allocations: [
+        {
+          delivery_minor: 0,
+          discount_minor: 0,
+          item_minor: 2_000,
+          policy_version_reference: 'SYNTH-POLICY-D05-V1',
+          source_order_reference: 'SYNTH-ORDER-MONEY-VOID-0003',
+          tax_minor: 0,
+          tip_minor: 0,
+          vendor_location_id: location,
+        },
+      ],
+      amount_minor: 2_000,
+      command_reference: 'SYNTH-CMD-PAYMENT-CREATE-VOID-0003',
+      context: context(),
+      provider_operation_reference: 'SYNTH-PAY-VOID-0003',
+      provider_scenario: 'SUCCESS',
+      source_checkout_reference: 'SYNTH-CHECKOUT-MONEY-VOID-0003',
+      now,
+    });
+    const voidAuthorized = await service.authorize({
+      command_reference: 'SYNTH-CMD-PAYMENT-AUTH-VOID-0003',
+      context: context(),
+      expected_version: 1,
+      payment_transaction_id: voidPayment.payment_transaction_id,
+      now: new Date(now.getTime() + 7_000),
+    });
+    const voided = await complete.voidAuthorization({
+      command_reference: 'SYNTH-CMD-PAYMENT-VOID-0003',
+      context: context(),
+      expected_version: voidAuthorized.version,
+      payment_transaction_id: voidPayment.payment_transaction_id,
+      now: new Date(now.getTime() + 8_000),
+    });
+    check(
+      voided.payment_state === 'VOIDED' && Number(voided.voided_amount_minor) === 2_000,
+      'Unused authorization was not voided exactly once',
+    );
+
+    const payoutJob = await complete.scheduleDailyPayoutJob({ context: context(), now });
+    const payoutJobReplay = await complete.scheduleDailyPayoutJob({ context: context(), now });
+    check(
+      payoutJob.job_id === payoutJobReplay.job_id &&
+        new Date(payoutJob.run_at).toISOString() === '2026-08-24T12:30:00.000Z',
+      'Daily payout schedule is not idempotent at 18:00 Asia/Kolkata',
+    );
+    const batch = await complete.createPayoutBatch({
+      beneficiary_kind: 'VENDOR',
+      context: context(),
+      now: new Date(payoutTime.getTime() + 10_000),
+      provider_scenario: 'SUCCESS',
+    });
+    const batchReplay = await complete.createPayoutBatch({
+      beneficiary_kind: 'VENDOR',
+      context: context(),
+      now: new Date(payoutTime.getTime() + 10_000),
+      provider_scenario: 'SUCCESS',
+    });
+    check(
+      batch.payout_batch_id === batchReplay.payout_batch_id,
+      'Daily payout batch replay created duplicate payouts',
+    );
+
+    const imported = await complete.importProviderStatement({
+      context: context(),
+      now: new Date(payoutTime.getTime() + 11_000),
+      rows: [
+        {
+          amount_minor: 34_900,
+          operation_kind: 'PAYMENT',
+          provider_operation_reference: 'SYNTH-PAY-AUTH-0001',
+          provider_state: 'SUCCEEDED',
+        },
+        {
+          amount_minor: 34_900,
+          operation_kind: 'PAYMENT',
+          provider_operation_reference: 'SYNTH-PAY-AUTH-0001',
+          provider_state: 'SUCCEEDED',
+        },
+        {
+          amount_minor: 5_999,
+          operation_kind: 'REFUND',
+          provider_operation_reference: 'SYNTH-REF-MONEY-0001',
+          provider_state: 'SUCCEEDED',
+        },
+        {
+          amount_minor: 23_500,
+          operation_kind: 'PAYOUT',
+          provider_operation_reference: 'SYNTH-PAYOUT-VENDOR-0001',
+          provider_state: 'FAILED',
+        },
+        {
+          amount_minor: 777,
+          operation_kind: 'PAYMENT',
+          provider_operation_reference: 'SYNTH-PAY-NOT-FOUND-0009',
+          provider_state: 'UNKNOWN',
+        },
+      ],
+      statement_reference: 'SYNTH-STMT-IMPORT-0001',
+    });
+    const classes = imported.rows.map(
+      (row: { reconciliation_class: string }) => row.reconciliation_class,
+    );
+    check(
+      ['MATCHED', 'DUPLICATE', 'AMOUNT_MISMATCH', 'STATUS_MISMATCH', 'UNMATCHED'].every(
+        (classification) => classes.includes(classification),
+      ),
+      'Provider statement import did not classify every reconciliation outcome',
+    );
+    const importReplay = await complete.importProviderStatement({
+      context: context(),
+      rows: [],
+      statement_reference: 'SYNTH-STMT-IMPORT-0001',
+    });
+    check(
+      importReplay.provider_statement_import_id === imported.provider_statement_import_id,
+      'Statement reference replay was not idempotent',
+    );
+
+    const originalLedger = await pool.query<{ ledger_transaction_id: string }>(
+      `SELECT ledger_transaction_id FROM marketplace.ledger_transactions
+        WHERE transaction_kind='CAPTURE' ORDER BY posted_at LIMIT 1`,
+    );
+    const originalId = originalLedger.rows[0]?.ledger_transaction_id;
+    check(originalId, 'Capture ledger transaction missing for correction');
+    const correction = await complete.proposeCorrection({
+      amount_minor: 100,
+      context: context(),
+      correction_reference: 'SYNTH-CORRECTION-MONEY-0001',
+      entries: [
+        {
+          account_reference: 'SYNTH-ACCOUNT-PLATFORM-SUBSIDY',
+          component: 'ADJUSTMENT',
+          credit_minor: 0,
+          debit_minor: 100,
+        },
+        {
+          account_reference: 'SYNTH-ACCOUNT-FAKE-PROVIDER',
+          component: 'ADJUSTMENT',
+          credit_minor: 100,
+          debit_minor: 0,
+        },
+      ],
+      evidence_reference: 'SYNTH-EVIDENCE-MONEY-0001',
+      now: new Date(payoutTime.getTime() + 12_000),
+      original_ledger_transaction_id: parseUuidV7(originalId),
+      reason_code: 'PROVIDER_ROUNDING_CORRECTION',
+    });
+    let correctionSelfApprovalBlocked = false;
+    try {
+      await complete.approveAndPostCorrection({
+        context: context(),
+        expected_version: 1,
+        financial_correction_id: correction.financial_correction_id,
+        now: new Date(payoutTime.getTime() + 13_000),
+      });
+    } catch {
+      correctionSelfApprovalBlocked = true;
+    }
+    check(correctionSelfApprovalBlocked, 'Correction maker was allowed to approve their own work');
+    const postedCorrection = await complete.approveAndPostCorrection({
+      context: context(approver),
+      expected_version: 1,
+      financial_correction_id: correction.financial_correction_id,
+      now: new Date(payoutTime.getTime() + 14_000),
+    });
+    check(
+      postedCorrection.lifecycle_state === 'POSTED' &&
+        postedCorrection.reversal_ledger_transaction_id &&
+        postedCorrection.adjustment_ledger_transaction_id,
+      'Correction did not post a linked reversal and adjustment',
+    );
     const evidence = await pool.query<{ exceptions: string; imbalance: string }>(
       `SELECT
         (SELECT count(*)::text FROM marketplace.finance_exceptions WHERE exception_kind='PAYMENT_UNKNOWN') AS exceptions,
@@ -260,7 +448,19 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       protectedHistory = true;
     }
     check(protectedHistory, 'Ledger history was mutable');
+    let protectedStatement = false;
+    try {
+      await pool.query(
+        `UPDATE marketplace.provider_statement_rows SET amount_minor=amount_minor+1
+          WHERE provider_statement_import_id=$1`,
+        [imported.provider_statement_import_id],
+      );
+    } catch {
+      protectedStatement = true;
+    }
+    check(protectedStatement, 'Provider statement history was mutable');
   } finally {
+    await complete.close();
     await service.close();
     await pool.query(`TRUNCATE ${TABLES}`).catch(() => undefined);
     await pool

@@ -25,6 +25,7 @@ export interface StoreSummary {
 
 export interface StorefrontProduct {
   readonly catalogue_product_id: UuidV7;
+  readonly catalogue_variant_id: UuidV7;
   readonly product_reference: string;
   readonly title: string;
   readonly category: string;
@@ -34,6 +35,7 @@ export interface StorefrontProduct {
   readonly availability_state: string | null;
   readonly is_stale: boolean;
   readonly substitution_available: boolean;
+  readonly image_references: readonly string[];
 }
 
 export interface Storefront {
@@ -43,6 +45,13 @@ export interface Storefront {
   readonly category: string;
   readonly minimum_order_minor: number;
   readonly fulfilment_modes: readonly string[];
+  readonly operating_hours: readonly {
+    readonly weekday: number;
+    readonly opens_at: string;
+    readonly closes_at: string;
+  }[];
+  readonly rating_average: number | null;
+  readonly rating_count: number;
   readonly products: readonly StorefrontProduct[];
 }
 
@@ -69,9 +78,17 @@ const pinCode = /^[1-9][0-9]{5}$/;
 // Stopwords and common synonyms kept intentionally small; the goal at this
 // slice is normalized, forgiving matching, not a full language model.
 const synonyms: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  aloo: ['potato', 'aalu'],
-  pyaz: ['onion', 'pyaaz'],
-  tamatar: ['tomato'],
+  aalu: ['potato', 'aloo', 'आलू'],
+  aloo: ['potato', 'aalu', 'आलू'],
+  आलू: ['potato', 'aloo', 'aalu'],
+  pyaz: ['onion', 'pyaaz', 'प्याज', 'पियाज'],
+  pyaaz: ['onion', 'pyaz', 'प्याज'],
+  प्याज: ['onion', 'pyaz', 'pyaaz'],
+  sabji: ['vegetable', 'sabzi', 'सब्जी'],
+  sabzi: ['vegetable', 'sabji', 'सब्जी'],
+  सब्जी: ['vegetable', 'sabzi', 'sabji'],
+  tamatar: ['tomato', 'टमाटर'],
+  टमाटर: ['tomato', 'tamatar'],
 });
 
 function customer(context: RequestContext): UuidV7 {
@@ -164,6 +181,9 @@ export class CustomerDiscoveryService {
       minimum_order_minor: string;
       currency: string;
       fulfilment_modes: string[];
+      operating_hours: { weekday: number; opens_at: string; closes_at: string }[];
+      rating_average: string | null;
+      rating_count: string;
       is_open_now: boolean;
     }>(
       `SELECT l.vendor_location_id, l.location_name, l.category,
@@ -226,11 +246,16 @@ export class CustomerDiscoveryService {
     readonly customer_address_id: UuidV7;
     readonly term: string;
     readonly limit?: number;
+    readonly category?: string;
+    readonly available_only?: boolean;
+    readonly fulfilment_mode?: string;
+    readonly max_distance_meters?: number;
     readonly now?: Date;
   }): Promise<
     readonly {
       readonly vendor_location_id: UuidV7;
       readonly catalogue_product_id: UuidV7;
+      readonly catalogue_variant_id: UuidV7;
       readonly title: string;
       readonly price_minor: number | null;
       readonly is_available: boolean;
@@ -245,11 +270,12 @@ export class CustomerDiscoveryService {
     const result = await this.#pool.query<{
       vendor_location_id: string;
       catalogue_product_id: string;
+      catalogue_variant_id: string;
       title: string;
       price_minor: string | null;
       is_available: boolean;
     }>(
-      `SELECT p.vendor_location_id, p.catalogue_product_id, p.title,
+      `SELECT p.vendor_location_id, p.catalogue_product_id, v.catalogue_variant_id, p.title,
               price.price_minor::text AS price_minor,
               COALESCE(item.availability_state IN ('AVAILABLE','LOW_STOCK','VENDOR_CONFIRMS'), false)
                 AS is_available
@@ -272,11 +298,28 @@ export class CustomerDiscoveryService {
            ON item.vendor_location_id = p.vendor_location_id
           AND item.product_reference = p.product_reference
         WHERE a.customer_address_id = $1 AND a.user_id = $2 AND a.lifecycle_state = 'ACTIVE'
-          AND (lower(p.title) LIKE ANY (SELECT '%' || unnest($3::text[]) || '%')
-               OR lower(p.category) = ANY ($3::text[]))
-        ORDER BY is_available DESC, p.title ASC
-        LIMIT $4`,
-      [input.customer_address_id, userId, terms, limit],
+          AND (p.search_document @@ plainto_tsquery('simple', $3)
+               OR lower(p.title) LIKE ANY (SELECT '%' || unnest($4::text[]) || '%')
+               OR lower(p.category) = ANY ($4::text[]))
+          AND ($5::text IS NULL OR p.category=$5)
+          AND ($6::boolean=false OR COALESCE(item.availability_state IN ('AVAILABLE','LOW_STOCK','VENDOR_CONFIRMS'),false))
+          AND ($7::text IS NULL OR EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes fm WHERE fm.vendor_location_id=l.vendor_location_id AND fm.fulfilment_mode=$7))
+          AND ($8::integer IS NULL OR ST_Distance(l.coordinates,a.coordinates) <= $8)
+        ORDER BY is_available DESC,
+                 ts_rank(p.search_document, plainto_tsquery('simple', $3)) DESC,
+                 similarity(lower(p.title), $3) DESC, p.title ASC
+        LIMIT $9`,
+      [
+        input.customer_address_id,
+        userId,
+        normalized,
+        terms,
+        input.category ?? null,
+        input.available_only ?? false,
+        input.fulfilment_mode ?? null,
+        input.max_distance_meters ?? null,
+        limit,
+      ],
     );
     await this.#recordSearch(userId, normalized, input.term, now);
     await recordEvent(this.#pool, {
@@ -291,6 +334,7 @@ export class CustomerDiscoveryService {
         Object.freeze({
           vendor_location_id: parseUuidV7(row.vendor_location_id),
           catalogue_product_id: parseUuidV7(row.catalogue_product_id),
+          catalogue_variant_id: parseUuidV7(row.catalogue_variant_id),
           title: row.title,
           price_minor: row.price_minor === null ? null : Number(row.price_minor),
           is_available: row.is_available,
@@ -358,6 +402,9 @@ export class CustomerDiscoveryService {
       category: string;
       minimum_order_minor: string;
       fulfilment_modes: string[];
+      operating_hours: { weekday: number; opens_at: string; closes_at: string }[];
+      rating_average: string | null;
+      rating_count: string;
     }>(
       `SELECT l.location_name, l.profile_description, l.category,
               l.minimum_order_minor::text AS minimum_order_minor,
@@ -367,6 +414,9 @@ export class CustomerDiscoveryService {
                   WHERE vendor_location_id = l.vendor_location_id),
                 ARRAY[]::text[]
               ) AS fulfilment_modes
+              ,COALESCE((SELECT json_agg(json_build_object('weekday',weekday,'opens_at',opens_at,'closes_at',closes_at) ORDER BY weekday,opens_at) FROM marketplace.vendor_location_operating_hours WHERE vendor_location_id=l.vendor_location_id),'[]') AS operating_hours
+              ,(SELECT avg(r.stars)::numeric(3,2)::text FROM marketplace.vendor_order_ratings r JOIN marketplace.vendor_orders vo USING(vendor_order_id) WHERE vo.vendor_location_id=l.vendor_location_id) AS rating_average
+              ,(SELECT count(*)::text FROM marketplace.vendor_order_ratings r JOIN marketplace.vendor_orders vo USING(vendor_order_id) WHERE vo.vendor_location_id=l.vendor_location_id) AS rating_count
          FROM marketplace.vendor_locations l
          JOIN marketplace.vendor_publication_cases pub
            ON pub.vendor_location_id = l.vendor_location_id AND pub.lifecycle_state = 'PUBLISHED'
@@ -378,6 +428,7 @@ export class CustomerDiscoveryService {
 
     const products = await this.#pool.query<{
       catalogue_product_id: string;
+      catalogue_variant_id: string;
       product_reference: string;
       title: string;
       category: string;
@@ -386,14 +437,16 @@ export class CustomerDiscoveryService {
       price_minor: string | null;
       availability_state: string | null;
       substitution_available: boolean;
+      image_references: string[];
     }>(
-      `SELECT p.catalogue_product_id, p.product_reference, p.title, p.category, p.unit_label,
+      `SELECT p.catalogue_product_id, v.catalogue_variant_id, p.product_reference, p.title, p.category, p.unit_label,
               p.variable_weight, price.price_minor::text AS price_minor,
               item.availability_state,
               EXISTS (
                 SELECT 1 FROM marketplace.catalogue_product_substitutions s
                  WHERE s.catalogue_variant_id = v.catalogue_variant_id AND s.lifecycle_state = 'ACTIVE'
               ) AS substitution_available
+              ,COALESCE((SELECT array_agg(i.object_reference ORDER BY i.position) FROM marketplace.catalogue_product_images i WHERE i.catalogue_product_id=p.catalogue_product_id),ARRAY[]::text[]) AS image_references
          FROM marketplace.catalogue_products p
          LEFT JOIN marketplace.catalogue_product_variants v
            ON v.catalogue_product_id = p.catalogue_product_id AND v.lifecycle_state = 'ACTIVE'
@@ -428,10 +481,16 @@ export class CustomerDiscoveryService {
       category: store.category,
       minimum_order_minor: Number(store.minimum_order_minor),
       fulfilment_modes: Object.freeze([...store.fulfilment_modes]),
+      operating_hours: Object.freeze(
+        store.operating_hours.map((hour) => Object.freeze({ ...hour })),
+      ),
+      rating_average: store.rating_average === null ? null : Number(store.rating_average),
+      rating_count: Number(store.rating_count),
       products: Object.freeze(
         products.rows.map((row) =>
           Object.freeze({
             catalogue_product_id: parseUuidV7(row.catalogue_product_id),
+            catalogue_variant_id: parseUuidV7(row.catalogue_variant_id),
             product_reference: row.product_reference,
             title: row.title,
             category: row.category,
@@ -441,6 +500,7 @@ export class CustomerDiscoveryService {
             availability_state: row.availability_state,
             is_stale: row.availability_state === null,
             substitution_available: row.substitution_available,
+            image_references: Object.freeze([...row.image_references]),
           }),
         ),
       ),

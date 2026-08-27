@@ -34,6 +34,7 @@ alias rather than silently renumbered.
 | `0023`–`0025` | Grouped checkout: quotes, checkout groups, vendor orders, line snapshots, blocked groups | Phase 7 | named, not numbered | documented in [grouped checkout](grouped-checkout.md) |
 | `0026` | Vendor fulfilment, customer decisions, pickup OTP, receipt/rating/support | Phase 8 | named, not numbered | documented in [vendor fulfilment and pickup](vendor-fulfilment-and-pickup.md) |
 | `0027` | Partner onboarding, offline proof, guided exceptions, earnings + disputes | Phase 9 remainder (9.1, 9.7, 9.8, 9.10) | named, not numbered | documented in [partner lifecycle and earnings](partner-lifecycle-and-earnings.md) |
+| `0028`, `0029` | Ledger catalogue, voids, settlement lines, payout batches, reconciliation, corrections, durable account scope | Phase 10 remainder (10.1–10.7) | named, not numbered | documented in [complete money lifecycle](complete-money-lifecycle.md) |
 
 ## Consequences to carry forward
 
@@ -43,9 +44,8 @@ alias rather than silently renumbered.
   depends on the order aggregate, which is Phase 7's job; see
   [vendor publication restore and impact](vendor-publication-restore-and-impact.md) for why building
   it early would fabricate evidence.
-- Phases 7, 9 and 10 each have persistence foundations in place but none of their workflow,
-  API, or UI steps. A future Phase 7/9/10 must treat `0013`/`0014`/`0015` as groundwork already
-  laid, not as those phases being started.
+- Phases 7, 9, and 10 have now consumed their early `0013`/`0014`/`0015`
+  foundations and are complete within the approved local synthetic scope.
 - Client surfaces lag throughout. Phase 5 exit requires a published vendor to be *discoverable*;
   that is currently provable through the service layer and `pnpm db:verify`, not through a UI.
 

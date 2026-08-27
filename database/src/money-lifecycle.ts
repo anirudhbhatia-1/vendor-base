@@ -33,12 +33,14 @@ const OPERATION = /^SYNTH-(PAY|REF|PAYOUT)-[A-Z0-9-]{4,64}$/;
 
 export interface PaymentRecord {
   readonly amount_minor: number;
+  readonly captured_amount_minor: number;
   readonly currency: 'INR';
   readonly payment_state: string;
   readonly payment_transaction_id: UuidV7;
   readonly provider_operation_reference: string;
   readonly source_checkout_reference: string;
   readonly version: number;
+  readonly voided_amount_minor: number;
 }
 
 function text(value: string, pattern: RegExp, label: string): string {
@@ -66,12 +68,14 @@ function contextIds(context: RequestContext) {
 function record(row: Record<string, unknown>): PaymentRecord {
   return Object.freeze({
     amount_minor: Number(row.amount_minor),
+    captured_amount_minor: Number(row.captured_amount_minor ?? 0),
     currency: 'INR',
     payment_state: String(row.payment_state),
     payment_transaction_id: parseUuidV7(String(row.payment_transaction_id)),
     provider_operation_reference: String(row.provider_operation_reference),
     source_checkout_reference: String(row.source_checkout_reference),
     version: Number(row.version),
+    voided_amount_minor: Number(row.voided_amount_minor ?? 0),
   });
 }
 async function tx<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -228,6 +232,11 @@ export class MoneyLifecycleService {
   }): Promise<PaymentRecord> {
     const result = await this.#providerTransition(input, 'AUTHORIZED', 'PAYMENT_CAPTURED');
     if (result.payment_state === 'CAPTURED') {
+      await this.#pool.query(
+        `UPDATE marketplace.payment_transactions SET captured_amount_minor=amount_minor
+          WHERE payment_transaction_id=$1 AND captured_amount_minor=0`,
+        [result.payment_transaction_id],
+      );
       await this.#postBalanced({
         context: input.context,
         entries: [
@@ -248,6 +257,7 @@ export class MoneyLifecycleService {
         source: `SYNTH-CAPTURE-${result.payment_transaction_id.toUpperCase()}`,
         now: input.now ?? new Date(),
       });
+      return Object.freeze({ ...result, captured_amount_minor: result.amount_minor });
     }
     return result;
   }
@@ -267,6 +277,7 @@ export class MoneyLifecycleService {
     readonly vendor_location_id: UuidV7;
     readonly completed: boolean;
     readonly now?: Date;
+    readonly policy_version_reference?: string;
   }) {
     actor(input.context);
     const now = input.now ?? new Date();
@@ -293,6 +304,12 @@ export class MoneyLifecycleService {
       now.getTime() + SYNTHETIC_FINANCIAL_POLICY.settlement_delay_seconds * 1_000,
     );
     return tx(this.#pool, async (client) => {
+      const sourceOrder = text(input.source_order_reference, ORDER, 'Order reference');
+      const replay = await client.query(
+        `SELECT * FROM marketplace.settlements WHERE source_order_reference=$1`,
+        [sourceOrder],
+      );
+      if (replay.rows[0]) return Object.freeze({ ...replay.rows[0], vendor_fee_minor: vendorFee });
       const result = await client.query(
         `INSERT INTO marketplace.settlements
         (settlement_id,source_order_reference,payment_transaction_id,vendor_location_id,partner_user_id,
@@ -315,7 +332,33 @@ export class MoneyLifecycleService {
           now,
         ],
       );
-      const sourceOrder = text(input.source_order_reference, ORDER, 'Order reference');
+      const settlementId = result.rows[0].settlement_id;
+      const policy = text(
+        input.policy_version_reference ?? 'SYNTH-POLICY-D05-LOCAL-V1',
+        POLICY,
+        'Policy reference',
+      );
+      const lines = [
+        ['CUSTOMER', 'CAPTURE', input.customer_captured_minor],
+        ['CUSTOMER', 'REFUND', -input.successful_refunds_minor],
+        ['VENDOR', 'ITEM_PROCEEDS', remainingItems],
+        ['PLATFORM', 'PLATFORM_FEE', vendorFee],
+        ['PARTNER', 'DELIVERY_BASE', input.partner_outbound_minor],
+        ['PARTNER', 'WAIT', input.partner_wait_minor],
+        ['PARTNER', 'RETURN', input.partner_return_minor],
+        ['PARTNER', 'TIP', input.partner_tip_minor],
+        ['PLATFORM', 'ADJUSTMENT', platform],
+      ] as const;
+      for (const [participant, component, lineAmount] of lines) {
+        if (lineAmount === 0) continue;
+        await client.query(
+          `INSERT INTO marketplace.settlement_lines
+            (settlement_line_id,settlement_id,participant_kind,component,amount_minor,
+             policy_version_reference,created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [createUuidV7(), settlementId, participant, component, lineAmount, policy, now],
+        );
+      }
       const entries: { account: string; component: string; credit: number; debit: number }[] = [
         {
           account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',

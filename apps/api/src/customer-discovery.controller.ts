@@ -93,6 +93,10 @@ export class CustomerDiscoveryController {
     @Query('customer_address_id') addressId: string,
     @Query('term') term: string,
     @Query('limit') limit?: string,
+    @Query('category') category?: string,
+    @Query('available_only') availableOnly?: string,
+    @Query('fulfilment_mode') fulfilmentMode?: string,
+    @Query('max_distance_meters') maxDistance?: string,
   ) {
     try {
       return {
@@ -101,6 +105,10 @@ export class CustomerDiscoveryController {
           customer_address_id: uuid(requireQuery(addressId)),
           term: requireQuery(term),
           ...(limit !== undefined ? { limit: Number(limit) } : {}),
+          ...(category ? { category } : {}),
+          ...(availableOnly !== undefined ? { available_only: availableOnly === 'true' } : {}),
+          ...(fulfilmentMode ? { fulfilment_mode: fulfilmentMode } : {}),
+          ...(maxDistance !== undefined ? { max_distance_meters: Number(maxDistance) } : {}),
         }),
       };
     } catch (error) {

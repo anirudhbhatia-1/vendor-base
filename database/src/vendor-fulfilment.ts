@@ -77,6 +77,9 @@ export interface PickRecord {
   readonly actual_unit_price_minor: number | null;
   readonly substitution_variant_id: UuidV7 | null;
   readonly version: number;
+  readonly product_title: string | null;
+  readonly ordered_quantity: number | null;
+  readonly ordered_unit_price_minor: number | null;
 }
 
 export interface DecisionRecord {
@@ -255,6 +258,10 @@ function projectPick(row: Record<string, unknown>): PickRecord {
       ? parseUuidV7(row['substitution_variant_id'] as string)
       : null,
     version: row['version'] as number,
+    product_title: (row['product_title'] as string | null) ?? null,
+    ordered_quantity: row['ordered_quantity'] == null ? null : Number(row['ordered_quantity']),
+    ordered_unit_price_minor:
+      row['ordered_unit_price_minor'] == null ? null : Number(row['ordered_unit_price_minor']),
   });
 }
 
@@ -1133,6 +1140,8 @@ export class VendorFulfilmentService {
   }): Promise<{
     readonly order: VendorOrderSummary;
     readonly lines: readonly {
+      readonly catalogue_variant_id: UuidV7;
+      readonly vendor_location_id: UuidV7;
       readonly title: string;
       readonly variant_title: string;
       readonly quantity: number;
@@ -1159,13 +1168,15 @@ export class VendorFulfilmentService {
     if (!orderRow) throw new FulfilmentNotFoundError();
     if (orderRow['customer_user_id'] !== customerId) throw new FulfilmentNotFoundError();
     const lines = await this.#pool.query(
-      `SELECT l.product_title_snapshot AS title, l.variant_title_snapshot AS variant_title,
+      `SELECT l.catalogue_variant_id, o.vendor_location_id,
+              l.product_title_snapshot AS title, l.variant_title_snapshot AS variant_title,
               l.quantity, l.unit_price_minor::text AS unit_price_minor,
               l.line_total_minor::text AS line_total_minor,
               COALESCE(p.pick_state, 'PENDING') AS pick_state,
               p.actual_quantity,
               p.actual_unit_price_minor::text AS actual_unit_price_minor
          FROM marketplace.vendor_order_lines l
+         JOIN marketplace.vendor_orders o ON o.vendor_order_id=l.vendor_order_id
          LEFT JOIN marketplace.vendor_order_line_picks p
            ON p.vendor_order_line_id=l.vendor_order_line_id
         WHERE l.vendor_order_id=$1 ORDER BY l.vendor_order_line_id`,
@@ -1174,6 +1185,8 @@ export class VendorFulfilmentService {
     return {
       order: projectSummary(orderRow as Record<string, unknown>),
       lines: lines.rows.map((row) => ({
+        catalogue_variant_id: parseUuidV7(row['catalogue_variant_id']),
+        vendor_location_id: parseUuidV7(row['vendor_location_id']),
         title: row['title'],
         variant_title: row['variant_title'],
         quantity: Number(row['quantity']),
@@ -1305,6 +1318,26 @@ export class VendorFulfilmentService {
   // Read-only projections used by tests and controllers.
   // -----------------------------------------------------------------------
 
+  async listVendorOrders(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+    readonly limit?: number;
+  }): Promise<readonly VendorOrderSummary[]> {
+    requireSystemOrVendor(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
+    const result = await this.#pool.query(
+      `SELECT vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
+              version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
+              package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
+              pickup_otp_attempts, decline_reason_code
+         FROM marketplace.vendor_orders
+        WHERE vendor_location_id=$1
+        ORDER BY created_at DESC, vendor_order_id DESC LIMIT $2`,
+      [input.vendor_location_id, limit],
+    );
+    return Object.freeze(result.rows.map((row) => projectSummary(row as Record<string, unknown>)));
+  }
+
   async getOrder(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
@@ -1327,11 +1360,13 @@ export class VendorFulfilmentService {
     readonly vendor_order_id: UuidV7;
   }): Promise<readonly PickRecord[]> {
     const result = await this.#pool.query(
-      `SELECT pick_id, vendor_order_line_id, pick_state, actual_quantity,
-              actual_unit_price_minor::text AS actual_unit_price_minor,
-              substitution_variant_id, version
-         FROM marketplace.vendor_order_line_picks WHERE vendor_order_id=$1
-         ORDER BY updated_at`,
+      `SELECT p.pick_id, p.vendor_order_line_id, p.pick_state, p.actual_quantity,
+              p.actual_unit_price_minor::text AS actual_unit_price_minor,
+              p.substitution_variant_id, p.version, l.product_title_snapshot AS product_title,
+              l.quantity AS ordered_quantity, l.unit_price_minor::text AS ordered_unit_price_minor
+         FROM marketplace.vendor_order_line_picks p
+         JOIN marketplace.vendor_order_lines l USING(vendor_order_line_id)
+        WHERE p.vendor_order_id=$1 ORDER BY p.updated_at`,
       [input.vendor_order_id],
     );
     return Object.freeze(result.rows.map((row) => projectPick(row as Record<string, unknown>)));

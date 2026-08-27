@@ -100,6 +100,11 @@ assert(
       '0025_checkout_resilience',
       '0026_vendor_fulfilment_and_pickup',
       '0027_partner_lifecycle_and_earnings',
+      '0028_complete_money_lifecycle',
+      '0029_durable_ledger_account_catalogue',
+      '0030_admin_control_plane',
+      '0031_admin_control_completion',
+      '0032_discovery_search_index',
     ]),
   'Unexpected reviewed migrations',
 );

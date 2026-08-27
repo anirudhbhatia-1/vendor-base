@@ -37,6 +37,7 @@ import { verifyVendorPublication } from './verify-vendor-publication.js';
 import { verifyInventoryReservations } from './verify-inventory-reservations.js';
 import { verifyAssignmentCustody } from './verify-assignment-custody.js';
 import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
+import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyCatalogueFreshnessModeration } from './verify-catalogue-freshness-moderation.js';
 import { verifyCatalogueProducts } from './verify-catalogue-products.js';
 import { verifyCustomerAddresses } from './verify-customer-addresses.js';
@@ -639,6 +640,7 @@ await withDatabaseClient(config, async (client) => {
   await verifyCustomerCart(config.connectionString);
   await verifyGroupedCheckout(config.connectionString);
   await verifyVendorFulfilment(config.connectionString);
+  await verifyAdminControlPlane(config.connectionString);
   await verifyPartnerLifecycle(config.connectionString);
   await verifyVendorStaff(config.connectionString);
   await verifyAssignmentCustody(config.connectionString);
@@ -1007,7 +1009,8 @@ await withDatabaseClient(config, async (client) => {
     assignment_custody_scenarios: 11,
     vendor_fulfilment_scenarios: 14,
     partner_lifecycle_scenarios: 25,
-    money_lifecycle_scenarios: 12,
+    money_lifecycle_scenarios: 22,
+    admin_control_plane_scenarios: 12,
     target: 'test',
   });
 });

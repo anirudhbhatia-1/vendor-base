@@ -4,6 +4,7 @@ export interface RuntimeConfig {
   readonly environment: RuntimeEnvironment;
   readonly version: string;
   readonly dataMode: 'synthetic';
+  readonly databaseUrl: string;
 }
 
 const allowedEnvironments = new Set<RuntimeEnvironment>([
@@ -29,5 +30,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
     environment: environment as RuntimeEnvironment,
     version,
     dataMode,
+    databaseUrl:
+      process.env.DATABASE_URL ??
+      'postgresql://marketplace_local:marketplace_local_only@127.0.0.1:5432/neighbourhood_store_local',
   });
 }

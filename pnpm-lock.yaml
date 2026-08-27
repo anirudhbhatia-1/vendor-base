@@ -89,12 +89,19 @@ importers:
       fastify:
         specifier: 5.12.0
         version: 5.12.0
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
       reflect-metadata:
         specifier: 0.2.2
         version: 0.2.2
       rxjs:
         specifier: 7.8.2
         version: 7.8.2
+    devDependencies:
+      '@types/pg':
+        specifier: 8.20.0
+        version: 8.20.0
 
   apps/customer-app:
     dependencies:
@@ -197,6 +204,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@neighbourhood-store/database':
+        specifier: workspace:*
+        version: link:../../database
       '@neighbourhood-store/domain-types':
         specifier: workspace:*
         version: link:../../packages/domain-types
@@ -212,12 +222,19 @@ importers:
       bullmq:
         specifier: 6.1.2
         version: 6.1.2(pg@8.23.0)
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
       reflect-metadata:
         specifier: 0.2.2
         version: 0.2.2
       rxjs:
         specifier: 7.8.2
         version: 7.8.2
+    devDependencies:
+      '@types/pg':
+        specifier: 8.20.0
+        version: 8.20.0
 
   database:
     dependencies:

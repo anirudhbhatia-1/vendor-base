@@ -784,7 +784,7 @@ Complete the first real vertical transaction: customer checkout, vendor preparat
 
 ## 14. Phase 9 — Delivery partner, custody, delivery, and returns
 
-**Implementation status:** Complete and verified for the approved company-local synthetic environment. Real earnings payouts (Phase 10 ledger) and admin dispute negotiation queues (Phase 11) remain gated by their respective phases and D-12.
+**Implementation status:** Complete and verified for the approved company-local synthetic environment. Earnings ledger posting and payout batching are now delivered by Phase 10; admin dispute negotiation queues remain Phase 11 work. Real providers remain gated by D-12.
 
 ### Goal
 
@@ -879,6 +879,8 @@ Add platform-managed delivery without losing assignment ownership, physical cust
 
 ## 15. Phase 10 — Complete money lifecycle and reconciliation
 
+**Implementation status:** Complete and verified for the approved company-local synthetic environment. Thirty migrations pass full rollback/forward rehearsal and 22 connected money scenarios. Provider calls and statements remain synthetic; production credentials, real payment/payout providers, tax policy, and external bank settlement are explicitly gated by D-12.
+
 ### Goal
 
 Make every customer, vendor, partner, platform, tax, refund, settlement, and payout amount traceable and balanced.
@@ -944,6 +946,8 @@ Use unit/property, integration, concurrency, provider-contract, and end-to-end t
 - No interface can edit or force-balance history.
 
 ## 16. Phase 11 — Admin control plane, support, trust, configuration, and reporting
+
+**Implementation status:** Complete and verified for the approved company-local synthetic environment. The control plane operates only on synthetic records; production operational authority, provider credentials, and personal data remain gated by D-12.
 
 ### Goal
 

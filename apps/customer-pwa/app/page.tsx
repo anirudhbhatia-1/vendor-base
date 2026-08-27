@@ -1,5 +1,7 @@
 import { SignInPanel } from './sign-in-panel';
 import { CheckoutPanel } from './checkout-panel';
+import { MarketplacePanel } from './marketplace-panel';
+import { OrdersPanel } from './orders-panel';
 
 export default function CustomerHome() {
   return (
@@ -24,6 +26,9 @@ export default function CustomerHome() {
       </section>
 
       <SignInPanel />
+
+      <MarketplacePanel />
+      <OrdersPanel />
 
       <CheckoutPanel />
 

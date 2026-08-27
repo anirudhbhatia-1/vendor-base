@@ -89,6 +89,21 @@ const customerSupport = RequireAuthorization({
 export class VendorOrderFulfilmentController {
   constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
 
+  @Get()
+  @vendorFulfil
+  async list(@Param('vendor_location_id') locationId: string) {
+    try {
+      return {
+        orders: await this.fulfilment.listVendorOrders({
+          context: currentRequestContext(),
+          vendor_location_id: uuid(locationId),
+        }),
+      };
+    } catch (error) {
+      map(error);
+    }
+  }
+
   @Post(':vendor_order_id/accept')
   @vendorFulfil
   async accept(

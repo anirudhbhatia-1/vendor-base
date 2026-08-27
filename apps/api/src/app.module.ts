@@ -26,6 +26,8 @@ import {
   VendorFulfilmentService,
   PartnerLifecycleService,
   PartnerFieldOpsService,
+  CompleteMoneyLifecycleService,
+  AdminControlPlaneService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -47,6 +49,15 @@ import {
 } from './assignment-custody.controller.js';
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
+import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
+import { ADMIN_CONTROL_PLANE } from './tokens.js';
+import { AdminControlPlaneController } from './admin-control-plane.controller.js';
+import {
+  CompleteMoneyAdminController,
+  CustomerFinanceController,
+  PartnerFinanceController,
+  VendorFinanceController,
+} from './complete-money-lifecycle.controller.js';
 import { CATALOGUE_FRESHNESS_MODERATION } from './tokens.js';
 import {
   CATALOGUE_PRODUCTS,
@@ -117,6 +128,11 @@ import {
     PartnerEarningsController,
     AdminPartnerDisputeController,
     PartnerFieldOpsController,
+    CompleteMoneyAdminController,
+    CustomerFinanceController,
+    PartnerFinanceController,
+    VendorFinanceController,
+    AdminControlPlaneController,
   ],
   providers: [
     LifecycleService,
@@ -263,6 +279,18 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new MoneyLifecycleService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: COMPLETE_MONEY_LIFECYCLE,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new CompleteMoneyLifecycleService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: ADMIN_CONTROL_PLANE,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new AdminControlPlaneService({ connection_string: config.databaseUrl }),
     },
   ],
 })

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { OrdersPanel } from './orders-panel';
 
 type Filter = 'All' | 'Counted' | 'Vendor confirms' | 'Needs attention';
 type Item = {
@@ -467,6 +468,7 @@ export default function VendorHome() {
           <p className="expiry-note">Soft-held and provisional records expire on server time.</p>
         </article>
       </section>
+      <OrdersPanel />
       <section className="catalogue-studio" aria-labelledby="catalogue-title">
         <div className="catalogue-heading">
           <div>
