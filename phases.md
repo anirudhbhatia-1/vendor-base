@@ -637,6 +637,8 @@ Let customers find named eligible stores and build a correct multi-store cart be
 
 ## 12. Phase 7 — Pricing, inventory holds, payment, and grouped checkout
 
+**Implementation status:** Complete and verified for the approved company-local synthetic environment. Real providers and production data remain gated by D-12 and the production replacement register.
+
 ### Goal
 
 Convert a validated grouped cart into isolated vendor orders and one explainable prepaid authorization exactly once.

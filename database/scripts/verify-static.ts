@@ -95,6 +95,9 @@ assert(
       '0020_customer_discovery_and_preferences',
       '0021_customer_cart',
       '0022_vendor_staff_settings',
+      '0023_grouped_checkout',
+      '0024_checkout_line_snapshots',
+      '0025_checkout_resilience',
     ]),
   'Unexpected reviewed migrations',
 );

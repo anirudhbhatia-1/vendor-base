@@ -74,9 +74,24 @@ export function allocateMinorUnits(
 export type FakeProviderScenario = 'DECLINE' | 'MALFORMED' | 'SUCCESS' | 'UNKNOWN';
 export type FakeProviderOutcome = 'DECLINED' | 'SUCCEEDED' | 'UNKNOWN';
 
+export interface MoneyProviderAdapter {
+  authorize(input: {
+    readonly amount_minor: number;
+    readonly operation_reference: string;
+    readonly scenario: FakeProviderScenario;
+  }): FakeProviderOutcome;
+  capture(input: { readonly operation_reference: string }): FakeProviderOutcome;
+  refund(input: {
+    readonly amount_minor: number;
+    readonly operation_reference: string;
+    readonly scenario: FakeProviderScenario;
+  }): FakeProviderOutcome;
+  status(operation_reference: string): FakeProviderOutcome | undefined;
+}
+
 const OPERATION_PATTERN = /^SYNTH-(PAY|REF|PAYOUT)-[A-Z0-9-]{4,64}$/;
 
-export class LocalFakeMoneyProvider {
+export class LocalFakeMoneyProvider implements MoneyProviderAdapter {
   readonly #results = new Map<string, FakeProviderOutcome>();
 
   execute(input: {
@@ -99,5 +114,29 @@ export class LocalFakeMoneyProvider {
           : 'UNKNOWN';
     this.#results.set(input.operation_reference, outcome);
     return outcome;
+  }
+
+  authorize(input: {
+    readonly amount_minor: number;
+    readonly operation_reference: string;
+    readonly scenario: FakeProviderScenario;
+  }): FakeProviderOutcome {
+    return this.execute(input);
+  }
+
+  capture(input: { readonly operation_reference: string }): FakeProviderOutcome {
+    return this.#results.get(input.operation_reference) ?? 'UNKNOWN';
+  }
+
+  refund(input: {
+    readonly amount_minor: number;
+    readonly operation_reference: string;
+    readonly scenario: FakeProviderScenario;
+  }): FakeProviderOutcome {
+    return this.execute(input);
+  }
+
+  status(operation_reference: string): FakeProviderOutcome | undefined {
+    return this.#results.get(operation_reference);
   }
 }

@@ -1,4 +1,5 @@
 import { SignInPanel } from './sign-in-panel';
+import { CheckoutPanel } from './checkout-panel';
 
 export default function CustomerHome() {
   return (
@@ -23,6 +24,8 @@ export default function CustomerHome() {
       </section>
 
       <SignInPanel />
+
+      <CheckoutPanel />
 
       <section className="money-strip" aria-label="Synthetic payment recovery state">
         <span>Test checkout</span>

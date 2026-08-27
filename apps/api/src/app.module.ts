@@ -21,6 +21,7 @@ import {
   CustomerAddressService,
   CustomerDiscoveryService,
   CustomerCartService,
+  GroupedCheckoutService,
   VendorStaffService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
@@ -49,11 +50,13 @@ import {
   CUSTOMER_ADDRESSES,
   CUSTOMER_DISCOVERY,
   CUSTOMER_CART,
+  GROUPED_CHECKOUT,
   VENDOR_STAFF,
 } from './tokens.js';
 import { CustomerAddressesController } from './customer-addresses.controller.js';
 import { CustomerDiscoveryController } from './customer-discovery.controller.js';
 import { CustomerCartController } from './customer-cart.controller.js';
+import { GroupedCheckoutController } from './grouped-checkout.controller.js';
 import {
   VendorStaffController,
   VendorAccessController,
@@ -84,6 +87,7 @@ import {
     CustomerAddressesController,
     CustomerDiscoveryController,
     CustomerCartController,
+    GroupedCheckoutController,
     VendorStaffController,
     VendorAccessController,
     VendorSettingsController,
@@ -189,6 +193,12 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new CustomerCartService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: GROUPED_CHECKOUT,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new GroupedCheckoutService({ connection_string: config.databaseUrl }),
     },
     {
       provide: VENDOR_STAFF,

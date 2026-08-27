@@ -43,6 +43,7 @@ import { verifyCustomerAddresses } from './verify-customer-addresses.js';
 import { verifyCustomerDiscovery } from './verify-customer-discovery.js';
 import { verifyCustomerCart } from './verify-customer-cart.js';
 import { verifyVendorStaff } from './verify-vendor-staff.js';
+import { verifyGroupedCheckout } from './verify-grouped-checkout.js';
 
 async function assertVersions(client: Client): Promise<void> {
   const result = await client.query<{
@@ -634,6 +635,7 @@ await withDatabaseClient(config, async (client) => {
   await verifyCustomerAddresses(config.connectionString);
   await verifyCustomerDiscovery(config.connectionString);
   await verifyCustomerCart(config.connectionString);
+  await verifyGroupedCheckout(config.connectionString);
   await verifyVendorStaff(config.connectionString);
   await verifyAssignmentCustody(config.connectionString);
   await verifyMoneyLifecycle(config.connectionString);
