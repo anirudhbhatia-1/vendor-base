@@ -35,6 +35,9 @@ alias rather than silently renumbered.
 | `0026` | Vendor fulfilment, customer decisions, pickup OTP, receipt/rating/support | Phase 8 | named, not numbered | documented in [vendor fulfilment and pickup](vendor-fulfilment-and-pickup.md) |
 | `0027` | Partner onboarding, offline proof, guided exceptions, earnings + disputes | Phase 9 remainder (9.1, 9.7, 9.8, 9.10) | named, not numbered | documented in [partner lifecycle and earnings](partner-lifecycle-and-earnings.md) |
 | `0028`, `0029` | Ledger catalogue, voids, settlement lines, payout batches, reconciliation, corrections, durable account scope | Phase 10 remainder (10.1–10.7) | named, not numbered | documented in [complete money lifecycle](complete-money-lifecycle.md) |
+| `0030`, `0031` | Support, trust, incidents, audit, reports, exports and operational expiry | Phase 11 | named, not numbered | documented in [admin control plane](admin-control-plane.md) |
+| `0032` | Indexed Hindi/transliteration-aware catalogue discovery | Phase 6.3 completion | named, not numbered | implemented in `customer-discovery.ts` |
+| `0033` | English/Hindi locale registry and coverage gate | Phase 12.3 | named, not numbered | documented in [launch readiness and localization](launch-readiness-and-localization.md) |
 
 ## Consequences to carry forward
 
@@ -46,8 +49,9 @@ alias rather than silently renumbered.
   it early would fabricate evidence.
 - Phases 7, 9, and 10 have now consumed their early `0013`/`0014`/`0015`
   foundations and are complete within the approved local synthetic scope.
-- Client surfaces lag throughout. Phase 5 exit requires a published vendor to be *discoverable*;
-  that is currently provable through the service layer and `pnpm db:verify`, not through a UI.
+- The four PWAs and four Android clients now expose API-backed role journeys. Manual device and
+  assistive-technology verification remains a Phase 12 gate; client actions must not fall back to
+  synthetic component-only state.
 
 ## Rule going forward
 

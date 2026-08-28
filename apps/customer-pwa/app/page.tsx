@@ -2,6 +2,8 @@ import { SignInPanel } from './sign-in-panel';
 import { CheckoutPanel } from './checkout-panel';
 import { MarketplacePanel } from './marketplace-panel';
 import { OrdersPanel } from './orders-panel';
+import { LocaleBar } from './locale-bar';
+import { NotificationInbox } from './notification-inbox';
 
 export default function CustomerHome() {
   return (
@@ -27,8 +29,11 @@ export default function CustomerHome() {
 
       <SignInPanel />
 
+      <LocaleBar />
+
       <MarketplacePanel />
       <OrdersPanel />
+      <NotificationInbox />
 
       <CheckoutPanel />
 

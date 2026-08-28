@@ -28,6 +28,11 @@ import {
   PartnerFieldOpsService,
   CompleteMoneyLifecycleService,
   AdminControlPlaneService,
+  LocaleRegistryService,
+  PartnerAvailabilityService,
+  PartnerWaitPolicyService,
+  LocalNotificationService,
+  ConfigurationAdminService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -69,6 +74,11 @@ import {
   VENDOR_FULFILMENT,
   PARTNER_LIFECYCLE,
   PARTNER_FIELD_OPS,
+  LOCALE_REGISTRY,
+  PARTNER_AVAILABILITY,
+  PARTNER_WAIT_POLICY,
+  LOCAL_NOTIFICATIONS,
+  CONFIGURATION_ADMIN,
 } from './tokens.js';
 import { CustomerAddressesController } from './customer-addresses.controller.js';
 import { CustomerDiscoveryController } from './customer-discovery.controller.js';
@@ -91,6 +101,15 @@ import {
   AdminPartnerDisputeController,
   PartnerFieldOpsController,
 } from './partner-lifecycle.controller.js';
+import { AdminLocaleController, LocaleController } from './locale.controller.js';
+import {
+  AdminPartnerDispatchController,
+  PartnerAvailabilityController,
+} from './partner-availability.controller.js';
+import { PartnerWaitPolicyController } from './partner-wait-policy.controller.js';
+import { AdminAccessController } from './admin-access.controller.js';
+import { NotificationsController } from './notifications.controller.js';
+import { ConfigurationController } from './configuration.controller.js';
 import { CatalogueImportController } from './catalogue-import.controller.js';
 import { CatalogueProductsController } from './catalogue-products.controller.js';
 import {
@@ -133,6 +152,14 @@ import {
     PartnerFinanceController,
     VendorFinanceController,
     AdminControlPlaneController,
+    LocaleController,
+    AdminLocaleController,
+    PartnerAvailabilityController,
+    AdminPartnerDispatchController,
+    PartnerWaitPolicyController,
+    AdminAccessController,
+    NotificationsController,
+    ConfigurationController,
   ],
   providers: [
     LifecycleService,
@@ -267,6 +294,36 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new PartnerFieldOpsService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: LOCALE_REGISTRY,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new LocaleRegistryService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: PARTNER_AVAILABILITY,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new PartnerAvailabilityService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: PARTNER_WAIT_POLICY,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new PartnerWaitPolicyService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: LOCAL_NOTIFICATIONS,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new LocalNotificationService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: CONFIGURATION_ADMIN,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new ConfigurationAdminService({ connection_string: config.databaseUrl }),
     },
     {
       provide: ASSIGNMENT_CUSTODY,

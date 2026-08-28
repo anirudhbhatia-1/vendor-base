@@ -8,10 +8,12 @@ type Order = {
   lifecycle_state: string;
   total_minor: number;
 };
+type Notice = { in_app_notification_id: string; template_key: string };
 export function Orders() {
   const [token, setToken] = useState('');
   const [orders, setOrders] = useState<Order[]>([]);
   const [message, setMessage] = useState('Connect a customer session.');
+  const [notices, setNotices] = useState<Notice[]>([]);
   async function call(path: string, init?: RequestInit) {
     const r = await fetch(`${apiUrl}${path}`, {
       ...init,
@@ -47,6 +49,14 @@ export function Orders() {
       setMessage(e instanceof Error ? e.message : 'Action failed.');
     }
   }
+  async function notifications() {
+    try {
+      setNotices((await call('/notifications?unread_only=true')) as Notice[]);
+      setMessage('Unread notifications refreshed.');
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Notifications failed.');
+    }
+  }
   return (
     <View style={s.panel}>
       <Text style={s.kicker}>ORDER HISTORY</Text>
@@ -59,6 +69,9 @@ export function Orders() {
       />
       <Pressable style={s.button} onPress={() => void load()}>
         <Text style={s.buttonText}>Load orders</Text>
+      </Pressable>
+      <Pressable style={s.button} onPress={() => void notifications()}>
+        <Text style={s.buttonText}>Unread notifications</Text>
       </Pressable>
       <Text style={s.message}>{message}</Text>
       {orders.map((o) => (
@@ -76,6 +89,11 @@ export function Orders() {
             </Pressable>
           </View>
         </View>
+      ))}
+      {notices.map((notice) => (
+        <Text style={s.message} key={notice.in_app_notification_id}>
+          {notice.template_key.replaceAll('.', ' ')}
+        </Text>
       ))}
     </View>
   );

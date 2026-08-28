@@ -18,6 +18,7 @@ type WorkItem = {
   next_action: string;
 };
 type Moderation = { moderation_case_id: string; decision_state: string; product_reference: string };
+type Notice = { in_app_notification_id: string; template_key: string; read_at: string | null };
 
 export default function AdminHome() {
   const [token, setToken] = useState('');
@@ -25,6 +26,13 @@ export default function AdminHome() {
   const [work, setWork] = useState<WorkItem[]>([]);
   const [moderation, setModeration] = useState<Moderation[]>([]);
   const [output, setOutput] = useState('Connect an authorized admin session.');
+  const [accessUserId, setAccessUserId] = useState('');
+  const [accessRole, setAccessRole] = useState('SUPPORT_AGENT');
+  const [roleAssignmentId, setRoleAssignmentId] = useState('');
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const [configurationKey, setConfigurationKey] = useState('delivery.wait.enabled');
+  const [configurationValue, setConfigurationValue] = useState('true');
+  const [configurationVersionId, setConfigurationVersionId] = useState('');
 
   async function request(path: string, init?: RequestInit) {
     const response = await fetch(`${apiUrl}/${path}`, {
@@ -95,6 +103,69 @@ export default function AdminHome() {
       setOutput(JSON.stringify(await request('admin/control/audit'), null, 2));
     } catch (error) {
       setOutput(error instanceof Error ? error.message : 'Audit failed.');
+    }
+  }
+  async function grantMembership() {
+    try {
+      const result = (await request(`admin/access/users/${accessUserId}/memberships`, {
+        method: 'POST',
+        body: JSON.stringify({ role: accessRole, scope_kind: 'GLOBAL' }),
+      })) as { role_assignment_id: string };
+      setRoleAssignmentId(result.role_assignment_id);
+      setOutput(`Membership granted: ${result.role_assignment_id}`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Membership grant failed.');
+    }
+  }
+  async function revokeMembership() {
+    try {
+      await request(`admin/access/users/${accessUserId}/memberships/${roleAssignmentId}/revoke`, {
+        method: 'POST',
+        body: JSON.stringify({ reason_code: 'ADMIN_ACCESS_REVOKED' }),
+      });
+      setOutput(`Membership revoked: ${roleAssignmentId}`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Membership revoke failed.');
+    }
+  }
+  async function loadNotifications() {
+    try {
+      setNotices((await request('notifications?unread_only=true')) as Notice[]);
+      setOutput('Unread notification inbox refreshed.');
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Notification inbox failed.');
+    }
+  }
+  async function configurationAction(action: 'draft' | 'validate' | 'approve' | 'schedule') {
+    try {
+      const path =
+        action === 'draft'
+          ? 'admin/configuration/drafts'
+          : `admin/configuration/${configurationVersionId}/${action}`;
+      const result = (await request(path, {
+        method: 'POST',
+        body: JSON.stringify(
+          action === 'draft'
+            ? {
+                configuration_key: configurationKey,
+                configuration_kind: 'FEATURE_FLAG',
+                configuration_value: configurationValue === 'true',
+                scope_kind: 'GLOBAL',
+                scope_reference: 'global',
+                reason_code: 'COMPANY_TEST_CONFIGURATION',
+              }
+            : action === 'schedule'
+              ? {
+                  effective_from: new Date(Date.now() + 2_000).toISOString(),
+                  reason_code: 'COMPANY_TEST_CONFIGURATION',
+                }
+              : { reason_code: 'COMPANY_TEST_CONFIGURATION' },
+        ),
+      })) as { configuration_version_id: string; status: string };
+      setConfigurationVersionId(result.configuration_version_id);
+      setOutput(`Configuration ${result.configuration_version_id} is ${result.status}.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Configuration action failed.');
     }
   }
 
@@ -195,6 +266,89 @@ export default function AdminHome() {
       </section>
       <section className="catalogue-oversight">
         <div>
+          <p className="eyebrow">VERSIONED CONFIGURATION</p>
+          <h2>Maker/checker activation</h2>
+        </div>
+        <div className="catalogue-flag">
+          <label>
+            Configuration key
+            <input
+              value={configurationKey}
+              onChange={(event) => setConfigurationKey(event.target.value)}
+            />
+          </label>
+          <label>
+            Boolean value
+            <select
+              value={configurationValue}
+              onChange={(event) => setConfigurationValue(event.target.value)}
+            >
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </label>
+          <label>
+            Version UUID
+            <input
+              value={configurationVersionId}
+              onChange={(event) => setConfigurationVersionId(event.target.value)}
+            />
+          </label>
+          <div className="actions">
+            <button onClick={() => void configurationAction('draft')}>Create draft</button>
+            <button onClick={() => void configurationAction('validate')}>Validate</button>
+            <button onClick={() => void configurationAction('approve')}>Approve</button>
+            <button onClick={() => void configurationAction('schedule')}>Schedule</button>
+          </div>
+        </div>
+      </section>
+      <section className="catalogue-oversight">
+        <div>
+          <p className="eyebrow">CONTROLLED ACCESS</p>
+          <h2>Provision scoped admin memberships</h2>
+          <p>Requires CONFIG_APPROVER. Self-grants and conflicting maker/checker roles fail.</p>
+        </div>
+        <div className="catalogue-flag">
+          <label>
+            Target user UUID
+            <input value={accessUserId} onChange={(event) => setAccessUserId(event.target.value)} />
+          </label>
+          <label>
+            Admin role
+            <select value={accessRole} onChange={(event) => setAccessRole(event.target.value)}>
+              {[
+                'SUPPORT_AGENT',
+                'DELIVERY_OPERATOR',
+                'CATALOGUE_MODERATOR',
+                'FINANCE_OPERATOR',
+                'FINANCE_APPROVER',
+                'TRUST_OPERATOR',
+                'TRUST_APPROVER',
+                'VENDOR_ONBOARDING_OPERATOR',
+                'VENDOR_ONBOARDING_REVIEWER',
+                'VENDOR_PUBLICATION_OPERATOR',
+                'VENDOR_PUBLICATION_REVIEWER',
+                'CONFIG_OPERATOR',
+                'CONFIG_APPROVER',
+                'INCIDENT_COMMANDER',
+              ].map((role) => (
+                <option key={role}>{role}</option>
+              ))}
+            </select>
+          </label>
+          <button onClick={() => void grantMembership()}>Grant global membership</button>
+          <label>
+            Assignment UUID
+            <input
+              value={roleAssignmentId}
+              onChange={(event) => setRoleAssignmentId(event.target.value)}
+            />
+          </label>
+          <button onClick={() => void revokeMembership()}>Revoke membership</button>
+        </div>
+      </section>
+      <section className="catalogue-oversight">
+        <div>
           <p className="eyebrow">REPORTING & AUDIT</p>
           <h2>Protected operational evidence</h2>
         </div>
@@ -213,7 +367,11 @@ export default function AdminHome() {
             </button>
           ))}
           <button onClick={() => void audit()}>Audit trail</button>
+          <button onClick={() => void loadNotifications()}>Unread notifications</button>
         </div>
+        {notices.map((notice) => (
+          <p key={notice.in_app_notification_id}>{notice.template_key.replaceAll('.', ' ')}</p>
+        ))}
         <pre>{output}</pre>
       </section>
       <p className="boundary">

@@ -1,0 +1,3 @@
+DROP TRIGGER IF EXISTS payment_authorization_adjustments_append_only ON marketplace.payment_authorization_adjustments;
+DROP FUNCTION IF EXISTS marketplace.protect_payment_authorization_adjustments();
+DROP TABLE IF EXISTS marketplace.payment_authorization_adjustments;

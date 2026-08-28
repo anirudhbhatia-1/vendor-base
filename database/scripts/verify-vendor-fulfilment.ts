@@ -641,6 +641,13 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       subProposal.decision.authorization_delta_minor === 3_000,
       'Substitution authorization delta was not recorded (18000 - 15000)',
     );
+    const paymentBeforeDecision = await pool.query<{ amount_minor: string }>(
+      `SELECT payment.amount_minor::text FROM marketplace.payment_transactions payment
+        JOIN marketplace.checkout_groups grouping USING(payment_transaction_id)
+        JOIN marketplace.vendor_orders orders USING(checkout_group_id)
+       WHERE orders.vendor_order_id=$1`,
+      [orderC.vendor_order_id],
+    );
     const subAnswer = await fulfilment.answerDecision({
       context: customerContext(customerId),
       decision_id: subProposal.decision.decision_id,
@@ -648,6 +655,28 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       now: new Date(decisionBase.getTime() + 5_000),
     });
     check(subAnswer.answer === 'APPROVED', 'Substitution decision was not APPROVED');
+    const paymentAfterDecision = await pool.query<{
+      amount_minor: string;
+      adjustments: string;
+    }>(
+      `SELECT payment.amount_minor::text,
+        (SELECT count(*)::text FROM marketplace.payment_authorization_adjustments adjustment
+          WHERE adjustment.decision_id=$2) adjustments
+       FROM marketplace.payment_transactions payment
+       JOIN marketplace.checkout_groups grouping USING(payment_transaction_id)
+       JOIN marketplace.vendor_orders orders USING(checkout_group_id)
+       WHERE orders.vendor_order_id=$1`,
+      [orderC.vendor_order_id, subProposal.decision.decision_id],
+    );
+    check(
+      Number(paymentAfterDecision.rows[0]?.amount_minor) ===
+        Number(paymentBeforeDecision.rows[0]?.amount_minor) + 3_000,
+      'Approved substitution did not adjust the synthetic payment authorization',
+    );
+    check(
+      paymentAfterDecision.rows[0]?.adjustments === '1',
+      'Approved substitution adjustment was not posted exactly once',
+    );
     // Second answer on an already-answered decision is refused.
     await rejects(
       () =>

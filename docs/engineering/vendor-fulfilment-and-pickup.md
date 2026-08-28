@@ -56,16 +56,17 @@ the vendor_order or line-snapshot invariants Phase 7 established:
 
 ## Deliberate scope decisions
 
-- **No outbox integration for `vendor_order.picked_up` yet.** The outbox `outbox_transition_fk`
-  requires `vendor_order` to be a registered versioned aggregate (`aggregate_heads` +
-  `aggregate_transitions`). Registering it couples this slice to Phase 10 ledger triggers, which
-  Phase 8's exit gate does not require. Inventory settle-on-pickup is exposed as a direct
-  service call; when Phase 10 registers the aggregate, an outbox event can call the same method.
+- **Fulfilment notification signals use the append-only order history.** The local notification
+  worker consumes `vendor_order_events` under a source-event deduplication key and records durable
+  intents/attempts. Inventory settlement remains transaction-owned by pickup, avoiding an
+  eventually-consistent stock commit. The generic outbox remains for aggregates registered in
+  `aggregate_transitions`; the domain-specific order history is itself the durable source here.
 - **Customer decision timeout auto-answers as REJECTED**, not APPROVED — never charge for a
   substitution the customer never saw.
-- **`authorization_delta_minor` is recorded, not posted.** Money capture and refund on approved
-  changes stays in `MoneyLifecycleService`; this slice records the intent and leaves ledger
-  posting to that service.
+- **Approved `authorization_delta_minor` is posted before capture.** The customer decision and
+  synthetic payment adjustment commit in one transaction. The payment and its order allocation
+  move by the same delta, an append-only provider-style adjustment is recorded once per decision,
+  and approval fails closed if payment is no longer authorized and uncaptured.
 - **Support cases live at `vendor_order` grain**, not at line grain. Phases.md 8.7 says "the
   smallest affected object"; today the smallest addressable object a customer support workflow
   can act on is the vendor_order. Line-level support scoping is a later refinement.
@@ -95,7 +96,6 @@ system-timeout path in isolation. Wired into `verify-lifecycle.ts` as
 
 ## Boundaries
 
-Delivery partner assignment stays in Phase 9. Real money capture, refund adjustment for approved
-proposals, and settlement remain in Phase 10; `authorization_delta_minor` is recorded but not yet
-posted to the ledger. Reorder and eligible-vendor rating aggregation are also Phase 10-adjacent
-and not built here.
+Delivery partner assignment stays in Phase 9. Real provider capture/refund and settlement remain
+production gates. Reorder and eligible-vendor rating aggregation are implemented in the later
+customer discovery and complete-money slices.

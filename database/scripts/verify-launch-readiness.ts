@@ -304,9 +304,7 @@ export async function verifyLaunchReadiness(connectionString: string): Promise<v
       'Outbox resilience drill did not settle to PUBLISHED',
     );
 
-    // Silence the unused import warning by referencing claimOutboxBatch
-    // in the drill body. It is exercised by dispatchOutboxBatch above but
-    // we call it once directly to prove the claim path is public.
+    // Confirm the settled event is not re-claimable.
     const empty = await claimOutboxBatch(pool, {
       worker_id: createUuidV7(),
       batch_size: 1,
@@ -315,6 +313,70 @@ export async function verifyLaunchReadiness(connectionString: string): Promise<v
     check(
       empty.every((event) => event.event_type !== 'launch_readiness_probe.published'),
       'Settled probe event was reclaimed',
+    );
+
+    // 12.5 -- dead-letter drill. A second probe with max_attempts=2 that fails
+    // on every publish must land in DEAD_LETTER once attempts are exhausted,
+    // not retry forever. This proves the poison-message boundary.
+    const dlAggregateId = createUuidV7();
+    const dlSetup = await pool.connect();
+    try {
+      await dlSetup.query('BEGIN');
+      await dlSetup.query(
+        `INSERT INTO marketplace.aggregate_heads (aggregate_type, aggregate_id, version, state)
+         VALUES ('launch_readiness_probe', $1, 1, 'PROBE')`,
+        [dlAggregateId],
+      );
+      await dlSetup.query(
+        `INSERT INTO marketplace.aggregate_transitions
+           (transition_id, aggregate_type, aggregate_id, previous_version, resulting_version,
+            from_state, to_state, actor_id, actor_kind, reason_code, evidence, request_id, correlation_id)
+         VALUES ($1,'launch_readiness_probe',$2,0,1,NULL,'PROBE',$3,'admin','LAUNCH_READINESS_PROBE',
+                 '{"source":"verify_launch_readiness_dead_letter"}'::jsonb,$4,$5)`,
+        [createUuidV7(), dlAggregateId, adminUserId, requestId, correlationId],
+      );
+      await enqueueOutboxEvent(dlSetup, {
+        aggregate_type: 'launch_readiness_probe',
+        aggregate_id: dlAggregateId,
+        aggregate_version: 1,
+        event_type: 'launch_readiness_probe.poison',
+        payload: { probe: 'phase12', trigger: 'dead_letter_drill' },
+        request_id: requestId,
+        correlation_id: correlationId,
+        max_attempts: 2,
+      });
+      await dlSetup.query('COMMIT');
+    } catch (error) {
+      await dlSetup.query('ROLLBACK');
+      throw error;
+    } finally {
+      dlSetup.release();
+    }
+    const alwaysFail = {
+      publish: async (event: { readonly event_type: string }) => {
+        if (event.event_type === 'launch_readiness_probe.poison') throw new Error('POISON');
+      },
+      classify_error: () => 'POISON',
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await dispatchOutboxBatch(pool, {
+        worker_id: createUuidV7(),
+        batch_size: 100,
+        claim_lease_ms: 5000,
+        ...alwaysFail,
+      });
+      await pool.query(
+        `UPDATE marketplace.outbox_events SET available_at = clock_timestamp() WHERE aggregate_id=$1`,
+        [dlAggregateId],
+      );
+    }
+    const deadLettered = await pool.query<{ status: string; attempt_count: number }>(
+      `SELECT status, attempt_count FROM marketplace.outbox_events WHERE aggregate_id=$1`,
+      [dlAggregateId],
+    );
+    check(
+      deadLettered.rows[0]?.status === 'DEAD_LETTER' && deadLettered.rows[0]?.attempt_count === 2,
+      `Poison event did not dead-letter after exhausting attempts: ${JSON.stringify(deadLettered.rows[0])}`,
     );
   } finally {
     await locales.close();

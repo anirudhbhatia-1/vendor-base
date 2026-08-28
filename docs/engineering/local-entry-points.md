@@ -12,12 +12,15 @@ Use Node.js `24.19.0` and pnpm `11.19.0`, then run `pnpm install`. The repositor
 
 | Role | PWA command and loopback URL | Android command and Metro port | Current visible result |
 |---|---|---|---|
-| Customer | `pnpm --filter @neighbourhood-store/customer-pwa dev` · `http://127.0.0.1:3100` | `pnpm --filter @neighbourhood-store/customer-app android` · `8081` | Internal discovery-lane shell; catalogue and ordering are disabled |
-| Vendor | `pnpm --filter @neighbourhood-store/vendor-pwa dev` · `http://127.0.0.1:3101` | `pnpm --filter @neighbourhood-store/vendor-app android` · `8082` | Internal store-operations shell; onboarding and order actions are disabled |
-| Delivery partner | `pnpm --filter @neighbourhood-store/partner-pwa dev` · `http://127.0.0.1:3102` | `pnpm --filter @neighbourhood-store/partner-app android` · `8083` | Interactive synthetic assignment/custody fixture; controls do not send API commands |
-| Admin/support | `pnpm --filter @neighbourhood-store/admin-pwa dev` · `http://127.0.0.1:3103` | `pnpm --filter @neighbourhood-store/admin-app android` · `8084` | Internal control-room shell; queues and protected actions are disabled |
+| Customer | `pnpm --filter @neighbourhood-store/customer-pwa dev` · `http://127.0.0.1:3100` | `pnpm --filter @neighbourhood-store/customer-app android` · `8081` | API-backed sign-in, address, discovery, catalogue, grouped cart/checkout, orders, ratings and support |
+| Vendor | `pnpm --filter @neighbourhood-store/vendor-pwa dev` · `http://127.0.0.1:3101` | `pnpm --filter @neighbourhood-store/vendor-app android` · `8082` | API-backed catalogue, imports, inventory and order fulfilment |
+| Delivery partner | `pnpm --filter @neighbourhood-store/partner-pwa dev` · `http://127.0.0.1:3102` | `pnpm --filter @neighbourhood-store/partner-app android` · `8083` | API-backed assignment, custody, exception, offline proof and earnings workflow |
+| Admin/support | `pnpm --filter @neighbourhood-store/admin-pwa dev` · `http://127.0.0.1:3103` | `pnpm --filter @neighbourhood-store/admin-app android` · `8084` | API-backed publication, moderation, controlled access, risk queue, reporting, audit and local notification control plane |
 
-Every client makes synthetic/internal status unmistakable. There are no forms, fake success buttons or calls to the API. The PWA shells are server-rendered static pages. Android commands use Expo's local tooling; an emulator or explicitly approved local device is needed to inspect them interactively.
+Every client makes synthetic/internal status unmistakable. The role workflows call the local API
+and show persisted server state; synthetic provider controls are labelled explicitly. Android
+commands use Expo's local tooling; an emulator or explicitly approved local device is needed to
+inspect them interactively.
 
 `pnpm build` creates optimized static PWA output, Android Hermes bundles under each app's ignored `dist/`, and compiled API/worker output under ignored `dist/` directories.
 
@@ -34,9 +37,12 @@ The default address is `http://127.0.0.1:3001`.
 | Route | Meaning | Step 2.3 response |
 |---|---|---|
 | `GET /health/live` | The HTTP process is alive | `status: ok`, runtime mode and version |
-| `GET /health/ready` | The Step 2.3 process completed bootstrap | `status: ready`, with database and queue marked `not_configured` and `production_ready: false` |
+| `GET /health/ready` | The process completed bootstrap and dependency checks | Current local database/queue readiness, always with `production_ready: false` |
 
-Readiness does not mean production readiness. It only means the deliberately dependency-free skeleton can serve local requests. `APP_ENV` accepts `local`, `test` or `queue-compat`; `API_PORT` must be an integer from 1 through 65535. Invalid values fail startup with a structured error and a non-zero exit.
+Readiness does not mean production readiness. It means the local process can serve and its
+configured company-test dependencies are reachable. `APP_ENV` accepts `local`, `test` or
+`queue-compat`; `API_PORT` must be an integer from 1 through 65535. Invalid values fail startup
+with a structured error and a non-zero exit.
 
 ## Worker
 
@@ -46,7 +52,11 @@ Start the worker process with:
 pnpm --filter @neighbourhood-store/worker dev
 ```
 
-The worker starts a NestJS application context, logs a structured `worker.ready` event, installs SIGINT/SIGTERM shutdown hooks, and logs `worker.stopped` after cleanup. BullMQ is pinned but no queue is registered; queue configuration remains later work. The readiness event therefore declares `queue: not_configured` and `production_ready: false`.
+The worker starts a NestJS application context, logs a structured `worker.ready` event, installs
+SIGINT/SIGTERM shutdown hooks, and logs `worker.stopped` after cleanup. PostgreSQL-backed durable
+jobs own inventory/quote/offer/document/decision expiry, partner wait thresholds, configuration
+activation, local notification delivery and outbox dispatch. Valkey/BullMQ remains an optional
+scale adapter; it is not required for correctness in the approved local environment.
 
 ## Database and PostGIS
 
@@ -54,7 +64,9 @@ Podman Desktop is the preferred free runtime. `pnpm db:up` starts the persistent
 
 `pnpm db:verify` uses a separate tmpfs-backed database on `127.0.0.1:5433`. It verifies PostgreSQL 18, PostGIS 3.6, forward migration, safe baseline rollback, forward migration again, repeated deterministic seed, fixture reset, and rebuild from zero. See `database/README.md` before using the guarded local rebuild command.
 
-The API remains deliberately disconnected from PostgreSQL at Step 2.4, so its readiness response continues to report `database: not_configured` and `production_ready: false`.
+The API and worker use PostgreSQL for the implemented marketplace workflows. They still report
+`production_ready: false` because this repository is authorized only for company-local synthetic
+development.
 
 ## Structured logs and sensitive values
 
@@ -70,4 +82,5 @@ API and worker logs are one JSON object per line. Startup events include service
 - `pnpm db:verify` runs the destructive database lifecycle only against the exact disposable test database.
 - `pnpm check` combines formatting, lint, types, repository controls, available tests and secret scanning.
 
-Queue connectivity, API database wiring, provider adapters, authentication, authorization, real OTP delivery and every product workflow belong to later numbered steps.
+Real external providers, production infrastructure, production credentials and public launch
+authority remain outside this local entry-point contract.

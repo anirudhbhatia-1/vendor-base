@@ -28,7 +28,7 @@ const clients = [
   },
   {
     appDirectory: 'apps/admin-app/dist',
-    expected: 'Admin PWA · Internal build',
+    expected: 'Admin PWA · company test',
     filter: '@neighbourhood-store/admin-pwa',
     role: 'admin',
     url: 'http://127.0.0.1:3103',

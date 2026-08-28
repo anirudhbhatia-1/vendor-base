@@ -10,11 +10,11 @@ company-local synthetic environment can genuinely prove versus what must wait fo
 | Step | Description | Company-local delivery | Deferred until |
 |---|---|---|---|
 | 12.1 | Security and privacy review | **Partial** — cross-role capability-catalog probe in `verify-launch-readiness.ts`, controller authorization specs (every controller has one), OTP/session/webhook replay tests in existing verifiers | Full threat-model workshop; real penetration test |
-| 12.2 | Accessibility review | **Deferred** — persistent client gap; the browser PWAs and Expo apps used by end users are minimal stubs across every phase | Full UI implementation |
+| 12.2 | Accessibility review | **Partial** — all four PWAs and Android clients now have API-backed role journeys and automated JSX accessibility lint | Manual assistive-technology and device review |
 | 12.3 | English/Hindi localization | **Complete** — migration 0033 registers server-code labels + English + Hindi translations; `verify-launch-readiness.ts` fails CI on any missing translation, on a customer bundle leaking admin labels, or on a non-admin locale write | — |
 | 12.4 | Low-end device / poor network | **Deferred** — needs real device farm and network shaping infrastructure | Physical device lab or cloud device farm |
 | 12.5 | Resilience drills | **Partial** — `verify-launch-readiness.ts` runs an outbox transient-failure retry drill and verifies the event reaches PUBLISHED; `verify-messaging-lifecycle.ts` covers backoff timing and dead-letter | Real chaos-injection tooling; full backup-restore drills against a live replica |
-| 12.6 | Performance and concurrency | **Deferred** — needs load-generator infrastructure and a target environment large enough to measure p95/p99 | Phase 13 pilot cohort or a dedicated load-test environment |
+| 12.6 | Performance and concurrency | **Partial** — `pnpm load:smoke` records local p50/p95/p99 for readiness and locale reads; connected verifiers cover inventory and assignment races | Production-sized authenticated load environment |
 | 12.7 | Operational readiness | **This document** — the launch gate matrix below cross-references every Phase 12 requirement with existing evidence, deferrals, and owners |
 
 ## What ships in this slice
@@ -55,10 +55,10 @@ evidence needs infrastructure or people that a company-local synthetic environme
 
 ### Accessibility (Phase 12.2)
 
-All items **deferred**. The customer, vendor, partner, and admin PWAs and Expo apps are minimal
-stubs across every phase; Phase 12 cannot audit accessibility of interfaces that do not exist as
-end-user products. A separate UI-completion phase must precede a real accessibility review with
-NVDA, JAWS, and VoiceOver. Owner: **Design Lead + Engineering Lead**.
+Automated JSX accessibility lint now covers every PWA, and the role clients expose API-backed
+customer shopping, vendor fulfilment, partner custody, and admin control-plane journeys. Manual
+keyboard, screen-reader, 200% zoom, 360 px reflow, touch-target, reduced-motion, and map-alternative
+passes remain required on supported devices. Owner: **Design Lead + Engineering Lead**.
 
 ### Localization (Phase 12.3)
 
@@ -90,11 +90,11 @@ under "device coverage". Owner: **Engineering Lead**.
 
 | Requirement | Evidence | Owner |
 |---|---|---|
-| Discovery load | **Deferred** — needs load generator | Engineering Lead |
-| Three-store checkout load | **Deferred** | Engineering Lead |
+| Discovery/read-surface load | Local smoke — `pnpm load:smoke` measures readiness and locale reads with bounded concurrency; production-sized authenticated discovery remains deferred | Engineering Lead |
+| Three-store checkout load | **Deferred** — requires a production-sized authenticated load environment and a real payment provider boundary | Engineering Lead |
 | Inventory reservation race | Partial — `verify-inventory-reservations.ts` covers `FOR UPDATE` correctness on the durable path but not p99 latency under load | Engineering Lead |
 | Partner assignment race | Partial — `verify-assignment-custody.ts` covers one-active-attempt uniqueness | Engineering Lead |
-| p50/p95/p99 measurement | **Deferred** — needs production-scale test environment | Engineering Lead |
+| p50/p95/p99 measurement | Local smoke — `pnpm load:smoke`; production-scale p99 remains deferred | Engineering Lead |
 
 ### Operational readiness (Phase 12.7)
 
@@ -114,3 +114,42 @@ either be executed in a Phase 13 pilot with real infrastructure or explicitly wa
 named owner before a production release. Server codes never change; adding a new user-visible
 string requires adding a locale key + both language translations, and CI blocks the merge if
 either is missing.
+
+## Per-component rollback register (Phase 12.7)
+
+Every deployable component has a rehearsed rollback path plus a named owner. Migrations own
+themselves via paired `.down.sql`; services expose `close()`. `verify-lifecycle.ts` rehearses
+the full forward-and-back migration ladder end-to-end on every `pnpm db:verify` — the down
+migrations are not aspirational.
+
+| Component | Rehearsed rollback command | Owner |
+|---|---|---|
+| API (`apps/api`) | `pnpm --filter @neighbourhood-store/api build && APP_ENV=… node dist/main.js` (previous release SHA); Nest `enableShutdownHooks` drains connections cleanly on SIGTERM | Engineering Lead |
+| Worker (`apps/worker`) | `pnpm --filter @neighbourhood-store/worker build && APP_ENV=… node dist/main.js` (previous release SHA); each `Injectable` implements `onApplicationShutdown` to close pools and release claims | Engineering Lead |
+| Customer / Vendor / Partner / Admin PWA | Redeploy previous immutable Next.js build; static assets are content-hashed | Engineering Lead |
+| Customer / Vendor / Partner / Admin native app | Store rollback: promote the previous signed bundle from the release track | Engineering Lead |
+| Any single migration | `pnpm --filter @neighbourhood-store/database migration:down` (rehearsed by `verify-lifecycle.ts` for every migration in the ladder, one step at a time) | Engineering Lead |
+| Database (whole schema) | `DB_REBUILD_CONFIRM=… pnpm db:rebuild` (only for the local synthetic env; production would be a restore drill against a live replica — deferred, see 12.5) | Engineering Lead |
+| Locale registry contents | `AdminLocaleController` upsert / translation; no service restart required | Operations Lead |
+| Trust restrictions | `AdminControlPlaneService.transitionTrust('REVOKE')` — proposer/approver separation preserved through the revoke path | Operations Lead |
+| Incident controls (kill switches) | `AdminControlPlaneService.revokeIncident` — the switch is scoped and existing custody is preserved | Incident Commander (`INCIDENT_COMMANDER` role) |
+| Configuration versions | `MoneyLifecycleService` / versioned-configuration path — versions are append-only; rollback is a new APPROVED version referencing the prior one | Config Approver |
+| Refunds and payouts | Ledger is append-only; corrections post reversing entries. No destructive rollback — see `verify-money-lifecycle.ts` | Finance Approver |
+
+## Stakeholder gate signatures (Phase 12.7)
+
+Human sign-offs cannot be produced by code. This register makes them explicit and trackable —
+each row is `PENDING` until the named owner signs, and the row records who signed against what
+evidence. Add a `Signed on` column entry (ISO date) beside `Owner` when a gate clears.
+
+| Gate | Evidence to review | Owner | Status |
+|---|---|---|---|
+| Security / privacy | Threat model, controller `*.spec.ts` authorization matrix, `verify-launch-readiness.ts` §12.1 cross-role probe, `security:secrets` scan | Security Lead + Privacy Lead | `PENDING` |
+| Accessibility | `jsx-a11y` gate output, manual NVDA/JAWS/VoiceOver walkthrough for the eight critical role tasks | Design Lead + Engineering Lead | `PENDING` |
+| Operations | Dashboards + alert owners map, on-call rotation, runbook rehearsal log, this per-component rollback register | Operations Lead | `PENDING` |
+| Finance | `verify-money-lifecycle.ts` ledger conservation, refund maker-checker with self-approval rejection, reconciliation drill against a real provider statement | Finance Lead + Finance Approver | `PENDING` |
+| Support | `admin.support.case_manage` scoped surface, `verify-admin-control-plane.ts` scenarios, synthetic-hours documented in `docs/governance/support-service-levels.md` | Operations Lead | `PENDING` |
+
+None of these gates may be silently promoted to signed without visible evidence in this file.
+When a signature lands, it should be entered in a commit whose message names the gate, the
+owner, and the evidence hash (e.g. `git rev-parse HEAD` at the review time).

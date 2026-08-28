@@ -71,6 +71,15 @@ Snapshots and referenced versions cannot be updated or deleted. Quotes, orders, 
 
 It also verifies migration `0005_versioned_configuration` independently rolls back and that all six migrations can roll down, reapply, and rebuild from zero. No persistent developer database is changed.
 
-## Current integration boundary
+## Marketplace integration
 
-No admin configuration API, authorization capability, product business record, or always-running activation worker exists yet. Later phases must put these functions behind scoped server authorization and use the Phase 3.6 scheduler for due activation. Production configuration remains blocked pending approved environment, secret, audit, rollout, monitoring, and rollback operations.
+`ConfigurationController` exposes draft, validation, approval, scheduling, rollback-draft and list
+operations under the existing CONFIG_OPERATOR/CONFIG_APPROVER maker-checker capabilities. The
+admin PWA and Android app use this contract. The operations worker calls
+`activateDueConfigurationVersions` on server time, so activation does not depend on an open
+browser. Business workflows may snapshot resolved versions with
+`snapshotConfigurationVersions`; the reference vertical slice verifies this immutable linkage.
+
+Production configuration remains blocked pending an approved environment, secrets, monitoring,
+release ownership and rollback rehearsal. Percentage rollout and client-side evaluation remain
+deliberately unsupported; server-side scoped evaluation is authoritative.

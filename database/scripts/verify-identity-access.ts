@@ -150,15 +150,25 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
          (SELECT count(*)::text FROM marketplace.roles) AS roles,
          (SELECT count(*)::text FROM marketplace.role_separation_rules) AS separation_rules`,
     );
-    // 46 capabilities: the 36 pre-Phase-9-remainder grants plus
-    // partner.application.manage, partner.earnings.read,
-    // partner.earnings.dispute, admin.partner_application.review, and
-    // admin.partner_earnings.resolve (0027), and five Phase 11 control-plane
-    // capabilities (0030).
+    const requiredCapabilities = await pool.query<{ capability_key: string }>(
+      `SELECT capability_key FROM marketplace.capabilities
+       WHERE capability_key = ANY($1::text[])`,
+      [
+        [
+          'partner.availability.manage',
+          'admin.delivery.partner_dispatch',
+          'admin.access.role_manage',
+        ],
+      ],
+    );
+    const catalogRow = catalog.rows[0];
+    // The lower bound protects the reviewed baseline while permitting later
+    // phases to add capabilities without making this verifier stale.
     if (
-      catalog.rows[0]?.capabilities !== '47' ||
-      catalog.rows[0].roles !== '19' ||
-      catalog.rows[0].separation_rules !== '5'
+      Number(catalogRow?.capabilities ?? 0) < 50 ||
+      catalogRow?.roles !== '19' ||
+      catalogRow?.separation_rules !== '5' ||
+      requiredCapabilities.rowCount !== 3
     ) {
       throw new Error('Reviewed role and capability catalog is incomplete');
     }

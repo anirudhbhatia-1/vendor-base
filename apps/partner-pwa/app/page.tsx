@@ -10,6 +10,21 @@ type Job = {
   approximate_drop_area: string;
 };
 type Earning = { partner_earnings_record_id: string; total_minor: number; lifecycle_state: string };
+type Availability = {
+  availability_state: string;
+  trips_today: string;
+  earnings_today_minor: string;
+  accumulated_online_seconds: string;
+  warning_codes: string[];
+};
+type WaitTimer = {
+  wait_state: 'RUNNING' | 'THRESHOLD_ONE' | 'THRESHOLD_TWO' | 'LEFT_POLICY' | 'RESOLVED';
+  elapsed_seconds: number;
+  first_threshold_seconds: number;
+  leave_threshold_seconds: number;
+  wait_adjustment_minor: number | null;
+};
+type Notice = { in_app_notification_id: string; template_key: string; read_at: string | null };
 const actions: Record<string, [string, string]> = {
   OFFERED: ['Accept this job', 'offers/{id}/accept'],
   ASSIGNED: ['Confirm vendor arrival', 'assignments/{id}/arrive-vendor'],
@@ -26,6 +41,9 @@ export default function PartnerHome() {
   const [online, setOnline] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('Connect a partner session and assigned job.');
+  const [availability, setAvailability] = useState<Availability | null>(null);
+  const [waitTimer, setWaitTimer] = useState<WaitTimer | null>(null);
+  const [notices, setNotices] = useState<Notice[]>([]);
   async function request(path: string, init?: RequestInit) {
     const response = await fetch(`${apiUrl}/${path}`, {
       ...init,
@@ -130,6 +148,62 @@ export default function PartnerHome() {
       setMessage(error instanceof Error ? error.message : 'Earnings failed.');
     }
   }
+  async function setDispatch(state: 'ONLINE' | 'OFFLINE') {
+    try {
+      await request('partner/availability', {
+        method: 'POST',
+        body: JSON.stringify({
+          state,
+          reason_code: state === 'ONLINE' ? 'PARTNER_AVAILABLE' : 'PARTNER_OFFLINE',
+          ...(state === 'ONLINE'
+            ? { latitude: 26.8505, longitude: 75.7628, accuracy_meters: 25, battery_percent: 80 }
+            : {}),
+        }),
+      });
+      const next = (await request('partner/availability')) as Availability;
+      setAvailability(next);
+      setMessage(`Dispatch state is ${next.availability_state}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Availability failed.');
+    }
+  }
+  async function wait(action: 'start' | 'refresh' | 'leave') {
+    if (!job) return;
+    try {
+      const commandReference = `SYNTH-CMD-WAIT-${Date.now().toString(36).toUpperCase()}`;
+      const next = (await request(
+        `partner/assignments/${job.delivery_assignment_id}/wait/${action}`,
+        {
+          method: 'POST',
+          ...(action === 'refresh'
+            ? {}
+            : {
+                body: JSON.stringify({
+                  command_reference: commandReference,
+                  reason_code: action === 'start' ? 'CUSTOMER_WAIT_STARTED' : 'WAIT_POLICY_LEAVE',
+                }),
+              }),
+        },
+      )) as WaitTimer;
+      setWaitTimer(next);
+      if (action === 'leave') await load();
+      setMessage(
+        next.wait_state === 'THRESHOLD_TWO'
+          ? 'The server has reached the leave threshold. Policy leave is now available.'
+          : `Wait state: ${next.wait_state}.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Wait action failed.');
+    }
+  }
+  async function loadNotifications() {
+    try {
+      setNotices((await request('notifications?unread_only=true')) as Notice[]);
+      setMessage('Unread notification inbox refreshed.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Notification inbox failed.');
+    }
+  }
   useEffect(() => {
     setOnline(navigator.onLine);
     const up = () => setOnline(true),
@@ -185,6 +259,18 @@ export default function PartnerHome() {
       <p className="partner-message" aria-live="polite">
         {message}
       </p>
+      <section className="money-strip">
+        <div>
+          <strong>Dispatch availability</strong>
+          <small>
+            {availability
+              ? `${availability.trips_today} trips today · ₹${(Number(availability.earnings_today_minor) / 100).toFixed(2)} · ${availability.warning_codes.join(', ') || 'device healthy'}`
+              : 'Server status not loaded'}
+          </small>
+        </div>
+        <button onClick={() => void setDispatch('ONLINE')}>Go online</button>
+        <button onClick={() => void setDispatch('OFFLINE')}>Go offline</button>
+      </section>
       {job && (
         <section className="workbench">
           <div className="route-strip">
@@ -209,6 +295,23 @@ export default function PartnerHome() {
           </div>
         </section>
       )}
+      {job?.assignment_state === 'ARRIVED' && (
+        <section className="money-strip">
+          <div>
+            <strong>Customer wait policy</strong>
+            <small>
+              {waitTimer
+                ? `${waitTimer.wait_state} · ${waitTimer.elapsed_seconds}s · credit ${waitTimer.wait_adjustment_minor ?? 'pending'} paise`
+                : 'Start only after reaching the customer area. Server time controls both thresholds.'}
+            </small>
+          </div>
+          {!waitTimer && <button onClick={() => void wait('start')}>Start wait</button>}
+          {waitTimer && <button onClick={() => void wait('refresh')}>Refresh timer</button>}
+          {waitTimer?.wait_state === 'THRESHOLD_TWO' && (
+            <button onClick={() => void wait('leave')}>Leave under policy</button>
+          )}
+        </section>
+      )}
       <aside className="failure-note">
         <strong>Delivery cannot continue?</strong>
         <span>Record the exception first. Return only after authorization.</span>
@@ -223,6 +326,7 @@ export default function PartnerHome() {
       </aside>
       <section className="money-strip">
         <button onClick={loadEarnings}>Refresh earnings</button>
+        <button onClick={() => void loadNotifications()}>Unread notifications</button>
         {earnings.length === 0 ? (
           <small>No posted earning yet.</small>
         ) : (
@@ -234,6 +338,11 @@ export default function PartnerHome() {
           ))
         )}
       </section>
+      {notices.map((notice) => (
+        <p className="partner-message" key={notice.in_app_notification_id}>
+          {notice.template_key.replaceAll('.', ' ')}
+        </p>
+      ))}
       <p className="boundary">Local company test · Commands persist through the API</p>
     </main>
   );

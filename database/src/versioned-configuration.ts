@@ -5,7 +5,7 @@ import {
   type RequestId,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
-import type { Pool, PoolClient } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { canonicalRequestJson, type JsonObject, type JsonValue } from './idempotency.js';
 
 export type ConfigurationKind = 'FEATURE_FLAG' | 'SETTING';
@@ -848,5 +848,49 @@ export async function snapshotConfigurationVersions(
     stored.rows.some((row) => expected.get(row.configuration_key) !== row.configuration_version_id)
   ) {
     throw new ConfigurationTransitionConflictError();
+  }
+}
+
+export class ConfigurationAdminService {
+  readonly #pool: Pool;
+  constructor(input: { connection_string: string }) {
+    this.#pool = new Pool({
+      application_name: 'configuration-admin',
+      connectionString: input.connection_string,
+      max: 6,
+    });
+  }
+  async close() {
+    await this.#pool.end();
+  }
+  async list(input: { limit?: number; status?: ConfigurationStatus }) {
+    const limit = requireInteger(input.limit ?? 100, 'Configuration list limit', 1, 200);
+    const result = await this.#pool.query<ConfigurationRow>(
+      `SELECT configuration_version_id,configuration_key,version_number,configuration_kind,
+              value_type,configuration_value,scope_kind,scope_reference,status,
+              rollback_of_version_id,effective_from,effective_until
+         FROM marketplace.configuration_versions
+        WHERE ($1::text IS NULL OR status=$1) ORDER BY updated_at DESC LIMIT $2`,
+      [input.status ?? null, limit],
+    );
+    return Object.freeze(result.rows.map(fromRow));
+  }
+  create(input: Parameters<typeof createConfigurationDraft>[1]) {
+    return createConfigurationDraft(this.#pool, input);
+  }
+  validate(input: Parameters<typeof validateConfigurationVersion>[1]) {
+    return validateConfigurationVersion(this.#pool, input);
+  }
+  approve(input: Parameters<typeof approveConfigurationVersion>[1]) {
+    return approveConfigurationVersion(this.#pool, input);
+  }
+  schedule(input: Parameters<typeof scheduleConfigurationVersion>[1]) {
+    return scheduleConfigurationVersion(this.#pool, input);
+  }
+  rollback(input: Parameters<typeof createConfigurationRollbackDraft>[1]) {
+    return createConfigurationRollbackDraft(this.#pool, input);
+  }
+  activateDue(input: Parameters<typeof activateDueConfigurationVersions>[1]) {
+    return activateDueConfigurationVersions(this.#pool, input);
   }
 }

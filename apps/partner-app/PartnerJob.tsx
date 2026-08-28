@@ -11,6 +11,18 @@ type Job = {
   approximate_drop_area: string;
 };
 type Earning = { partner_earnings_record_id: string; total_minor: number; lifecycle_state: string };
+type Availability = {
+  availability_state: string;
+  trips_today: string;
+  earnings_today_minor: string;
+  warning_codes: string[];
+};
+type WaitTimer = {
+  wait_state: 'RUNNING' | 'THRESHOLD_ONE' | 'THRESHOLD_TWO' | 'LEFT_POLICY' | 'RESOLVED';
+  elapsed_seconds: number;
+  wait_adjustment_minor: number | null;
+};
+type Notice = { in_app_notification_id: string; template_key: string };
 const actions: Record<string, [string, string]> = {
   OFFERED: ['Accept job', 'offers/{id}/accept'],
   ASSIGNED: ['Arrive at vendor', 'assignments/{id}/arrive-vendor'],
@@ -25,6 +37,9 @@ export function PartnerJob() {
   const [job, setJob] = useState<Job | null>(null);
   const [earnings, setEarnings] = useState<Earning[]>([]);
   const [message, setMessage] = useState('Connect an authorized assignment.');
+  const [availability, setAvailability] = useState<Availability | null>(null);
+  const [waitTimer, setWaitTimer] = useState<WaitTimer | null>(null);
+  const [notices, setNotices] = useState<Notice[]>([]);
   async function request(path: string, init?: RequestInit) {
     const response = await fetch(`${apiUrl}/${path}`, {
       ...init,
@@ -99,6 +114,56 @@ export function PartnerJob() {
       setMessage(e instanceof Error ? e.message : 'Earnings failed.');
     }
   }
+  async function dispatch(state: 'ONLINE' | 'OFFLINE') {
+    try {
+      await request('partner/availability', {
+        method: 'POST',
+        body: JSON.stringify({
+          state,
+          reason_code: state === 'ONLINE' ? 'PARTNER_AVAILABLE' : 'PARTNER_OFFLINE',
+          ...(state === 'ONLINE'
+            ? { latitude: 26.8505, longitude: 75.7628, accuracy_meters: 25, battery_percent: 80 }
+            : {}),
+        }),
+      });
+      setAvailability((await request('partner/availability')) as Availability);
+      setMessage(`Dispatch state changed to ${state}.`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Availability failed.');
+    }
+  }
+  async function wait(action: 'start' | 'refresh' | 'leave') {
+    if (!job) return;
+    try {
+      const next = (await request(
+        `partner/assignments/${job.delivery_assignment_id}/wait/${action}`,
+        {
+          method: 'POST',
+          ...(action === 'refresh'
+            ? {}
+            : {
+                body: JSON.stringify({
+                  command_reference: `SYNTH-CMD-WAIT-${Date.now().toString(36).toUpperCase()}`,
+                  reason_code: action === 'start' ? 'CUSTOMER_WAIT_STARTED' : 'WAIT_POLICY_LEAVE',
+                }),
+              }),
+        },
+      )) as WaitTimer;
+      setWaitTimer(next);
+      if (action === 'leave') await load();
+      setMessage(`Wait state changed to ${next.wait_state}.`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Wait action failed.');
+    }
+  }
+  async function notifications() {
+    try {
+      setNotices((await request('notifications?unread_only=true')) as Notice[]);
+      setMessage('Unread notifications refreshed.');
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Notifications failed.');
+    }
+  }
   const action = job ? actions[job.assignment_state] : undefined;
   return (
     <View style={s.panel}>
@@ -112,6 +177,18 @@ export function PartnerJob() {
       <TextInput value={id} onChangeText={setId} placeholder="Assignment UUID" style={s.input} />
       <Button label="Load assignment" onPress={load} />
       <Text style={s.message}>{message}</Text>
+      <View style={s.job}>
+        <Text style={s.state}>{availability?.availability_state ?? 'DISPATCH OFFLINE'}</Text>
+        <Text style={s.meta}>
+          {availability
+            ? `${availability.trips_today} trips today · ₹${(Number(availability.earnings_today_minor) / 100).toFixed(2)}`
+            : 'Load a partner session to update availability.'}
+        </Text>
+        <View style={s.inline}>
+          <Button label="Go online" onPress={() => void dispatch('ONLINE')} />
+          <Button label="Go offline" onPress={() => void dispatch('OFFLINE')} />
+        </View>
+      </View>
       {job && (
         <View style={s.job}>
           <Text style={s.state}>{job.assignment_state}</Text>
@@ -121,12 +198,32 @@ export function PartnerJob() {
           </Text>
           <Button disabled={!action} label={action?.[0] ?? 'Await operations'} onPress={advance} />
           <Button label="Customer unreachable" onPress={exception} />
+          {job.assignment_state === 'ARRIVED' && (
+            <View style={s.job}>
+              <Text style={s.meta}>
+                {waitTimer
+                  ? `${waitTimer.wait_state} · ${waitTimer.elapsed_seconds}s · credit ${waitTimer.wait_adjustment_minor ?? 'pending'} paise`
+                  : 'Server-owned customer wait timer is not started.'}
+              </Text>
+              {!waitTimer && <Button label="Start wait" onPress={() => void wait('start')} />}
+              {waitTimer && <Button label="Refresh timer" onPress={() => void wait('refresh')} />}
+              {waitTimer?.wait_state === 'THRESHOLD_TWO' && (
+                <Button label="Leave under policy" onPress={() => void wait('leave')} />
+              )}
+            </View>
+          )}
         </View>
       )}
       <Button label="Refresh earnings" onPress={loadEarnings} />
+      <Button label="Unread notifications" onPress={notifications} />
       {earnings.map((e) => (
         <Text key={e.partner_earnings_record_id} style={s.earning}>
           {e.lifecycle_state} · ₹{(e.total_minor / 100).toFixed(2)}
+        </Text>
+      ))}
+      {notices.map((notice) => (
+        <Text key={notice.in_app_notification_id} style={s.earning}>
+          {notice.template_key.replaceAll('.', ' ')}
         </Text>
       ))}
     </View>
@@ -183,4 +280,5 @@ const s = StyleSheet.create({
   state: { color: colors.textPrimary, fontSize: 22, fontWeight: '800' },
   meta: { marginTop: 4, color: colors.textSecondary, lineHeight: 19 },
   earning: { marginTop: spacing.sm, color: colors.textPrimary, fontWeight: '700' },
+  inline: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
 });

@@ -106,6 +106,11 @@ assert(
       '0031_admin_control_completion',
       '0032_discovery_search_index',
       '0033_locale_registry',
+      '0034_partner_availability',
+      '0035_partner_wait_policy',
+      '0036_admin_access_provisioning',
+      '0037_local_notifications',
+      '0038_customer_decision_payment_adjustments',
     ]),
   'Unexpected reviewed migrations',
 );

@@ -18,12 +18,14 @@ type Product = {
   title: string;
   version: number;
 };
+type Notice = { in_app_notification_id: string; template_key: string };
 
 export default function App() {
   const [token, setToken] = useState('');
   const [location, setLocation] = useState('');
   const [products, setProducts] = useState<Product[]>([]);
   const [message, setMessage] = useState('Connect a vendor session and location.');
+  const [notices, setNotices] = useState<Notice[]>([]);
   async function load() {
     try {
       const response = await fetch(`${apiUrl}/vendor/locations/${location}/catalogue/products`, {
@@ -52,6 +54,18 @@ export default function App() {
       await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Update failed.');
+    }
+  }
+  async function notifications() {
+    try {
+      const response = await fetch(`${apiUrl}/notifications?unread_only=true`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`Notifications denied (${response.status}).`);
+      setNotices((await response.json()) as Notice[]);
+      setMessage('Unread notifications refreshed.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Notifications failed.');
     }
   }
   return (
@@ -88,7 +102,15 @@ export default function App() {
           <Pressable onPress={() => void load()} style={styles.button}>
             <Text style={styles.buttonText}>Load products</Text>
           </Pressable>
+          <Pressable onPress={() => void notifications()} style={styles.button}>
+            <Text style={styles.buttonText}>Unread notifications</Text>
+          </Pressable>
           <Text style={styles.message}>{message}</Text>
+          {notices.map((notice) => (
+            <Text style={styles.message} key={notice.in_app_notification_id}>
+              {notice.template_key.replaceAll('.', ' ')}
+            </Text>
+          ))}
           {products.map((item) => (
             <View key={item.catalogue_product_id} style={styles.row}>
               <View style={styles.grow}>

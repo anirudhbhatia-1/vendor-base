@@ -670,12 +670,14 @@ export class VendorFulfilmentService {
         proposed_variant_id: string | null;
         proposed_quantity: number;
         proposed_unit_price_minor: string;
+        authorization_delta_minor: string;
         answer: DecisionAnswer;
         decision_deadline_at: Date;
         customer_user_id: string;
       }>(
         `SELECT d.decision_id, d.vendor_order_id, d.pick_id, d.proposal_kind, d.proposed_variant_id,
                 d.proposed_quantity, d.proposed_unit_price_minor::text AS proposed_unit_price_minor,
+                d.authorization_delta_minor::text AS authorization_delta_minor,
                 d.answer, d.decision_deadline_at, cg.customer_user_id
            FROM marketplace.vendor_order_customer_decisions d
            JOIN marketplace.vendor_orders o USING (vendor_order_id)
@@ -709,6 +711,7 @@ export class VendorFulfilmentService {
           : input.answer === 'APPROVED'
             ? 'WEIGHT_APPROVED'
             : 'WEIGHT_REJECTED';
+      const ids = contextIds(input.context);
       await client.query(
         `UPDATE marketplace.vendor_order_line_picks
             SET pick_state=$2,
@@ -727,7 +730,83 @@ export class VendorFulfilmentService {
           now,
         ],
       );
-      const ids = contextIds(input.context);
+      if (input.answer === 'APPROVED' && Number(row.authorization_delta_minor) !== 0) {
+        const payment = await client.query<{
+          payment_transaction_id: string;
+          payment_state: string;
+          amount_minor: string;
+          source_order_reference: string;
+          version: number;
+        }>(
+          `SELECT payment.payment_transaction_id,payment.payment_state,payment.amount_minor::text,
+                  orders.order_reference source_order_reference,payment.version
+             FROM marketplace.vendor_orders orders
+             JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
+             JOIN marketplace.payment_transactions payment USING(payment_transaction_id)
+            WHERE orders.vendor_order_id=$1 FOR UPDATE OF payment`,
+          [row.vendor_order_id],
+        );
+        const transaction = payment.rows[0];
+        if (!transaction || transaction.payment_state !== 'AUTHORIZED') {
+          throw new FulfilmentConflictError(
+            'Approved price adjustment requires an authorized, uncaptured payment',
+          );
+        }
+        const previous = Number(transaction.amount_minor);
+        const delta = Number(row.authorization_delta_minor);
+        const resulting = previous + delta;
+        if (!Number.isSafeInteger(resulting) || resulting <= 0) {
+          throw new FulfilmentConflictError('Approved price adjustment is outside payment bounds');
+        }
+        await client.query(
+          `INSERT INTO marketplace.payment_authorization_adjustments
+            (payment_authorization_adjustment_id,decision_id,payment_transaction_id,vendor_order_id,
+             delta_minor,previous_authorized_minor,resulting_authorized_minor,provider_scenario,
+             provider_reference,request_id,correlation_id,created_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,'SUCCESS',$8,$9,$10,$11)`,
+          [
+            createUuidV7({ now_ms: now.getTime() }),
+            input.decision_id,
+            transaction.payment_transaction_id,
+            row.vendor_order_id,
+            delta,
+            previous,
+            resulting,
+            `SYNTH-PAY-ADJUST-${input.decision_id.toUpperCase()}`,
+            ids.request,
+            ids.correlation,
+            now,
+          ],
+        );
+        await client.query(
+          `UPDATE marketplace.payment_allocations SET item_minor=item_minor+$3
+            WHERE payment_transaction_id=$1 AND source_order_reference=$2`,
+          [transaction.payment_transaction_id, transaction.source_order_reference, delta],
+        );
+        await client.query(
+          `UPDATE marketplace.payment_transactions SET amount_minor=$2,version=version+1,updated_at=$3
+            WHERE payment_transaction_id=$1`,
+          [transaction.payment_transaction_id, resulting, now],
+        );
+        await client.query(
+          `INSERT INTO marketplace.payment_events
+            (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,
+             resulting_state,provider_result,command_reference,actor_id,actor_kind,reason_code,
+             request_id,correlation_id,occurred_at)
+           VALUES($1,$2,$3,'AUTHORIZATION_ADJUSTED','AUTHORIZED','AUTHORIZED',
+             'SYNTHETIC_ADJUSTMENT',$4,$5,'customer','CUSTOMER_DECISION_ADJUSTED',$6,$7,$8)`,
+          [
+            createUuidV7({ now_ms: now.getTime() + 1 }),
+            transaction.payment_transaction_id,
+            transaction.version + 1,
+            `SYNTH-CMD-DECISION-${input.decision_id.toUpperCase()}`,
+            customerId,
+            ids.request,
+            ids.correlation,
+            now,
+          ],
+        );
+      }
       await appendEvent(client, {
         vendor_order_id: parseUuidV7(row.vendor_order_id),
         event_type:

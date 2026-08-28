@@ -1,5 +1,6 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import jsxA11y from 'eslint-plugin-jsx-a11y';
 
 const ignoredPaths = [
   '**/.git/**',
@@ -59,5 +60,15 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-extraneous-class': 'off',
     },
+  },
+  {
+    // Phase 12.2: automated accessibility gate on the customer-facing PWA
+    // surfaces. Real screen-reader / assistive-technology passes remain a
+    // deferred manual step recorded in the launch register; this catches the
+    // static a11y regressions (missing labels, roles, keyboard handlers) that
+    // do not need a device to find.
+    files: ['apps/*-pwa/app/**/*.tsx'],
+    plugins: { 'jsx-a11y': jsxA11y },
+    rules: jsxA11y.flatConfigs.recommended.rules,
   },
 );

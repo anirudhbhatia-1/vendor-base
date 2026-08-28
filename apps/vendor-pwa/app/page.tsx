@@ -38,6 +38,7 @@ type RemoteProduct = {
   }[];
   readonly version: number;
 };
+type Notice = { in_app_notification_id: string; template_key: string; read_at: string | null };
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:3001';
 
 const seedItems: readonly [Item, ...Item[]] = [
@@ -102,6 +103,7 @@ export default function VendorHome() {
   );
   const [csvContent, setCsvContent] = useState('');
   const [stagedImportId, setStagedImportId] = useState<string | null>(null);
+  const [notices, setNotices] = useState<Notice[]>([]);
   const selectedRemote =
     remoteProducts.find((product) => product.catalogue_product_id === selectedRemoteId) ?? null;
 
@@ -155,6 +157,19 @@ export default function VendorHome() {
     window.sessionStorage.setItem('neighbourhood.vendor.access-token', accessToken);
     window.sessionStorage.setItem('neighbourhood.vendor.location-id', vendorLocationId);
     await loadRemoteProducts();
+  }
+  async function loadNotifications() {
+    if (!accessToken) return;
+    try {
+      const response = await fetch(`${apiUrl}/notifications?unread_only=true`, {
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      if (!response.ok) throw new Error(`Notification request failed (${response.status}).`);
+      setNotices((await response.json()) as Notice[]);
+      setConnectionMessage('Unread notification inbox refreshed.');
+    } catch (error) {
+      setConnectionMessage(error instanceof Error ? error.message : 'Notification inbox failed.');
+    }
   }
 
   async function createRemoteProduct() {
@@ -501,7 +516,15 @@ export default function VendorHome() {
             />
           </label>
           <button type="submit">Connect catalogue</button>
+          <button type="button" onClick={() => void loadNotifications()}>
+            Unread notifications
+          </button>
           <span aria-live="polite">{connectionMessage}</span>
+          {notices.map((notice) => (
+            <span key={notice.in_app_notification_id}>
+              {notice.template_key.replaceAll('.', ' ')}
+            </span>
+          ))}
         </form>
         <div className="catalogue-grid">
           <div className="catalogue-products" aria-label="Product lifecycle">

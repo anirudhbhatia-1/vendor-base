@@ -47,6 +47,9 @@ import { verifyVendorStaff } from './verify-vendor-staff.js';
 import { verifyGroupedCheckout } from './verify-grouped-checkout.js';
 import { verifyVendorFulfilment } from './verify-vendor-fulfilment.js';
 import { verifyPartnerLifecycle } from './verify-partner-lifecycle.js';
+import { verifyPartnerAvailability } from './verify-partner-availability.js';
+import { verifyPartnerWaitPolicy } from './verify-partner-wait-policy.js';
+import { verifyLocalNotifications } from './verify-local-notifications.js';
 import { verifyLaunchReadiness } from './verify-launch-readiness.js';
 
 async function assertVersions(client: Client): Promise<void> {
@@ -643,6 +646,9 @@ await withDatabaseClient(config, async (client) => {
   await verifyVendorFulfilment(config.connectionString);
   await verifyAdminControlPlane(config.connectionString);
   await verifyPartnerLifecycle(config.connectionString);
+  await verifyPartnerAvailability(config.connectionString);
+  await verifyPartnerWaitPolicy(config.connectionString);
+  await verifyLocalNotifications(config.connectionString);
   await verifyLaunchReadiness(config.connectionString);
   await verifyVendorStaff(config.connectionString);
   await verifyAssignmentCustody(config.connectionString);
@@ -668,6 +674,12 @@ await withDatabaseClient(config, async (client) => {
   // that synthetic evidence before rehearsing schema rollback/forward cycles so
   // a Phase 4 staff row cannot outlive the Phase 5 location it references.
   await client.query(`TRUNCATE marketplace.support_cases,
+    marketplace.payment_authorization_adjustments,
+    marketplace.in_app_notifications, marketplace.notification_attempts,
+    marketplace.notification_intents,
+    marketplace.partner_availability_events, marketplace.partner_availability,
+    marketplace.partner_wait_earning_adjustments, marketplace.partner_wait_timer_events,
+    marketplace.partner_wait_timers,
     marketplace.vendor_order_ratings,
     marketplace.vendor_order_events,
     marketplace.vendor_order_customer_decisions,
@@ -1011,7 +1023,7 @@ await withDatabaseClient(config, async (client) => {
     assignment_custody_scenarios: 11,
     vendor_fulfilment_scenarios: 20,
     partner_lifecycle_scenarios: 26,
-    launch_readiness_scenarios: 12,
+    launch_readiness_scenarios: 13,
     money_lifecycle_scenarios: 22,
     admin_control_plane_scenarios: 13,
     target: 'test',

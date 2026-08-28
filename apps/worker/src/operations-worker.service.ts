@@ -10,6 +10,9 @@ import {
   InventoryReservationService,
   LocalProtectedObjectStorage,
   PartnerFieldOpsService,
+  PartnerWaitPolicyService,
+  LocalNotificationService,
+  ConfigurationAdminService,
   VendorFulfilmentService,
   VendorOnboardingService,
   dispatchOutboxBatch,
@@ -41,6 +44,9 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #checkout: GroupedCheckoutService;
   readonly #inventory: InventoryReservationService;
   readonly #partnerField: PartnerFieldOpsService;
+  readonly #partnerWait: PartnerWaitPolicyService;
+  readonly #notifications: LocalNotificationService;
+  readonly #configuration: ConfigurationAdminService;
   readonly #fulfilment: VendorFulfilmentService;
   readonly #onboarding: VendorOnboardingService;
   #poller: NodeJS.Timeout | undefined;
@@ -58,6 +64,9 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#assignments = new AssignmentCustodyService({ connection_string: databaseUrl });
     this.#checkout = new GroupedCheckoutService({ connection_string: databaseUrl });
     this.#partnerField = new PartnerFieldOpsService({ connection_string: databaseUrl });
+    this.#partnerWait = new PartnerWaitPolicyService({ connection_string: databaseUrl });
+    this.#notifications = new LocalNotificationService({ connection_string: databaseUrl });
+    this.#configuration = new ConfigurationAdminService({ connection_string: databaseUrl });
     this.#fulfilment = new VendorFulfilmentService({
       connection_string: databaseUrl,
       inventory: this.#inventory,
@@ -85,6 +94,9 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       this.#checkout.close(),
       this.#inventory.close(),
       this.#partnerField.close(),
+      this.#partnerWait.close(),
+      this.#notifications.close(),
+      this.#configuration.close(),
       this.#fulfilment.close(),
       this.#onboarding.close(),
     ]);
@@ -111,6 +123,10 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         documents,
         offlineProofs,
         controls,
+        waitTimers,
+        notificationSignals,
+        notifications,
+        configurations,
         outbox,
       ] = await Promise.all([
         this.#inventory.expireDue({ context, now }),
@@ -129,6 +145,14 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           older_than: new Date(now.getTime() - OFFLINE_PROOF_TTL_MS),
         }),
         this.#adminControl.expireOperationalControls({ context, now }),
+        this.#partnerWait.advanceDue({ context, now }),
+        this.#notifications.syncDomainSignals({ context, now }),
+        this.#notifications.deliverPending({ context, now }),
+        this.#configuration.activateDue({
+          actor_id: this.#workerId,
+          at: now,
+          request_id: context.request_id,
+        }),
         dispatchOutboxBatch(this.#pool, {
           batch_size: 100,
           publish: async (event) => {
@@ -152,6 +176,10 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         offlineProofs.length +
         controls.trust +
         controls.incidents +
+        waitTimers +
+        notificationSignals +
+        notifications +
+        configurations.length +
         outbox.published;
       if (changed > 0) {
         workerLogger.event('operations.deadlines.processed', {
@@ -161,6 +189,10 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           offline_proofs: offlineProofs.length,
           trust_controls: controls.trust,
           incident_controls: controls.incidents,
+          wait_timers: waitTimers,
+          notification_signals: notificationSignals,
+          notifications,
+          configurations: configurations.length,
           offers,
           outbox: outbox.published,
           quotes,
