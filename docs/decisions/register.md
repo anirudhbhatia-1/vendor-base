@@ -2,7 +2,7 @@
 
 **Register status:** Active  
 **Established:** 13 August 2026  
-**Scope:** D-01 through D-12 from `implementation.md` §3
+**Scope:** D-01 through D-15; historical records retained, current staging amendment D-15
 
 The owner and due date columns assign responsibility for producing evidence and a recommendation. They do not approve the underlying decision.
 
@@ -28,3 +28,13 @@ D-01 through D-04 owners and dates were explicitly approved by the project owner
 ## Validation-only assumptions
 
 The delivery-fee example, provider simulators, privacy periods, support targets, approval threshold, and recovery targets are approved only for the boundaries stated in D-04 through D-10. The service-radius example, initial three-vendor cart limit, other timing defaults, manual pilot procedures, and any proposed technology not explicitly approved in its decision record remain validation-only. None may be presented as permanent production policy or achieved capability.
+
+## Current superseding decisions — recorded 6 September 2026
+
+| ID | Owner / date | Status | Effect and remaining gate |
+|---|---|---|---|
+| [D-13](D-13.md) | Project Owner / Engineering Lead; 29 August 2026 | Historical approved database resumption | Supabase development resumed; D-15 supersedes its permissive TLS and simulator-only target. |
+| [D-14](D-14.md) | Engineering Lead; recorded 29 August 2026 | Accepted implementation design; production not activated | Separate least-privilege production database design; no staging/production capability certification. |
+| [D-15](D-15.md) | Project Owner implementation request / Engineering Lead; recorded 6 September 2026 | Current staging implementation direction | Eight clients, selected staging adapters and revised checkout; deployment, provider access, payout selection and public launch remain gated. |
+
+D-12 is not the current blanket prohibition on Supabase/staging implementation. D-04's local-simulator-only scope remains historical test evidence, not permission to select fake staging providers. Existing due dates are historical accountability records; do not manufacture new approvals or completion evidence.

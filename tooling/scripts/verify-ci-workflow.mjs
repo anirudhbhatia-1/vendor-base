@@ -1,6 +1,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/**
+ * Every command in the root `check` script must also run in CI.
+ *
+ * These two lists had drifted apart: `pnpm build:online-test:pwas` ran locally and
+ * never in CI, so a broken PWA export could merge. Deriving the requirement from
+ * `check` rather than repeating it here means "it passes locally" and "it passes CI"
+ * cannot quietly come to mean different things again.
+ */
+export function checkAggregateCommands(packageManifest) {
+  return (packageManifest.scripts?.check ?? '')
+    .split('&&')
+    .map((command) => command.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Commands CI must run in addition to everything the local `check` aggregate runs.
+ * Installing from the lockfile and writing the evidence are CI's own responsibilities
+ * and have no local equivalent.
+ */
 const requiredCommands = [
   'pnpm install --frozen-lockfile',
   'pnpm format:check',
@@ -23,7 +43,7 @@ const expectedActions = new Map([
   ['actions/upload-artifact', '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'],
 ]);
 
-export function validateWorkflow(text) {
+export function validateWorkflow(text, aggregateCommands = []) {
   const errors = [];
 
   if (/\bpull_request_target\s*:/.test(text)) {
@@ -63,8 +83,10 @@ export function validateWorkflow(text) {
     errors.push('artifact upload must be restricted to the two safe evidence files');
   }
 
-  for (const command of requiredCommands) {
-    if (!text.includes(command)) errors.push(`missing mandatory command: ${command}`);
+  for (const command of [...requiredCommands, ...aggregateCommands]) {
+    if (!text.includes(command)) {
+      errors.push(`missing mandatory command: ${command}`);
+    }
   }
 
   const foundActions = new Set();
@@ -90,10 +112,23 @@ export function validateWorkflow(text) {
 function main() {
   const workflowPath = path.resolve('.github/workflows/ci.yml');
   const text = fs.readFileSync(workflowPath, 'utf8');
-  const errors = validateWorkflow(text);
+  const manifest = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8'));
+  const aggregate = checkAggregateCommands(manifest);
+  const errors = validateWorkflow(text, aggregate);
 
   if (process.argv.includes('--self-test')) {
     if (errors.length !== 0) throw new Error(`valid workflow failed: ${errors.join('; ')}`);
+    if (checkAggregateCommands({ scripts: { check: 'pnpm a && pnpm b' } }).length !== 2) {
+      throw new Error('the check aggregate was not split into its commands');
+    }
+    if (
+      !validateWorkflow(text, ['pnpm never-in-ci']).some((error) =>
+        error.includes('pnpm never-in-ci'),
+      )
+    ) {
+      throw new Error('a check-aggregate command missing from CI was accepted');
+    }
+
     const unsafe = text.replace(expectedActions.get('actions/checkout'), 'v7');
     const unsafeErrors = validateWorkflow(unsafe);
     if (!unsafeErrors.some((error) => error.includes('immutable 40-character'))) {

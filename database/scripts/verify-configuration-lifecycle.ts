@@ -15,6 +15,15 @@ import {
   type ConfigurationScope,
 } from '../src/versioned-configuration.js';
 
+/**
+ * Append-only guards must refuse with 55000. A bare catch accepts any failure, which is
+ * how two guards in step 3.6 kept raising an internal field-resolution error while their
+ * tests stayed green.
+ */
+function isAppendOnlyRefusal(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '55000';
+}
+
 export async function verifyVersionedConfiguration(connectionString: string): Promise<void> {
   const pool = new Pool({
     application_name: 'neighbourhood-store-test-configuration-verifier',
@@ -249,6 +258,18 @@ export async function verifyVersionedConfiguration(connectionString: string): Pr
     }
     if (!invalidValueRejected) throw new Error('Database accepted a non-boolean feature flag');
 
+    // A version that never entered the schedule race, so its status is APPROVED
+    // deterministically.
+    //
+    // This used `secondScheduled`, whose status depends on which of two
+    // concurrent schedules won. That decides the outcome outright: measured
+    // directly against this schema, APPROVED -> ACTIVE is refused with 23514
+    // while SCHEDULED -> ACTIVE is *permitted* (migration 0005 lists it), so
+    // whenever the second version won the race the update succeeded and this
+    // assertion reported the database accepting an invalid jump. The first-issued
+    // schedule usually wins, which is why it failed only occasionally -- the worst
+    // kind of red, rare enough to look like noise.
+    const neverScheduled = await prepareScheduled('never-scheduled');
     let invalidTransitionRejected = false;
     try {
       await pool.query(
@@ -256,7 +277,7 @@ export async function verifyVersionedConfiguration(connectionString: string): Pr
             SET status = 'ACTIVE', effective_from = clock_timestamp(),
                 activated_at = clock_timestamp()
           WHERE configuration_version_id = $1`,
-        [secondScheduled.configuration_version_id],
+        [neverScheduled.configuration_version_id],
       );
     } catch (error: unknown) {
       invalidTransitionRejected =
@@ -367,8 +388,8 @@ export async function verifyVersionedConfiguration(connectionString: string): Pr
           WHERE configuration_version_id = $1`,
         [rollbackActive.configuration_version_id],
       );
-    } catch {
-      mutationRejected = true;
+    } catch (error: unknown) {
+      mutationRejected = isAppendOnlyRefusal(error);
     }
     let snapshotDeletionRejected = false;
     try {
@@ -377,11 +398,13 @@ export async function verifyVersionedConfiguration(connectionString: string): Pr
           WHERE business_record_type = 'synthetic_quote' AND business_record_id = $1`,
         [businessRecordId],
       );
-    } catch {
-      snapshotDeletionRejected = true;
+    } catch (error: unknown) {
+      snapshotDeletionRejected = isAppendOnlyRefusal(error);
     }
     if (!mutationRejected || !snapshotDeletionRejected) {
-      throw new Error('Configuration content or business snapshot accepted destructive mutation');
+      throw new Error(
+        'Configuration content or business snapshot did not refuse with the append-only code',
+      );
     }
 
     const lifecycle = await pool.query<{ count: string }>(

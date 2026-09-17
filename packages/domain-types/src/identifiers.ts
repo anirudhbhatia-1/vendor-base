@@ -14,8 +14,15 @@ const PUBLIC_REFERENCE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const PUBLIC_REFERENCE_PATTERN = /^([A-Z]{2,4})-([23456789A-HJ-NP-Z]{5})([23456789A-HJ-NP-Z])$/;
 const MAX_UUID_TIMESTAMP = 0xffffffffffff;
 
+/**
+ * Typed structurally so this package compiles under any `lib` -- it is
+ * consumed by Node services, browsers and React Native alike, and each
+ * type-checks this source against its own globals.
+ */
+type RandomSource = { getRandomValues<T extends ArrayBufferView>(array: T): T };
+
 export function secureRandomBytes(length: number): Uint8Array {
-  const cryptoApi = globalThis.crypto;
+  const cryptoApi = (globalThis as { crypto?: RandomSource }).crypto;
   if (!cryptoApi) throw new Error('Secure random generation is unavailable');
   return cryptoApi.getRandomValues(new Uint8Array(length));
 }

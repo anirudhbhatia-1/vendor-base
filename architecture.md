@@ -1,8 +1,8 @@
 # Architecture — Neighbourhood Store Marketplace
 
-**Status:** Proposed implementation architecture v0.2
-**Synchronized:** 13 August 2026
-**Product stage:** Validation / pre-implementation  
+**Status:** Implementation and staging target architecture v0.3
+**Synchronized:** 6 September 2026
+**Product stage:** Implementation in progress; staging and production unverified  
 **Target market:** India, launched one neighbourhood or pin-code cluster at a time  
 **Related documents:** [README](README.md) · [Product Requirements Document](prd.md) · [Design](design.md) · [Workflow](workflow.md) · [Implementation](implementation.md) · [AI Rules](rules.md)
 
@@ -10,7 +10,7 @@
 
 This document describes a practical technical architecture for a vendor-first local commerce platform. Customers order from a named neighbourhood shop, vendors manage and fulfil their own catalogue, delivery partners provide shared last-mile capacity, and administrators control trust, finance, and exceptions.
 
-The project has no production code yet. D-02 and D-03 approve the internal-development technology foundation; hosting and every shared or production environment remain undecided. [ADR-001](docs/architecture/ADR-001-internal-development-stack.md) is authoritative where the older recommendations below differ.
+Application code, migrations and tests exist; their presence is not release evidence. [D-15](docs/decisions/D-15.md) defines the current staging target, client boundaries, checkout chronology and supersession of historical local-only restrictions. Local development remains supported; production activation is separately gated.
 
 ## 2. Architecture goals
 
@@ -77,7 +77,7 @@ Deploy these logical applications:
 | Deployable | Responsibility |
 |---|---|
 | Customer web app | Store discovery, catalogue, cart, checkout, tracking, support, and reordering |
-| Operations web app | Vendor portal and admin console, separated by role-based navigation and authorization |
+| Vendor and admin clients | Separate PWA and Android app for each role, with scoped backend authorization |
 | Delivery-partner app | Availability, assignment, navigation handoff, proof of pickup/delivery, exceptions, and earnings |
 | Marketplace API | Authentication, business rules, transactional workflows, provider adapters, and read APIs |
 | Background worker | Notifications, timeout handling, payment reconciliation, settlement jobs, report generation, and retries |
@@ -102,7 +102,7 @@ Likely first extraction candidates are notifications, dispatch/location tracking
 
 ### 6.1 Customer App / Web
 
-Start with a responsive web app or installable progressive web app. Render public store pages for fast loading and discoverability, while authenticated cart, checkout, order history, and support use secured APIs.
+Build the customer Next.js PWA and Expo/React Native Android app in parallel. Customer PWA targets Workers/OpenNext with a same-origin BFF; Android uses Expo Router. Render public store pages for fast loading and discoverability, while authenticated cart, checkout, order history, and support use secured APIs.
 
 The client owns presentation state only. Product availability, fees, slot eligibility, substitution rules, and payable totals must always be recalculated by the server.
 
@@ -114,7 +114,7 @@ Optimistic UI may improve responsiveness, but the server remains authoritative. 
 
 ### 6.3 Delivery Partner App / Portal
 
-An Android-first progressive web app can validate the workflow. A native or cross-platform mobile app may become necessary for reliable background location, push delivery, battery management, and navigation integration.
+The partner has a separate PWA and Expo/React Native Android app. Native background capabilities require device-specific tests; PWA parity never implies unsupported background behavior. Customer moving-map tracking remains deferred.
 
 The app must cache the active assignment and last confirmed state locally so a temporary network loss does not erase the delivery context. Proof-of-delivery submission should retry safely.
 
@@ -319,8 +319,10 @@ Fulfilment → Maps adapter: calculate each required vendor-to-customer route
 Cart API → Pricing: calculate per-vendor items, tax, delivery fee, discounts, tip, and authorization buffer
 Cart API → Customer: signed expiring vendor quotes plus combined checkout-group quote
 Customer → Order API: place grouped checkout with quote ID + idempotency key
-Order API → Payment adapter: authorize combined amount
-Order API → Database: atomically create checkout group, one order per vendor, allocations, payment reference, events, and outbox records
+Order API → Database: atomically create holds, checkout group, child-order drafts, allocations, payment attempt, ledger intents and outbox
+Worker/API → Payment adapter: create provider order outside database transaction
+Customer → Provider: hosted checkout
+Verified webhook/reconciliation → Database: confirm capture before vendor release
 Worker → Each vendor: its own new-order notification
 ```
 
@@ -336,7 +338,7 @@ Order API → Database: validate SLA and move PLACED → ACCEPTED
 Vendor → Order API: record unavailable item / final weight / substitute
 Order API → Customer: approval request when policy requires it
 Customer → Order API: approve or reject adjustment
-Order API → Payment module: update planned capture or refund difference
+Order API → Payment module: refund reduction or request explicitly approved top-up
 Vendor → Fulfilment API: mark packed and ready
 Fulfilment API → Dispatch: create delivery request or pickup notification
 ```
@@ -351,7 +353,7 @@ Fulfilment → Customer: out-for-delivery notification
 Partner → Fulfilment: submit customer OTP and proof metadata
 Fulfilment → Orders: mark delivered
 Orders → Payments: calculate final approved amount per vendor order
-Payments → Payment adapter: capture the aggregate eligible amount or execute the provider-approved equivalent
+Payments → Payment adapter: reconcile prior capture, refund reductions or confirm approved top-up
 Payments → Ledger: post checkout-level payment and vendor-order allocations for customer, vendor, partner, platform, tax, fee, discount, refund, and tip entries
 Settlement worker → Payout provider: create eligible vendor/partner payouts
 Reconciliation worker → Gateway records: verify captures, refunds, and payouts
@@ -463,7 +465,7 @@ The exact endpoint catalogue should be written after the domain model and client
 
 - Customers, vendors, and partners may begin with phone OTP authentication.
 - Admins require stronger authentication, preferably passkeys or password plus phishing-resistant multi-factor authentication.
-- Sessions use short-lived access tokens and rotated refresh tokens stored securely by the client.
+- PWA uses a same-origin BFF with HttpOnly/Secure/SameSite cookies and CSRF protection; browser JavaScript never holds refresh tokens. Android uses SecureStore. Rotation, revocation and recovery follow D-15.
 - OTP attempts, resend frequency, login devices, and suspicious patterns are rate-limited and monitored.
 
 ### 16.2 Authorization
@@ -654,17 +656,17 @@ Critical invariants should use property-based tests where practical, especially 
 
 ## 24. Approved internal-development technology baseline
 
-The internal-development choices below are approved by D-02, D-03, and [ADR-001](docs/architecture/ADR-001-internal-development-stack.md). Managed services and production deployment remain recommendations only.
+The baseline below incorporates D-15's approved staging target. Provider activation and production remain separately gated; older ADRs remain historical evidence.
 
 | Layer | Recommendation | Reason |
 |---|---|---|
 | Web clients | Next.js with TypeScript | Responsive web, server-rendered store pages, shared language with backend |
 | Android client | Expo and React Native with TypeScript, developed alongside the PWA | Native Android path with shared contracts but platform-specific UX |
 | Backend | NestJS with TypeScript and Fastify in a modular monolith | Strong module structure, stateless APIs, independent workers, and later extraction boundaries |
-| Database | Local PostgreSQL 18 with PostGIS 3.6 | Transactions plus geographic queries; future managed provider undecided |
+| Database | Supabase PostgreSQL/PostGIS staging; local PostgreSQL/PostGIS fallback | Separate migration/runtime users, staging session pooler, verify-full TLS; verify actual server versions |
 | Cache/jobs | Valkey preferred with BullMQ; Redis 7.2 compatibility fallback | Free local cache, timeouts, retries, and scheduled work |
-| Object storage | Local filesystem adapter | Free synthetic testing behind a replaceable interface |
-| Deployment | Standard local `compose.yaml` through Podman Desktop or Docker Compose | Reproducible company development; hosting remains undecided |
+| Object storage | Supabase Storage staging; filesystem for local/test | Public approved catalogue assets and private quarantined evidence with scoped signed access |
+| Deployment | Local compose retained; customer PWA targets Workers/OpenNext | API/worker hosting and production activation remain gated; no unlimited free-capacity assumption |
 | Observability | OpenTelemetry plus managed logs, metrics, traces, and error reporting | Provider-neutral instrumentation and faster incident diagnosis |
 
 A serverless platform is suitable for web rendering and light APIs, but long-running workers, connection limits, queue processing, and background location workloads must be evaluated explicitly.
@@ -736,3 +738,9 @@ Implementation can begin when:
 - Major technology choices are captured in architecture decision records.
 
 Until those decisions are made, this document is a reference design rather than a production commitment.
+
+## Current staging contract and verification status
+
+[D-15](docs/decisions/D-15.md) is the synchronized current-workstream decision for eight clients, staging providers, TLS/BFF boundaries, pre-payment durable checkout, weight caps/top-ups, role invitations, guest-cart merge, internal publication testing and privacy controls. Earlier conflicting local-only or deferred-provider wording is historical, not an active implementation restriction. Public production remains gated.
+
+Scope labels are not completion claims. See the [phase conformance audit](docs/engineering/phase-conformance-audit.md) for reviewed steps, executable evidence and remaining gaps. Customer final prices and charge components remain visible; internal fee formulas/margins do not enter customer APIs. Moving maps, masked calling, POS sync, COD, pharmacy and consolidation remain deferred/gated.

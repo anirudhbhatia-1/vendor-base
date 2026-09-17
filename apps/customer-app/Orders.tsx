@@ -1,7 +1,10 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, radii, spacing } from '@neighbourhood-store/ui-tokens/native';
-const apiUrl = 'http://10.0.2.2:3001';
+import { createRawRequester } from '@neighbourhood-store/contracts';
+const globalEnv =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+const apiUrl = globalEnv['EXPO_PUBLIC_API_URL'] ?? 'http://10.0.2.2:3001';
 type Order = {
   vendor_order_id: string;
   order_reference: string;
@@ -9,26 +12,26 @@ type Order = {
   total_minor: number;
 };
 type Notice = { in_app_notification_id: string; template_key: string };
-export function Orders() {
-  const [token, setToken] = useState('');
+export function Orders({
+  accessToken = '',
+  vendorOrderId,
+}: { accessToken?: string; vendorOrderId?: string } = {}) {
+  const token = accessToken;
   const [orders, setOrders] = useState<Order[]>([]);
-  const [message, setMessage] = useState('Connect a customer session.');
+  const [message, setMessage] = useState('Sign in above to load your order history.');
   const [notices, setNotices] = useState<Notice[]>([]);
   async function call(path: string, init?: RequestInit) {
-    const r = await fetch(`${apiUrl}${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(init?.body ? { 'content-type': 'application/json' } : {}),
-      },
-    });
-    if (!r.ok) throw new Error(`Request failed (${r.status}).`);
-    return r.json();
+    const raw = createRawRequester({ baseUrl: apiUrl, getToken: () => token });
+    return raw<unknown>(path, init);
   }
   async function load() {
     try {
       const b = (await call('/customer/orders')) as { groups: { vendor_orders: Order[] }[] };
-      setOrders(b.groups.flatMap((g) => g.vendor_orders));
+      setOrders(
+        b.groups
+          .flatMap((g) => g.vendor_orders)
+          .filter((order) => !vendorOrderId || order.vendor_order_id === vendorOrderId),
+      );
       setMessage('Order history refreshed.');
     } catch (e) {
       setMessage(e instanceof Error ? e.message : 'History failed.');
@@ -61,16 +64,18 @@ export function Orders() {
     <View style={s.panel}>
       <Text style={s.kicker}>ORDER HISTORY</Text>
       <Text style={s.heading}>Receipts and support</Text>
-      <TextInput
-        style={s.input}
-        value={token}
-        onChangeText={setToken}
-        placeholder="Customer access token"
-      />
-      <Pressable style={s.button} onPress={() => void load()}>
+      <Pressable
+        style={[s.button, !token && { opacity: 0.4 }]}
+        onPress={() => token && void load()}
+        disabled={!token}
+      >
         <Text style={s.buttonText}>Load orders</Text>
       </Pressable>
-      <Pressable style={s.button} onPress={() => void notifications()}>
+      <Pressable
+        style={[s.button, !token && { opacity: 0.4 }]}
+        onPress={() => token && void notifications()}
+        disabled={!token}
+      >
         <Text style={s.buttonText}>Unread notifications</Text>
       </Pressable>
       <Text style={s.message}>{message}</Text>

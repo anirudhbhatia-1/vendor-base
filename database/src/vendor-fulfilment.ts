@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import { createHash, randomInt } from 'node:crypto';
 import {
   createUuidV7,
@@ -8,11 +9,50 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import { InventoryReservationService } from './inventory-reservations.js';
+import { publishVendorOrderTransition } from './vendor-order-completion.js';
+import { transaction as tx } from './transaction.js';
 
 export class FulfilmentInputError extends Error {}
 export class FulfilmentNotFoundError extends Error {}
-export class FulfilmentConflictError extends Error {}
+/**
+ * Carries which kind of conflict it is.
+ *
+ * All 25 refusals in this module arrived at the browser as one bare 409, which
+ * the API reports as VERSION_CONFLICT and clients render as "Something changed
+ * while you were working. Refresh and try again." Only the version checks are
+ * fixed by refreshing. A vendor whose pick list still had unresolved lines was
+ * told to refresh, refreshed, pressed Mark ready again, and was told the same
+ * thing -- five times in one minute in the reported session.
+ *
+ * The default is a state conflict because that is what most of these are; the
+ * version checks name VERSION_CONFLICT explicitly.
+ */
+export type FulfilmentConflictCode =
+  'ORDER_STATE_CONFLICT' | 'PARTNER_NOT_PRESENT' | 'PICKING_INCOMPLETE' | 'VERSION_CONFLICT';
+
+export class FulfilmentConflictError extends Error {
+  readonly code: FulfilmentConflictCode;
+
+  constructor(message: string, code: FulfilmentConflictCode = 'ORDER_STATE_CONFLICT') {
+    super(message);
+    this.code = code;
+  }
+}
 export class FulfilmentAuthorizationError extends Error {}
+/**
+ * Raised when a vendor tries to mint a collection code while the customer's own
+ * code is still live. Separate from FulfilmentConflictError because the answer
+ * is an instruction to the shopkeeper ("ask them to open their order screen"),
+ * not a retry.
+ */
+export class PickupOtpAlreadyIssuedError extends Error {}
+/**
+ * Nobody has minted a code yet. Distinct from a mismatch because the answer is
+ * "ask them to open theirs", not "check the digits" -- and both used to arrive
+ * as the same state conflict, so a shopkeeper who guessed a code was told the
+ * same thing as one whose customer had not opened the app.
+ */
+export class PickupOtpMissingError extends Error {}
 export class PickupOtpMismatchError extends Error {}
 export class PickupOtpExhaustedError extends Error {}
 export class PickupOtpExpiredError extends Error {}
@@ -37,7 +77,17 @@ export const PICKUP_OTP_MAX_ATTEMPTS = 5;
 export const DEFAULT_ACCEPT_DEADLINE_SECONDS = 3 * 60;
 
 export type VendorOrderState =
-  'PLACED' | 'ACCEPTED' | 'PICKING' | 'READY' | 'PICKED_UP' | 'CANCELLED' | 'EXPIRED';
+  | 'PLACED'
+  | 'ACCEPTED'
+  | 'PICKING'
+  | 'READY'
+  | 'PICKED_UP'
+  // Terminal outcomes of a platform delivery, written by `assignment-custody`
+  // through `completeVendorOrder` rather than by this service.
+  | 'DELIVERED'
+  | 'RETURNED'
+  | 'CANCELLED'
+  | 'EXPIRED';
 
 export type PickState =
   | 'FOUND'
@@ -67,12 +117,61 @@ export interface VendorOrderSummary {
   readonly pickup_otp_expires_at: Date | null;
   readonly pickup_otp_attempts: number;
   readonly decline_reason_code: string | null;
+  /**
+   * How this order leaves the shop: CUSTOMER_PICKUP, VENDOR_DELIVERY or
+   * PLATFORM_DELIVERY. The console could not tell them apart, so it asked for a
+   * "customer's collection code" on an order a delivery partner was coming for.
+   */
+  readonly fulfilment_method: string;
+  /**
+   * Who is collecting, and how far along they are.
+   *
+   * A shopkeeper with a packed order and a READY badge could not tell whether a
+   * partner was on the way, standing at the counter, or had already left after
+   * waiting — so an order that needed re-dispatching looked identical to one
+   * about to be collected. These are operational facts about the store's own
+   * order; the partner's identity and position are deliberately not here.
+   */
+  readonly collection: {
+    readonly assignment_state: string;
+    readonly partner_waiting_since: Date | null;
+    readonly wait_state: string | null;
+  } | null;
+  /**
+   * Why a finished order finished, and who ended it.
+   *
+   * A customer cancellation writes its reason only to `vendor_order_events` and
+   * leaves `decline_reason_code` null — that column holds the *vendor's* own
+   * decline reason. So a shopkeeper saw an order turn CANCELLED with nothing
+   * saying whether they had declined it, the customer had, or it had timed out.
+   */
+  readonly resolution: {
+    readonly reason_code: string;
+    readonly ended_by: string;
+    readonly occurred_at: Date;
+  } | null;
+}
+
+/**
+ * One child order as the customer sees it.
+ *
+ * Separate from `VendorOrderSummary`, which carries vendor-operational fields
+ * (pickup OTP attempts, decline reason) that a customer must never receive.
+ */
+export interface CustomerOrderEntry {
+  readonly vendor_order_id: UuidV7;
+  readonly vendor_location_id: UuidV7;
+  readonly location_name: string;
+  readonly order_reference: string;
+  readonly lifecycle_state: string;
+  readonly total_minor: number;
+  readonly fulfilment_method: string | null;
 }
 
 export interface PickRecord {
   readonly pick_id: UuidV7;
   readonly vendor_order_line_id: UuidV7;
-  readonly pick_state: PickState;
+  readonly pick_state: PickState | 'PENDING';
   readonly actual_quantity: number | null;
   readonly actual_unit_price_minor: number | null;
   readonly substitution_variant_id: UuidV7 | null;
@@ -103,21 +202,6 @@ interface Ids {
 }
 
 const reasonCode = /^[A-Z][A-Z0-9_]{2,63}$/;
-
-async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 
 function contextIds(context: RequestContext): Ids {
   return {
@@ -151,6 +235,20 @@ async function requireVendorMember(
   return { userId };
 }
 
+/** The same membership check, for reads that need no transaction. */
+async function requireVendorMemberPool(
+  pool: Pool,
+  context: RequestContext,
+  vendorLocationId: UuidV7,
+): Promise<{ readonly userId: UuidV7 }> {
+  const client = await pool.connect();
+  try {
+    return await requireVendorMember(client, context, vendorLocationId);
+  } finally {
+    client.release();
+  }
+}
+
 function requireCustomer(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'customer') throw new FulfilmentAuthorizationError();
   return context.actor.actor_id;
@@ -176,12 +274,13 @@ async function lockOrder(
   readonly pickup_otp_hash: string | null;
   readonly pickup_otp_expires_at: Date | null;
   readonly pickup_otp_attempts: number;
+  readonly pickup_otp_issued_by: string | null;
   readonly total_minor: string;
 }> {
   const result = await client.query(
     `SELECT vendor_order_id, vendor_location_id, checkout_group_id, lifecycle_state, version,
             accept_by, pickup_otp_hash, pickup_otp_expires_at, pickup_otp_attempts,
-            total_minor::text AS total_minor
+            pickup_otp_issued_by, total_minor::text AS total_minor
        FROM marketplace.vendor_orders WHERE vendor_order_id=$1 FOR UPDATE`,
     [vendorOrderId],
   );
@@ -190,13 +289,77 @@ async function lockOrder(
   return row;
 }
 
+/**
+ * Who the shop is handing this order to, and whether they are there.
+ *
+ * A platform delivery goes to its partner, and only once the partner has
+ * marked arrival (workflow 6.7.5-6): before that there is nobody at the counter
+ * to hand it to, and completing the handover would move the order to PICKED_UP
+ * -- committing stock and starting capture -- for goods still on the shelf. The
+ * latest assignment is locked so a partner leaving and a vendor handing over
+ * cannot interleave. A pickup or vendor-delivery order has no partner to wait
+ * for.
+ */
+async function requireCollectorPresent(
+  client: PoolClient,
+  vendorOrderId: UuidV7,
+): Promise<{
+  readonly fulfilment_method: string;
+  readonly delivery_assignment_id: string | null;
+  readonly assignment_state: string | null;
+}> {
+  const method = await client.query<{ fulfilment_method: string | null }>(
+    `SELECT cvg.fulfilment_method
+       FROM marketplace.vendor_orders o
+       JOIN marketplace.checkout_groups cg USING (checkout_group_id)
+       LEFT JOIN marketplace.checkout_quote_groups cqg
+         ON cqg.checkout_quote_id = cg.checkout_quote_id
+        AND cqg.vendor_location_id = o.vendor_location_id
+       LEFT JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+      WHERE o.vendor_order_id = $1`,
+    [vendorOrderId],
+  );
+  const fulfilmentMethod = method.rows[0]?.fulfilment_method ?? 'PLATFORM_DELIVERY';
+  if (fulfilmentMethod !== 'PLATFORM_DELIVERY') {
+    return {
+      fulfilment_method: fulfilmentMethod,
+      delivery_assignment_id: null,
+      assignment_state: null,
+    };
+  }
+  const assignment = await client.query<{
+    delivery_assignment_id: string;
+    assignment_state: string;
+  }>(
+    `SELECT delivery_assignment_id, assignment_state
+       FROM marketplace.delivery_assignments
+      WHERE vendor_order_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+      FOR UPDATE`,
+    [vendorOrderId],
+  );
+  const row = assignment.rows[0];
+  if (row?.assignment_state !== 'AT_VENDOR') {
+    throw new FulfilmentConflictError(
+      'A platform delivery is handed over once its partner is at the store',
+      'PARTNER_NOT_PRESENT',
+    );
+  }
+  return {
+    fulfilment_method: fulfilmentMethod,
+    delivery_assignment_id: row.delivery_assignment_id,
+    assignment_state: row.assignment_state,
+  };
+}
+
 async function appendEvent(
   client: PoolClient,
   input: {
     readonly vendor_order_id: UuidV7;
     readonly event_type: string;
     readonly actor_id: UuidV7;
-    readonly actor_kind: 'customer' | 'vendor_staff' | 'system';
+    readonly actor_kind: 'customer' | 'delivery_partner' | 'system' | 'vendor_staff';
     readonly previous_state: VendorOrderState | null;
     readonly resulting_state: VendorOrderState | null;
     readonly reason_code: string;
@@ -225,6 +388,124 @@ async function appendEvent(
   );
 }
 
+/**
+ * Stops charging the customer for an order that ended before it was supplied.
+ *
+ * One authorization funds a whole checkout group, and `capture` is all or
+ * nothing. With a basket from two shops where one declines, capturing would take
+ * the full amount and leave the customer waiting on a refund for goods nobody
+ * was ever going to bring. Shrinking the authorization instead is the per-shop
+ * form of "a decline releases the money", and it leaves nothing owed.
+ *
+ * This runs in the same transaction as the ending itself: money that must not be
+ * charged is not something to leave to a retryable side effect.
+ *
+ * Two cases deliberately do nothing. A payment that is no longer AUTHORIZED has
+ * already been captured or voided, and adjusting it would be rewriting history.
+ * And when this order is the last live one in its group, the remainder would be
+ * zero — there is no such thing as a zero authorization, so the whole thing is
+ * released by the void path instead.
+ */
+async function releaseAuthorizationForEndedOrder(
+  client: PoolClient,
+  input: {
+    readonly vendor_order_id: UuidV7;
+    readonly actor_id: UuidV7;
+    readonly actor_kind: string;
+    readonly reason_code: string;
+    readonly ids: Ids;
+    readonly now: Date;
+  },
+): Promise<void> {
+  const found = await client.query<{
+    payment_transaction_id: string;
+    payment_state: string;
+    amount_minor: string;
+    version: number;
+    order_reference: string;
+    allocated_total_minor: string | null;
+  }>(
+    `SELECT payment.payment_transaction_id, payment.payment_state,
+            payment.amount_minor::text, payment.version,
+            orders.order_reference,
+            allocation.allocated_total_minor::text AS allocated_total_minor
+       FROM marketplace.vendor_orders orders
+       JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
+       JOIN marketplace.payment_transactions payment USING(payment_transaction_id)
+       LEFT JOIN marketplace.payment_allocations allocation
+         ON allocation.payment_transaction_id = payment.payment_transaction_id
+        AND allocation.source_order_reference = orders.order_reference
+      WHERE orders.vendor_order_id=$1
+      FOR UPDATE OF payment`,
+    [input.vendor_order_id],
+  );
+  const transaction = found.rows[0];
+  if (!transaction || transaction.payment_state !== 'AUTHORIZED') return;
+
+  const allocated = Number(transaction.allocated_total_minor ?? '0');
+  if (!Number.isSafeInteger(allocated) || allocated <= 0) return;
+  const previous = Number(transaction.amount_minor);
+  const resulting = previous - allocated;
+  if (!Number.isSafeInteger(resulting) || resulting <= 0) return;
+
+  const inserted = await client.query(
+    `INSERT INTO marketplace.payment_authorization_adjustments
+      (payment_authorization_adjustment_id,decision_id,payment_transaction_id,vendor_order_id,
+       delta_minor,previous_authorized_minor,resulting_authorized_minor,provider_scenario,
+       provider_reference,adjustment_kind,request_id,correlation_id,created_at)
+     VALUES($1,NULL,$2,$3,$4,$5,$6,'SUCCESS',$7,'VENDOR_ORDER_ENDED',$8,$9,$10)
+     ON CONFLICT (vendor_order_id) WHERE adjustment_kind='VENDOR_ORDER_ENDED' DO NOTHING`,
+    [
+      createUuidV7({ now_ms: input.now.getTime() }),
+      transaction.payment_transaction_id,
+      input.vendor_order_id,
+      -allocated,
+      previous,
+      resulting,
+      `SYNTH-PAY-RELEASE-${String(input.vendor_order_id).toUpperCase()}`,
+      input.ids.request,
+      input.ids.correlation,
+      input.now,
+    ],
+  );
+  // A replayed ending finds its adjustment already recorded. Reducing the
+  // authorization again would charge the customer less than they owe.
+  if (inserted.rowCount === 0) return;
+
+  await client.query(
+    `UPDATE marketplace.payment_allocations
+        SET item_minor=0, tax_minor=0, delivery_minor=0, tip_minor=0, discount_minor=0
+      WHERE payment_transaction_id=$1 AND source_order_reference=$2`,
+    [transaction.payment_transaction_id, transaction.order_reference],
+  );
+  await client.query(
+    `UPDATE marketplace.payment_transactions
+        SET amount_minor=$2, version=version+1, updated_at=$3
+      WHERE payment_transaction_id=$1`,
+    [transaction.payment_transaction_id, resulting, input.now],
+  );
+  await client.query(
+    `INSERT INTO marketplace.payment_events
+      (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,
+       resulting_state,provider_result,command_reference,actor_id,actor_kind,reason_code,
+       request_id,correlation_id,occurred_at)
+     VALUES($1,$2,$3,'AUTHORIZATION_ADJUSTED','AUTHORIZED','AUTHORIZED','SYNTHETIC_ADJUSTMENT',
+       $4,$5,$6,$7,$8,$9,$10)`,
+    [
+      createUuidV7({ now_ms: input.now.getTime() + 1 }),
+      transaction.payment_transaction_id,
+      transaction.version + 1,
+      `SYNTH-CMD-RELEASE-${String(input.vendor_order_id).toUpperCase()}`,
+      input.actor_id,
+      input.actor_kind,
+      input.reason_code,
+      input.ids.request,
+      input.ids.correlation,
+      input.now,
+    ],
+  );
+}
+
 function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
   return Object.freeze({
     vendor_order_id: parseUuidV7(row['vendor_order_id'] as string),
@@ -242,6 +523,23 @@ function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
     pickup_otp_expires_at: (row['pickup_otp_expires_at'] as Date | null) ?? null,
     pickup_otp_attempts: row['pickup_otp_attempts'] as number,
     decline_reason_code: (row['decline_reason_code'] as string | null) ?? null,
+    // The same default `customerTracking` and dispatch apply: an order whose
+    // checkout group cannot be joined is treated as a platform delivery.
+    fulfilment_method: (row['fulfilment_method'] as string | null) ?? 'PLATFORM_DELIVERY',
+    resolution: row['resolution_reason_code']
+      ? Object.freeze({
+          reason_code: row['resolution_reason_code'] as string,
+          ended_by: row['resolution_actor_kind'] as string,
+          occurred_at: row['resolution_occurred_at'] as Date,
+        })
+      : null,
+    collection: row['assignment_state']
+      ? Object.freeze({
+          assignment_state: row['assignment_state'] as string,
+          partner_waiting_since: (row['partner_waiting_since'] as Date | null) ?? null,
+          wait_state: (row['wait_state'] as string | null) ?? null,
+        })
+      : null,
   });
 }
 
@@ -249,7 +547,7 @@ function projectPick(row: Record<string, unknown>): PickRecord {
   return Object.freeze({
     pick_id: parseUuidV7(row['pick_id'] as string),
     vendor_order_line_id: parseUuidV7(row['vendor_order_line_id'] as string),
-    pick_state: row['pick_state'] as PickState,
+    pick_state: row['pick_state'] as PickState | 'PENDING',
     actual_quantity: (row['actual_quantity'] as number | null) ?? null,
     actual_unit_price_minor: row['actual_unit_price_minor']
       ? Number(row['actual_unit_price_minor'])
@@ -299,7 +597,7 @@ export class VendorFulfilmentService {
     readonly connection_string: string;
     readonly inventory: InventoryReservationService;
   }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-vendor-fulfilment',
       max: 8,
@@ -309,6 +607,65 @@ export class VendorFulfilmentService {
 
   async close(): Promise<void> {
     await this.#pool.end();
+  }
+
+  /**
+   * List customer-substitution decisions the caller (a customer) still owes an
+   * answer on. Powers the customer PWA "pending decisions" list so the
+   * customer no longer has to paste a decision id by hand.
+   */
+  async listPendingCustomerDecisions(input: { readonly context: RequestContext }): Promise<
+    readonly {
+      readonly decision_id: UuidV7;
+      readonly vendor_order_id: UuidV7;
+      readonly proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
+      readonly proposed_quantity: number;
+      readonly proposed_unit_price_minor: number;
+      readonly authorization_delta_minor: number;
+      readonly reason_note: string;
+      readonly decision_deadline_at: string;
+    }[]
+  > {
+    const actor = input.context.actor;
+    if (!actor || actor.actor_kind !== 'customer') return [];
+    const rows = await this.#pool.query<{
+      decision_id: string;
+      vendor_order_id: string;
+      proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
+      proposed_quantity: number;
+      proposed_unit_price_minor: string;
+      authorization_delta_minor: string;
+      reason_note: string;
+      decision_deadline_at: Date;
+    }>(
+      // The customer is on the checkout group, not the vendor order. This read
+      // named `vo.customer_user_id`, which does not exist, so every call was a
+      // 500 -- the customer app polls it on each orders page, and no
+      // substitution or weight proposal ever reached a customer through it.
+      // Nothing in the ladder called it.
+      `SELECT d.decision_id, d.vendor_order_id, d.proposal_kind, d.proposed_quantity,
+              d.proposed_unit_price_minor, d.authorization_delta_minor, d.reason_note,
+              d.decision_deadline_at
+         FROM marketplace.vendor_order_customer_decisions d
+         JOIN marketplace.vendor_orders vo ON vo.vendor_order_id = d.vendor_order_id
+         JOIN marketplace.checkout_groups cg ON cg.checkout_group_id = vo.checkout_group_id
+        WHERE d.answer = 'PENDING' AND cg.customer_user_id = $1
+        ORDER BY d.decision_deadline_at ASC
+        LIMIT 25`,
+      [parseUuidV7(actor.actor_id)],
+    );
+    return rows.rows.map((row) =>
+      Object.freeze({
+        decision_id: parseUuidV7(row.decision_id),
+        vendor_order_id: parseUuidV7(row.vendor_order_id),
+        proposal_kind: row.proposal_kind,
+        proposed_quantity: row.proposed_quantity,
+        proposed_unit_price_minor: Number(row.proposed_unit_price_minor),
+        authorization_delta_minor: Number(row.authorization_delta_minor),
+        reason_note: row.reason_note,
+        decision_deadline_at: row.decision_deadline_at.toISOString(),
+      }),
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -372,7 +729,7 @@ export class VendorFulfilmentService {
       if (order.lifecycle_state !== 'PLACED')
         throw new FulfilmentConflictError('Only a placed order can be accepted');
       if (order.version !== input.expected_version)
-        throw new FulfilmentConflictError('Vendor order version has advanced');
+        throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
       if (order.accept_by && order.accept_by <= now)
         throw new FulfilmentConflictError('The response deadline has passed');
       const version = order.version + 1;
@@ -397,6 +754,19 @@ export class VendorFulfilmentService {
         resulting_state: 'ACCEPTED',
         reason_code: 'VENDOR_ACCEPTED',
         ids,
+      });
+      // Capture is a provider call, so it belongs on the outbox rather than in
+      // the vendor's own transaction: the shop should not wait on a payment
+      // gateway to see its order accepted, and a gateway failure must retry
+      // rather than undo the acceptance.
+      await publishVendorOrderTransition(client, {
+        context: input.context,
+        event_type: 'vendor_order.accepted',
+        now,
+        reason_code: 'VENDOR_ACCEPTED',
+        source: 'vendor_fulfilment',
+        to_state: 'ACCEPTED',
+        vendor_order_id: input.vendor_order_id,
       });
       return projectSummary(updated.rows[0] as Record<string, unknown>);
     });
@@ -430,7 +800,7 @@ export class VendorFulfilmentService {
       if (order.lifecycle_state !== 'PLACED')
         throw new FulfilmentConflictError('Only a placed order can be declined');
       if (order.version !== input.expected_version)
-        throw new FulfilmentConflictError('Vendor order version has advanced');
+        throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
       const version = order.version + 1;
       const ids = contextIds(input.context);
       const updated = await client.query(
@@ -445,6 +815,14 @@ export class VendorFulfilmentService {
         [input.vendor_order_id, input.reason_code, input.note ?? null, version, now],
       );
       await this.#releaseHolds(client, input.vendor_order_id);
+      await releaseAuthorizationForEndedOrder(client, {
+        actor_id: userId,
+        actor_kind: 'vendor_staff',
+        ids,
+        now,
+        reason_code: 'VENDOR_DECLINED_ORDER',
+        vendor_order_id: input.vendor_order_id,
+      });
       await appendEvent(client, {
         vendor_order_id: input.vendor_order_id,
         event_type: 'DECLINED',
@@ -455,6 +833,16 @@ export class VendorFulfilmentService {
         reason_code: input.reason_code,
         note: input.note ?? null,
         ids,
+      });
+      await publishVendorOrderTransition(client, {
+        context: input.context,
+        event_type: 'vendor_order.ended',
+        now,
+        payload: { ended_by: 'vendor_staff', reason_code: input.reason_code },
+        reason_code: input.reason_code,
+        source: 'vendor_fulfilment',
+        to_state: 'CANCELLED',
+        vendor_order_id: input.vendor_order_id,
       });
       return projectSummary(updated.rows[0] as Record<string, unknown>);
     });
@@ -489,6 +877,14 @@ export class VendorFulfilmentService {
           [orderId, row.version + 1, now],
         );
         await this.#releaseHolds(client, orderId);
+        await releaseAuthorizationForEndedOrder(client, {
+          actor_id: systemActorId,
+          actor_kind: 'system',
+          ids,
+          now,
+          reason_code: 'ACCEPT_DEADLINE_TIMEOUT',
+          vendor_order_id: orderId,
+        });
         await appendEvent(client, {
           vendor_order_id: orderId,
           event_type: 'TIMED_OUT',
@@ -498,6 +894,16 @@ export class VendorFulfilmentService {
           resulting_state: 'EXPIRED',
           reason_code: 'ACCEPT_DEADLINE_TIMEOUT',
           ids,
+        });
+        await publishVendorOrderTransition(client, {
+          context: input.context,
+          event_type: 'vendor_order.ended',
+          now,
+          payload: { ended_by: 'system', reason_code: 'ACCEPT_DEADLINE_TIMEOUT' },
+          reason_code: 'ACCEPT_DEADLINE_TIMEOUT',
+          source: 'vendor_fulfilment',
+          to_state: 'EXPIRED',
+          vendor_order_id: orderId,
         });
         timedOut.push(orderId);
       }
@@ -525,7 +931,7 @@ export class VendorFulfilmentService {
       if (order.lifecycle_state !== 'ACCEPTED')
         throw new FulfilmentConflictError('Only an accepted order can start picking');
       if (order.version !== input.expected_version)
-        throw new FulfilmentConflictError('Vendor order version has advanced');
+        throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
       const version = order.version + 1;
       const ids = contextIds(input.context);
       const updated = await client.query(
@@ -922,7 +1328,7 @@ export class VendorFulfilmentService {
       if (order.lifecycle_state !== 'PICKING')
         throw new FulfilmentConflictError('Only an order in picking can be marked ready');
       if (order.version !== input.expected_version)
-        throw new FulfilmentConflictError('Vendor order version has advanced');
+        throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
       // Every line must be resolved (FOUND, MISSING, or a decided proposal)
       // and no proposal may still be PENDING before ready succeeds.
       const unresolved = await client.query<{ count: string }>(
@@ -939,7 +1345,10 @@ export class VendorFulfilmentService {
         [input.vendor_order_id],
       );
       if (unresolved.rows[0]?.count !== '0')
-        throw new FulfilmentConflictError('Unresolved lines cannot reach ready');
+        throw new FulfilmentConflictError(
+          'Unresolved lines cannot reach ready',
+          'PICKING_INCOMPLETE',
+        );
       const version = order.version + 1;
       const ids = contextIds(input.context);
       const updated = await client.query(
@@ -984,13 +1393,174 @@ export class VendorFulfilmentService {
    * returned to the caller once (customer notification path); only its SHA-256
    * hash is stored. Issuing again before the current OTP expires rotates it.
    */
+  /**
+   * The customer's own collection code (CUS-51).
+   *
+   * The vendor could already mint a pickup code and read it aloud, which works
+   * for a delivery partner standing at the counter. A customer collecting their
+   * own order needs it on their phone before they set out — otherwise the
+   * "server-validated OTP" the workflow calls for is a code only the shop can
+   * see, which proves nothing about who is collecting.
+   *
+   * Deliberately the same column, lifetime and attempt limit as the vendor
+   * path: one code per order, whoever asked for it, so the shop and the
+   * customer can never be looking at two different numbers.
+   */
+  async issueCustomerPickupOtp(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<{ readonly plaintext_otp: string; readonly expires_at: Date }> {
+    const customerId = requireCustomer(input.context);
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const owned = await client.query<{
+        customer_user_id: string;
+        fulfilment_method: string | null;
+      }>(
+        `SELECT g.customer_user_id, cvg.fulfilment_method
+           FROM marketplace.vendor_orders o
+           JOIN marketplace.checkout_groups g ON g.checkout_group_id = o.checkout_group_id
+           LEFT JOIN marketplace.checkout_quote_groups cqg
+             ON cqg.checkout_quote_id = g.checkout_quote_id
+            AND cqg.vendor_location_id = o.vendor_location_id
+           LEFT JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+          WHERE o.vendor_order_id = $1`,
+        [input.vendor_order_id],
+      );
+      if (owned.rows[0]?.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
+      // A collection code proves who is at the counter. On a delivery the
+      // customer is at home, and the code they hold is the delivery code for
+      // the door (CUS-56); a collection code here would be one only the shop
+      // could validate against nobody.
+      if (owned.rows[0].fulfilment_method !== 'CUSTOMER_PICKUP') {
+        throw new FulfilmentConflictError(
+          'A collection code applies to an order the customer collects themselves',
+        );
+      }
+      const order = await lockOrder(client, input.vendor_order_id);
+      if (order.lifecycle_state !== 'READY') {
+        throw new FulfilmentConflictError('A collection code applies once the order is ready');
+      }
+      const otp = String(randomInt(100000, 1000000));
+      const hash = createHash('sha256').update(otp).digest('hex');
+      const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
+      await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET pickup_otp_hash=$2, pickup_otp_expires_at=$3, pickup_otp_attempts=0,
+                pickup_otp_issued_by='CUSTOMER', updated_at=$4
+          WHERE vendor_order_id=$1`,
+        [input.vendor_order_id, hash, expiresAt, now],
+      );
+      const ids = contextIds(input.context);
+      await appendEvent(client, {
+        vendor_order_id: input.vendor_order_id,
+        event_type: 'PICKUP_OTP_ISSUED',
+        actor_id: customerId,
+        actor_kind: 'customer',
+        previous_state: 'READY',
+        resulting_state: 'READY',
+        reason_code: 'CUSTOMER_PICKUP_OTP_ISSUED',
+        ids,
+      });
+      return { plaintext_otp: otp, expires_at: expiresAt };
+    });
+  }
+
+  /**
+   * The delivery partner's pickup code (DLP-24, workflow 6.7.6).
+   *
+   * A platform delivery is handed to a rider, not to the customer, and the
+   * rider had nothing to present: the only issuers were the customer -- at
+   * home, holding a delivery code for the door -- and the vendor's fallback,
+   * whose reasons are all about the customer's phone. The console therefore
+   * asked for a "customer's collection code" that did not exist, and the one
+   * way through was a fallback issued for a reason that was not true.
+   *
+   * The partner mints it on their own assignment, only once they have marked
+   * arrival, and it lands on the same column with the same lifetime and attempt
+   * limit as the customer's code -- so the shop validates one number, whoever
+   * is standing there, and `completePickup` does not change.
+   */
+  async issuePartnerPickupOtp(input: {
+    readonly context: RequestContext;
+    readonly delivery_assignment_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<{ readonly plaintext_otp: string; readonly expires_at: Date }> {
+    const partner = input.context.actor;
+    if (partner?.actor_kind !== 'delivery_partner') throw new FulfilmentAuthorizationError();
+    const partnerId = partner.actor_id;
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const assignment = await client.query<{
+        assignment_state: string;
+        vendor_order_id: string | null;
+      }>(
+        `SELECT assignment_state, vendor_order_id
+           FROM marketplace.delivery_assignments
+          WHERE delivery_assignment_id = $1 AND partner_user_id = $2
+          FOR UPDATE`,
+        [input.delivery_assignment_id, partnerId],
+      );
+      const row = assignment.rows[0];
+      if (!row || row.vendor_order_id === null) throw new FulfilmentNotFoundError();
+      // The code proves presence at the counter, so it exists only once the
+      // partner has said they are there. Before that it would be a way to be
+      // handed the goods from the road.
+      if (row.assignment_state !== 'AT_VENDOR') {
+        throw new FulfilmentConflictError('A pickup code applies once you are at the store');
+      }
+      const order = await lockOrder(client, parseUuidV7(row.vendor_order_id));
+      if (order.lifecycle_state !== 'READY') {
+        throw new FulfilmentConflictError('A pickup code applies once the order is ready');
+      }
+      const otp = String(randomInt(100000, 1000000));
+      const hash = createHash('sha256').update(otp).digest('hex');
+      const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
+      await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET pickup_otp_hash=$2, pickup_otp_expires_at=$3, pickup_otp_attempts=0,
+                pickup_otp_issued_by='PARTNER', updated_at=$4
+          WHERE vendor_order_id=$1`,
+        [order.vendor_order_id, hash, expiresAt, now],
+      );
+      const ids = contextIds(input.context);
+      await appendEvent(client, {
+        vendor_order_id: parseUuidV7(order.vendor_order_id),
+        event_type: 'PICKUP_OTP_ISSUED',
+        actor_id: partnerId,
+        actor_kind: 'delivery_partner',
+        previous_state: 'READY',
+        resulting_state: 'READY',
+        reason_code: 'PARTNER_PICKUP_OTP_ISSUED',
+        ids,
+      });
+      return { plaintext_otp: otp, expires_at: expiresAt };
+    });
+  }
+
+  /**
+   * The alternative-proof path: a collection code for a customer who cannot
+   * show their own (dead phone, no signal, no app).
+   *
+   * This is deliberately *not* a peer of `issueCustomerPickupOtp`. Both used to
+   * write the same column, so whichever ran last silently invalidated the
+   * other and the customer was refused at the counter with no explanation on
+   * either screen. CUS-51 gives the customer the code and VEN-35 has staff
+   * validate it, so a code the vendor mints and reads aloud proves nothing
+   * about who is standing there — it is a fallback, and it refuses to displace
+   * a live customer code.
+   */
   async issuePickupOtp(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
     readonly vendor_location_id: UuidV7;
+    readonly reason_code: string;
     readonly now?: Date;
   }): Promise<{ readonly plaintext_otp: string; readonly expires_at: Date }> {
     const now = input.now ?? new Date();
+    if (!reasonCode.test(input.reason_code))
+      throw new FulfilmentInputError('A fallback collection code needs a reason code');
     return tx(this.#pool, async (client) => {
       const { userId } = await requireVendorMember(client, input.context, input.vendor_location_id);
       const order = await lockOrder(client, input.vendor_order_id);
@@ -998,12 +1568,31 @@ export class VendorFulfilmentService {
         throw new FulfilmentNotFoundError();
       if (order.lifecycle_state !== 'READY')
         throw new FulfilmentConflictError('Only a ready order can receive a pickup OTP');
+      // A fallback stands in for the collector's own code, so it needs the
+      // collector to be there: on a platform delivery, the partner at the counter.
+      await requireCollectorPresent(client, input.vendor_order_id);
+      // Read under the same FOR UPDATE lock that guards issuance, so two
+      // counters cannot both pass this check and then overwrite each other.
+      // The partner's code is as canonical as the customer's: whoever is
+      // collecting holds the live number, and the shop does not displace it.
+      if (
+        order.pickup_otp_issued_by !== null &&
+        order.pickup_otp_issued_by !== 'VENDOR_FALLBACK' &&
+        order.pickup_otp_hash !== null &&
+        order.pickup_otp_expires_at !== null &&
+        order.pickup_otp_expires_at > now
+      ) {
+        throw new PickupOtpAlreadyIssuedError(
+          'The person collecting already has a live collection code. Ask them to read it from their screen.',
+        );
+      }
       const otp = String(randomInt(100000, 1000000));
       const hash = createHash('sha256').update(otp).digest('hex');
       const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
       await client.query(
         `UPDATE marketplace.vendor_orders
-            SET pickup_otp_hash=$2, pickup_otp_expires_at=$3, pickup_otp_attempts=0, updated_at=$4
+            SET pickup_otp_hash=$2, pickup_otp_expires_at=$3, pickup_otp_attempts=0,
+                pickup_otp_issued_by='VENDOR_FALLBACK', updated_at=$4
           WHERE vendor_order_id=$1`,
         [input.vendor_order_id, hash, expiresAt, now],
       );
@@ -1015,7 +1604,9 @@ export class VendorFulfilmentService {
         actor_kind: 'vendor_staff',
         previous_state: 'READY',
         resulting_state: 'READY',
-        reason_code: 'PICKUP_OTP_ISSUED',
+        // The shopkeeper's stated reason, on the append-only record. Support
+        // needs to know why a handover skipped the customer's own code.
+        reason_code: input.reason_code,
         ids,
       });
       return { plaintext_otp: otp, expires_at: expiresAt };
@@ -1051,8 +1642,9 @@ export class VendorFulfilmentService {
         throw new FulfilmentNotFoundError();
       if (order.lifecycle_state !== 'READY')
         throw new FulfilmentConflictError('Only a ready order can complete pickup');
+      await requireCollectorPresent(client, input.vendor_order_id);
       if (!order.pickup_otp_hash || !order.pickup_otp_expires_at)
-        throw new FulfilmentConflictError('No pickup OTP has been issued');
+        throw new PickupOtpMissingError('No pickup OTP has been issued');
       if (order.pickup_otp_attempts >= PICKUP_OTP_MAX_ATTEMPTS) throw new PickupOtpExhaustedError();
       if (order.pickup_otp_expires_at <= now) throw new PickupOtpExpiredError();
       const attempted = createHash('sha256').update(input.otp).digest('hex');
@@ -1085,12 +1677,15 @@ export class VendorFulfilmentService {
         throw new FulfilmentNotFoundError();
       if (order.lifecycle_state !== 'READY')
         throw new FulfilmentConflictError('Only a ready order can complete pickup');
+      // Re-checked under the commit lock: the partner may have left between the
+      // validation transaction and this one.
+      const collector = await requireCollectorPresent(client, input.vendor_order_id);
       const ids = contextIds(input.context);
       const version = order.version + 1;
       const updated = await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='PICKED_UP', picked_up_at=$2, version=$3, updated_at=$2,
-                pickup_otp_hash=NULL, pickup_otp_expires_at=NULL
+                pickup_otp_hash=NULL, pickup_otp_expires_at=NULL, pickup_otp_issued_by=NULL
           WHERE vendor_order_id=$1
         RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
                   version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
@@ -1098,12 +1693,20 @@ export class VendorFulfilmentService {
                   pickup_otp_attempts, decline_reason_code`,
         [input.vendor_order_id, now, version],
       );
-      // Inventory commit is delegated to settleInventoryOnPickup, called
-      // directly by tests and (later) an outbox worker. Registering
-      // vendor_order as a versioned aggregate (to satisfy the outbox FK
-      // outbox_transition_fk) is a Phase 10 concern coupled to ledger and
-      // settlement; Phase 8's exit gate is satisfied by the direct call
-      // path and does not depend on the async orchestration.
+      // Inventory commit is delegated to settleInventoryOnPickup, which the
+      // outbox worker invokes when it consumes the event appended below.
+      // The record says who took the goods. A partner handover written as a
+      // customer collection would be wrong about the one fact support reads.
+      const reasonCode =
+        collector.fulfilment_method === 'PLATFORM_DELIVERY'
+          ? 'PARTNER_PICKUP_COMPLETED'
+          : 'CUSTOMER_PICKUP_COMPLETED';
+      await this.#publishPickedUp(client, {
+        context: input.context,
+        now,
+        reason_code: reasonCode,
+        vendor_order_id: input.vendor_order_id,
+      });
       await appendEvent(client, {
         vendor_order_id: input.vendor_order_id,
         event_type: 'PICKED_UP',
@@ -1111,12 +1714,97 @@ export class VendorFulfilmentService {
         actor_kind: 'vendor_staff',
         previous_state: 'READY',
         resulting_state: 'PICKED_UP',
-        reason_code: 'CUSTOMER_PICKUP_COMPLETED',
+        reason_code: reasonCode,
         note: input.proof_note ?? null,
         ids,
       });
       return projectSummary(updated.rows[0] as Record<string, unknown>);
     });
+  }
+
+  /**
+   * Registers `vendor_order` as a versioned aggregate and appends the
+   * `vendor_order.picked_up` outbox event in the same transaction as the
+   * lifecycle write.
+   *
+   * The outbox FK (`outbox_transition_fk`) requires a matching
+   * `aggregate_transitions` row, so the head is created lazily on the first
+   * event this aggregate emits. Without this event the worker's
+   * `settleInventoryOnPickup` handler never fires and every PROVISIONAL
+   * inventory hold on the order stays uncommitted.
+   */
+  async #publishPickedUp(
+    client: PoolClient,
+    input: {
+      readonly context: RequestContext;
+      readonly now: Date;
+      readonly reason_code: string;
+      readonly vendor_order_id: UuidV7;
+    },
+  ): Promise<void> {
+    const ids = contextIds(input.context);
+    const actor = input.context.actor;
+    const actorId = actor?.actor_id ?? createUuidV7();
+    const actorKind = actor?.actor_kind ?? 'system';
+    const head = await client.query<{ version: number; state: string }>(
+      `SELECT version, state FROM marketplace.aggregate_heads
+        WHERE aggregate_type='vendor_order' AND aggregate_id=$1 FOR UPDATE`,
+      [input.vendor_order_id],
+    );
+    const previous = head.rows[0];
+    const version = (previous?.version ?? 0) + 1;
+    if (previous) {
+      await client.query(
+        `UPDATE marketplace.aggregate_heads SET version=$2, state='PICKED_UP', updated_at=$3
+          WHERE aggregate_type='vendor_order' AND aggregate_id=$1`,
+        [input.vendor_order_id, version, input.now],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO marketplace.aggregate_heads
+           (aggregate_type,aggregate_id,version,state,created_at,updated_at)
+         VALUES ('vendor_order',$1,1,'PICKED_UP',$2,$2)`,
+        [input.vendor_order_id, input.now],
+      );
+    }
+    await client.query(
+      `INSERT INTO marketplace.aggregate_transitions
+         (transition_id,aggregate_type,aggregate_id,previous_version,resulting_version,from_state,
+          to_state,actor_id,actor_kind,reason_code,evidence,request_id,correlation_id,causation_id,
+          occurred_at)
+       VALUES ($1,'vendor_order',$2,$3,$4,$5,'PICKED_UP',$6,$7,$13,$8,$9,$10,$11,$12)`,
+      [
+        createUuidV7(),
+        input.vendor_order_id,
+        version - 1,
+        version,
+        previous?.state ?? null,
+        actorId,
+        actorKind,
+        JSON.stringify({ source: 'vendor_fulfilment' }),
+        ids.request,
+        ids.correlation,
+        input.context.causation_id,
+        input.now,
+        input.reason_code,
+      ],
+    );
+    await client.query(
+      `INSERT INTO marketplace.outbox_events
+         (event_id,aggregate_type,aggregate_id,aggregate_version,event_type,payload,request_id,
+          correlation_id,causation_id,max_attempts,available_at,created_at,updated_at)
+       VALUES ($1,'vendor_order',$2,$3,'vendor_order.picked_up',$4,$5,$6,$7,8,$8,$8,$8)`,
+      [
+        createUuidV7(),
+        input.vendor_order_id,
+        version,
+        JSON.stringify({ vendor_order_id: input.vendor_order_id, state: 'PICKED_UP' }),
+        ids.request,
+        ids.correlation,
+        input.context.causation_id,
+        input.now,
+      ],
+    );
   }
 
   /**
@@ -1162,6 +1850,18 @@ export class VendorFulfilmentService {
   // 8.7 -- history, receipt, rating, support
   // -----------------------------------------------------------------------
 
+  /**
+   * The customer's own order history, grouped as the architecture groups it.
+   *
+   * Each entry names its store and carries its own fulfilment method, because
+   * MKT-07 gives every vendor order an independent promise and CUS-46 requires
+   * the customer to see the group *and* each child order's state. The previous
+   * shape returned a reference and a total, which is why the orders screen had
+   * to print UUID fragments and flatten children away from their group.
+   *
+   * One query, not one per checkout group: the old loop issued a query per row
+   * of the outer result and grew linearly with a customer's history.
+   */
   async listCustomerOrders(input: {
     readonly context: RequestContext;
     readonly limit?: number;
@@ -1170,47 +1870,262 @@ export class VendorFulfilmentService {
       readonly checkout_group_id: UuidV7;
       readonly checkout_reference: string;
       readonly created_at: Date;
-      readonly vendor_orders: readonly VendorOrderSummary[];
+      readonly lifecycle_state: string;
+      readonly total_minor: number;
+      readonly vendor_orders: readonly CustomerOrderEntry[];
     }[]
   > {
     const customerId = requireCustomer(input.context);
     const limit = Math.min(Math.max(input.limit ?? 20, 1), 100);
-    const groups = await this.#pool.query<{
+    const rows = await this.#pool.query<{
       checkout_group_id: string;
       checkout_reference: string;
       created_at: Date;
+      checkout_state: string;
+      checkout_total_minor: string;
+      vendor_order_id: string | null;
+      vendor_location_id: string | null;
+      location_name: string | null;
+      order_reference: string | null;
+      lifecycle_state: string | null;
+      total_minor: string | null;
+      fulfilment_method: string | null;
     }>(
-      `SELECT checkout_group_id, checkout_reference, created_at
-         FROM marketplace.checkout_groups
-        WHERE customer_user_id=$1
-        ORDER BY created_at DESC LIMIT $2`,
+      `SELECT g.checkout_group_id, g.checkout_reference, g.created_at,
+              g.lifecycle_state AS checkout_state, g.total_minor::text AS checkout_total_minor,
+              o.vendor_order_id, o.vendor_location_id, l.location_name, o.order_reference,
+              o.lifecycle_state, o.total_minor::text AS total_minor,
+              cvg.fulfilment_method
+         FROM marketplace.checkout_groups g
+         LEFT JOIN marketplace.vendor_orders o ON o.checkout_group_id = g.checkout_group_id
+         LEFT JOIN marketplace.vendor_locations l ON l.vendor_location_id = o.vendor_location_id
+         LEFT JOIN marketplace.checkout_quote_groups cqg
+                ON cqg.checkout_quote_id = g.checkout_quote_id
+               AND cqg.vendor_location_id = o.vendor_location_id
+         LEFT JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+        WHERE g.checkout_group_id IN (
+                SELECT checkout_group_id FROM marketplace.checkout_groups
+                 WHERE customer_user_id = $1
+                 ORDER BY created_at DESC LIMIT $2
+              )
+        ORDER BY g.created_at DESC, l.location_name ASC, o.created_at ASC`,
       [customerId, limit],
     );
-    const result: {
-      readonly checkout_group_id: UuidV7;
-      readonly checkout_reference: string;
-      readonly created_at: Date;
-      readonly vendor_orders: readonly VendorOrderSummary[];
-    }[] = [];
-    for (const group of groups.rows) {
-      const orders = await this.#pool.query(
-        `SELECT vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-                version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-                package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-                pickup_otp_attempts, decline_reason_code
-           FROM marketplace.vendor_orders WHERE checkout_group_id=$1 ORDER BY created_at ASC`,
-        [group.checkout_group_id],
+
+    const byGroup = new Map<
+      string,
+      {
+        readonly checkout_group_id: UuidV7;
+        readonly checkout_reference: string;
+        readonly created_at: Date;
+        readonly lifecycle_state: string;
+        readonly total_minor: number;
+        readonly vendor_orders: CustomerOrderEntry[];
+      }
+    >();
+    for (const row of rows.rows) {
+      let group = byGroup.get(row.checkout_group_id);
+      if (!group) {
+        group = {
+          checkout_group_id: parseUuidV7(row.checkout_group_id),
+          checkout_reference: row.checkout_reference,
+          created_at: row.created_at,
+          lifecycle_state: row.checkout_state,
+          total_minor: Number(row.checkout_total_minor),
+          vendor_orders: [],
+        };
+        byGroup.set(row.checkout_group_id, group);
+      }
+      // A checkout group with no child order yet is still a real group the
+      // customer paid for, so the LEFT JOIN row is kept and its order omitted.
+      // `vendor_location_id`, `order_reference`, `lifecycle_state` and
+      // `total_minor` are NOT NULL on `vendor_orders`; they are nullable here
+      // only because of the LEFT JOIN, so a present order id proves them present.
+      if (
+        row.vendor_order_id === null ||
+        row.vendor_location_id === null ||
+        row.order_reference === null ||
+        row.lifecycle_state === null ||
+        row.total_minor === null
+      ) {
+        continue;
+      }
+      group.vendor_orders.push(
+        Object.freeze({
+          vendor_order_id: parseUuidV7(row.vendor_order_id),
+          vendor_location_id: parseUuidV7(row.vendor_location_id),
+          location_name: row.location_name ?? '',
+          order_reference: row.order_reference,
+          lifecycle_state: row.lifecycle_state,
+          total_minor: Number(row.total_minor),
+          fulfilment_method: row.fulfilment_method,
+        }),
       );
-      result.push({
-        checkout_group_id: parseUuidV7(group.checkout_group_id),
-        checkout_reference: group.checkout_reference,
-        created_at: group.created_at,
-        vendor_orders: Object.freeze(
-          orders.rows.map((row) => projectSummary(row as Record<string, unknown>)),
-        ),
-      });
     }
-    return Object.freeze(result);
+    return Object.freeze(
+      [...byGroup.values()].map((group) =>
+        Object.freeze({ ...group, vendor_orders: Object.freeze(group.vendor_orders) }),
+      ),
+    );
+  }
+
+  /**
+   * A store's own numbers, computed from its orders (VEN-45, VEN-47).
+   *
+   * The dashboard used to state "12 orders · 96% accepted" from nothing at all.
+   * Every figure here is a count over `vendor_orders` for this location, so a
+   * vendor can check any of it against their own memory of the day — which is
+   * the only reason to show it. Rates are returned as counts *and* a
+   * denominator rather than a pre-rounded percentage, so the screen can say
+   * "3 of 4" and never imply precision the sample does not carry.
+   */
+  async locationInsights(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+    readonly window_days?: number;
+    readonly now?: Date;
+  }): Promise<{
+    readonly window_days: number;
+    readonly orders_total: number;
+    readonly orders_accepted: number;
+    readonly orders_declined: number;
+    readonly orders_expired: number;
+    readonly orders_cancelled: number;
+    readonly orders_completed: number;
+    readonly gross_minor: number;
+    readonly median_preparation_seconds: number | null;
+    readonly rating_average: number | null;
+    readonly rating_count: number;
+    readonly decline_reasons: readonly { readonly reason_code: string; readonly count: number }[];
+  }> {
+    await requireVendorMemberPool(this.#pool, input.context, input.vendor_location_id);
+    const windowDays = Math.min(Math.max(input.window_days ?? 30, 1), 90);
+    const since = new Date((input.now ?? new Date()).getTime() - windowDays * 86_400_000);
+
+    const totals = await this.#pool.query<{
+      orders_total: string;
+      orders_accepted: string;
+      orders_declined: string;
+      orders_expired: string;
+      orders_cancelled: string;
+      orders_completed: string;
+      gross_minor: string;
+      median_preparation_seconds: string | null;
+    }>(
+      `SELECT count(*)::text AS orders_total,
+              count(*) FILTER (WHERE accepted_at IS NOT NULL)::text AS orders_accepted,
+              count(*) FILTER (WHERE decline_reason_code IS NOT NULL)::text AS orders_declined,
+              count(*) FILTER (WHERE lifecycle_state = 'EXPIRED')::text AS orders_expired,
+              count(*) FILTER (WHERE lifecycle_state = 'CANCELLED')::text AS orders_cancelled,
+              count(*) FILTER (WHERE lifecycle_state = 'PICKED_UP')::text AS orders_completed,
+              COALESCE(sum(total_minor) FILTER (WHERE lifecycle_state = 'PICKED_UP'), 0)::text
+                AS gross_minor,
+              -- A median, not a mean: one order that sat overnight should not
+              -- move the number a shopkeeper is being asked to trust.
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (ready_at - accepted_at))
+              ) FILTER (WHERE ready_at IS NOT NULL AND accepted_at IS NOT NULL)::text
+                AS median_preparation_seconds
+         FROM marketplace.vendor_orders
+        WHERE vendor_location_id = $1 AND created_at >= $2`,
+      [input.vendor_location_id, since],
+    );
+
+    const ratings = await this.#pool.query<{ rating_average: string | null; rating_count: string }>(
+      `SELECT avg(rating.stars)::text AS rating_average, count(*)::text AS rating_count
+         FROM marketplace.vendor_order_ratings rating
+         JOIN marketplace.vendor_orders o USING (vendor_order_id)
+        WHERE o.vendor_location_id = $1 AND rating.created_at >= $2`,
+      [input.vendor_location_id, since],
+    );
+
+    const reasons = await this.#pool.query<{ reason_code: string; count: string }>(
+      `SELECT decline_reason_code AS reason_code, count(*)::text AS count
+         FROM marketplace.vendor_orders
+        WHERE vendor_location_id = $1 AND created_at >= $2 AND decline_reason_code IS NOT NULL
+        GROUP BY decline_reason_code
+        ORDER BY count(*) DESC, decline_reason_code`,
+      [input.vendor_location_id, since],
+    );
+
+    const row = totals.rows[0];
+    const rating = ratings.rows[0];
+    return Object.freeze({
+      window_days: windowDays,
+      orders_total: Number(row?.orders_total ?? '0'),
+      orders_accepted: Number(row?.orders_accepted ?? '0'),
+      orders_declined: Number(row?.orders_declined ?? '0'),
+      orders_expired: Number(row?.orders_expired ?? '0'),
+      orders_cancelled: Number(row?.orders_cancelled ?? '0'),
+      orders_completed: Number(row?.orders_completed ?? '0'),
+      gross_minor: Number(row?.gross_minor ?? '0'),
+      median_preparation_seconds:
+        row?.median_preparation_seconds == null
+          ? null
+          : Math.round(Number(row.median_preparation_seconds)),
+      rating_average: rating?.rating_average == null ? null : Number(rating.rating_average),
+      rating_count: Number(rating?.rating_count ?? '0'),
+      decline_reasons: Object.freeze(
+        reasons.rows.map((entry) =>
+          Object.freeze({ reason_code: entry.reason_code, count: Number(entry.count) }),
+        ),
+      ),
+    });
+  }
+
+  /**
+   * Support cases raised against this store's orders (VEN-43).
+   *
+   * The workflow says the current instruction stays on the affected order until
+   * resolution. Cases existed and the vendor could not see any of them, so an
+   * order under dispute looked identical to one that was fine.
+   */
+  async locationSupportCases(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+  }): Promise<
+    readonly {
+      readonly support_case_id: UuidV7;
+      readonly vendor_order_id: UuidV7;
+      readonly order_reference: string;
+      readonly category: string;
+      readonly lifecycle_state: string;
+      readonly created_at: string;
+    }[]
+  > {
+    await requireVendorMemberPool(this.#pool, input.context, input.vendor_location_id);
+    const rows = await this.#pool.query<{
+      support_case_id: string;
+      vendor_order_id: string;
+      order_reference: string;
+      category: string;
+      lifecycle_state: string;
+      created_at: Date;
+    }>(
+      // Deliberately not the description: a customer's account of what went
+      // wrong is support's to relay, and the category plus the case reference
+      // is what the store needs in order to act.
+      `SELECT c.support_case_id, c.vendor_order_id, o.order_reference, c.category,
+              c.lifecycle_state, c.created_at
+         FROM marketplace.support_cases c
+         JOIN marketplace.vendor_orders o USING (vendor_order_id)
+        WHERE o.vendor_location_id = $1 AND c.lifecycle_state IN ('OPEN', 'IN_PROGRESS')
+        ORDER BY c.created_at DESC
+        LIMIT 50`,
+      [input.vendor_location_id],
+    );
+    return Object.freeze(
+      rows.rows.map((row) =>
+        Object.freeze({
+          support_case_id: parseUuidV7(row.support_case_id),
+          vendor_order_id: parseUuidV7(row.vendor_order_id),
+          order_reference: row.order_reference,
+          category: row.category,
+          lifecycle_state: row.lifecycle_state,
+          created_at: row.created_at.toISOString(),
+        }),
+      ),
+    );
   }
 
   async getReceipt(input: {
@@ -1341,6 +2256,341 @@ export class VendorFulfilmentService {
     });
   }
 
+  /**
+   * What cancelling this order would do, without doing it (CUS-57).
+   *
+   * Cancellation stops being a private matter the moment someone else is
+   * holding the packages, so the answer depends on where the order has got to.
+   * Returning the reason — rather than a disabled button — is what lets the
+   * customer choose the path that is still open to them.
+   */
+  async previewCancellation(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+  }): Promise<{
+    readonly allowed: boolean;
+    readonly lifecycle_state: string;
+    readonly reason: string;
+    readonly refund_expectation: string;
+    readonly next_step: 'CANCEL' | 'SUPPORT_CASE' | 'NONE';
+    readonly version: number;
+  }> {
+    const customerId = requireCustomer(input.context);
+    const found = await this.#pool.query<{
+      lifecycle_state: string;
+      version: number;
+      customer_user_id: string;
+      assignment_state: string | null;
+      delivery_assignment_id: string | null;
+    }>(
+      `SELECT o.lifecycle_state, o.version, cg.customer_user_id, a.assignment_state
+         FROM marketplace.vendor_orders o
+         JOIN marketplace.checkout_groups cg USING (checkout_group_id)
+         LEFT JOIN marketplace.delivery_assignments a ON a.vendor_order_id = o.vendor_order_id
+        WHERE o.vendor_order_id=$1`,
+      [input.vendor_order_id],
+    );
+    const order = found.rows[0];
+    if (!order || order.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
+
+    const inCustody =
+      order.assignment_state !== null &&
+      !['UNASSIGNED', 'OFFERED', 'DECLINED', 'OFFER_EXPIRED'].includes(order.assignment_state);
+
+    if (['CANCELLED', 'EXPIRED'].includes(order.lifecycle_state)) {
+      return Object.freeze({
+        allowed: false,
+        lifecycle_state: order.lifecycle_state,
+        next_step: 'NONE' as const,
+        reason: 'This order has already ended.',
+        refund_expectation: 'Any refund due is already recorded against the order.',
+        version: order.version,
+      });
+    }
+    if (order.lifecycle_state === 'PICKED_UP' || inCustody) {
+      return Object.freeze({
+        allowed: false,
+        lifecycle_state: order.lifecycle_state,
+        next_step: 'SUPPORT_CASE' as const,
+        reason:
+          'Someone is already carrying this order, so it cannot simply be called off. Open a support case and we will arrange a return.',
+        refund_expectation:
+          'A refund is decided once the goods are back with the store; delivery already performed may not be refunded.',
+        version: order.version,
+      });
+    }
+    return Object.freeze({
+      allowed: true,
+      lifecycle_state: order.lifecycle_state,
+      next_step: 'CANCEL' as const,
+      reason:
+        order.lifecycle_state === 'PLACED'
+          ? 'The store has not started on this order yet.'
+          : 'The store has started preparing, so cancelling now may still cost them work.',
+      refund_expectation:
+        order.lifecycle_state === 'PLACED'
+          ? 'The full amount is returned.'
+          : 'The item total is returned; the delivery fee may be kept.',
+      version: order.version,
+    });
+  }
+
+  /**
+   * Cancels an order at the customer\'s request (CUS-58).
+   *
+   * Refuses once the packages are in custody: at that point the goods exist
+   * somewhere in the world and a state flip would strand them. The customer is
+   * pointed at the support path instead, which is the one that can actually
+   * arrange a return.
+   */
+  async cancelByCustomer(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly expected_version: number;
+    readonly reason_code: string;
+    readonly now?: Date;
+  }): Promise<VendorOrderSummary> {
+    if (!reasonCode.test(input.reason_code))
+      throw new FulfilmentInputError('Reason must be shouting-snake-case');
+    const customerId = requireCustomer(input.context);
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const found = await client.query<{
+        lifecycle_state: string;
+        version: number;
+        customer_user_id: string;
+        assignment_state: string | null;
+      }>(
+        `SELECT o.lifecycle_state, o.version, cg.customer_user_id, a.assignment_state
+           FROM marketplace.vendor_orders o
+           JOIN marketplace.checkout_groups cg USING (checkout_group_id)
+           LEFT JOIN marketplace.delivery_assignments a ON a.vendor_order_id = o.vendor_order_id
+          WHERE o.vendor_order_id=$1 FOR UPDATE OF o`,
+        [input.vendor_order_id],
+      );
+      const order = found.rows[0];
+      if (!order || order.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
+      if (order.version !== input.expected_version) {
+        throw new FulfilmentConflictError('The order changed while you were deciding');
+      }
+      const inCustody =
+        order.assignment_state !== null &&
+        !['UNASSIGNED', 'OFFERED', 'DECLINED', 'OFFER_EXPIRED'].includes(order.assignment_state);
+      if (!['PLACED', 'ACCEPTED', 'PICKING'].includes(order.lifecycle_state) || inCustody) {
+        throw new FulfilmentConflictError(
+          'This order is too far along to cancel; open a support case instead',
+        );
+      }
+      const version = order.version + 1;
+      const updated = await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET lifecycle_state='CANCELLED', version=$2, updated_at=$3
+          WHERE vendor_order_id=$1
+        RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
+                  version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
+                  package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
+                  pickup_otp_attempts, decline_reason_code`,
+        [input.vendor_order_id, version, now],
+      );
+      // A cancelled order was leaving its stock held, so a sibling order in the
+      // same group could be starved of inventory nobody was going to buy.
+      await this.#releaseHolds(client, input.vendor_order_id);
+      await releaseAuthorizationForEndedOrder(client, {
+        actor_id: customerId,
+        actor_kind: 'customer',
+        ids: contextIds(input.context),
+        now,
+        reason_code: 'CUSTOMER_CANCELLED_ORDER',
+        vendor_order_id: input.vendor_order_id,
+      });
+      await appendEvent(client, {
+        vendor_order_id: input.vendor_order_id,
+        event_type: 'CANCELLED',
+        actor_id: customerId,
+        actor_kind: 'customer',
+        previous_state: order.lifecycle_state as VendorOrderState,
+        resulting_state: 'CANCELLED',
+        reason_code: input.reason_code,
+        ids: contextIds(input.context),
+      });
+      await publishVendorOrderTransition(client, {
+        context: input.context,
+        event_type: 'vendor_order.ended',
+        now,
+        payload: { ended_by: 'customer', reason_code: input.reason_code },
+        reason_code: input.reason_code,
+        source: 'vendor_fulfilment',
+        to_state: 'CANCELLED',
+        vendor_order_id: input.vendor_order_id,
+      });
+      return projectSummary(updated.rows[0] as Record<string, unknown>);
+    });
+  }
+
+  /**
+   * What the customer may know about their delivery (CUS-52, CUS-53, CUS-55).
+   *
+   * Deliberately coarse: the stage of the attempt and the approximate drop
+   * area, never the partner\'s identity or live coordinates. The customer needs
+   * to know whether to expect a knock, not to watch a person move.
+   */
+  async customerTracking(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+  }): Promise<{
+    readonly lifecycle_state: string;
+    readonly fulfilment_method: string;
+    readonly stage: string;
+    readonly approximate_drop_area: string | null;
+    readonly in_custody: boolean;
+  }> {
+    const customerId = requireCustomer(input.context);
+    const found = await this.#pool.query<{
+      lifecycle_state: string;
+      customer_user_id: string;
+      fulfilment_method: string | null;
+      assignment_state: string | null;
+      approximate_drop_area: string | null;
+      delivery_assignment_id: string | null;
+    }>(
+      `SELECT o.lifecycle_state, cg.customer_user_id, cvg.fulfilment_method,
+              a.assignment_state, a.approximate_drop_area, a.delivery_assignment_id
+         FROM marketplace.vendor_orders o
+         JOIN marketplace.checkout_groups cg USING (checkout_group_id)
+         LEFT JOIN marketplace.checkout_quote_groups cqg
+           ON cqg.checkout_quote_id = cg.checkout_quote_id
+          AND cqg.vendor_location_id = o.vendor_location_id
+         LEFT JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+         LEFT JOIN marketplace.delivery_assignments a ON a.vendor_order_id = o.vendor_order_id
+        WHERE o.vendor_order_id=$1`,
+      [input.vendor_order_id],
+    );
+    const order = found.rows[0];
+    if (!order || order.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
+
+    const method = order.fulfilment_method ?? 'PLATFORM_DELIVERY';
+    const inCustody =
+      order.assignment_state !== null &&
+      ['PICKED_UP', 'EN_ROUTE_TO_CUSTOMER', 'ARRIVED'].includes(order.assignment_state);
+    // Pickup and delivery are genuinely different promises, so they are
+    // described differently rather than sharing one vague "on the way".
+    const stage =
+      method === 'CUSTOMER_PICKUP'
+        ? order.lifecycle_state === 'READY'
+          ? 'READY_FOR_COLLECTION'
+          : 'BEING_PREPARED'
+        : order.assignment_state === null
+          ? 'AWAITING_DISPATCH'
+          : order.assignment_state;
+    return Object.freeze({
+      approximate_drop_area: order.approximate_drop_area,
+      fulfilment_method: method,
+      in_custody: inCustody,
+      lifecycle_state: order.lifecycle_state,
+      stage,
+      // The customer's own delivery, so they can rate it separately from the
+      // shop. Null for a collected order, which has no delivery to rate.
+      delivery_assignment_id: order.delivery_assignment_id,
+    });
+  }
+
+  /** The customer\'s own support cases, so an open issue is visible (CUS-64). */
+  async listCustomerSupportCases(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+  }): Promise<readonly Record<string, unknown>[]> {
+    const customerId = requireCustomer(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 25, 1), 100);
+    const rows = await this.#pool.query(
+      `SELECT c.support_case_id, c.category, c.description, c.lifecycle_state,
+              c.created_at, c.updated_at, o.order_reference
+         FROM marketplace.support_cases c
+         JOIN marketplace.vendor_orders o USING (vendor_order_id)
+        WHERE c.opened_by_user_id=$1
+        ORDER BY c.created_at DESC
+        LIMIT $2`,
+      [customerId, limit],
+    );
+    return rows.rows as Record<string, unknown>[];
+  }
+
+  /** Participant-safe case projection. Internal notes are excluded in SQL. */
+  async getCustomerSupportCase(input: {
+    readonly context: RequestContext;
+    readonly support_case_id: UuidV7;
+  }): Promise<Record<string, unknown>> {
+    const customerId = requireCustomer(input.context);
+    const found = await this.#pool.query(
+      `SELECT c.support_case_id,c.category,c.description,c.lifecycle_state,c.severity,
+              c.response_due_at,c.created_at,c.updated_at,o.order_reference,
+              COALESCE(jsonb_agg(jsonb_build_object(
+                'support_case_message_id',m.support_case_message_id,
+                'author_user_id',m.author_user_id,
+                'body',m.body,
+                'created_at',m.created_at
+              ) ORDER BY m.created_at) FILTER (WHERE m.support_case_message_id IS NOT NULL), '[]') AS messages
+         FROM marketplace.support_cases c
+         JOIN marketplace.vendor_orders o USING (vendor_order_id)
+         LEFT JOIN marketplace.support_case_messages m
+           ON m.support_case_id=c.support_case_id AND m.audience='PARTICIPANT'
+        WHERE c.support_case_id=$1 AND c.opened_by_user_id=$2
+        GROUP BY c.support_case_id,o.order_reference`,
+      [input.support_case_id, customerId],
+    );
+    const row = found.rows[0] as Record<string, unknown> | undefined;
+    if (!row) throw new FulfilmentNotFoundError();
+    return row;
+  }
+
+  async addCustomerSupportMessage(input: {
+    readonly context: RequestContext;
+    readonly support_case_id: UuidV7;
+    readonly body: string;
+    readonly now?: Date;
+  }): Promise<Record<string, unknown>> {
+    const customerId = requireCustomer(input.context);
+    const body = input.body.trim();
+    if (body.length < 1 || body.length > 2000)
+      throw new FulfilmentInputError('Message must be between 1 and 2000 characters');
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const owned = await client.query(
+        `SELECT 1 FROM marketplace.support_cases
+          WHERE support_case_id=$1 AND opened_by_user_id=$2 AND lifecycle_state <> 'MERGED'`,
+        [input.support_case_id, customerId],
+      );
+      if (!owned.rows[0]) throw new FulfilmentNotFoundError();
+      const messageId = createUuidV7({ now_ms: now.getTime() });
+      const ids = contextIds(input.context);
+      await client.query(
+        `INSERT INTO marketplace.support_case_messages
+           (support_case_message_id,support_case_id,author_user_id,audience,body,created_at)
+         VALUES($1,$2,$3,'PARTICIPANT',$4,$5)`,
+        [messageId, input.support_case_id, customerId, body, now],
+      );
+      await client.query(
+        `INSERT INTO marketplace.support_case_events
+           (support_case_event_id,support_case_id,event_type,actor_id,reason_code,payload,
+            request_id,correlation_id,occurred_at)
+         VALUES($1,$2,'MESSAGE_SENT',$3,'CUSTOMER_MESSAGE','{}'::jsonb,$4,$5,$6)`,
+        [
+          createUuidV7({ now_ms: now.getTime() + 1 }),
+          input.support_case_id,
+          customerId,
+          ids.request,
+          ids.correlation,
+          now,
+        ],
+      );
+      return Object.freeze({
+        support_case_message_id: messageId,
+        author_user_id: customerId,
+        body,
+        created_at: now.toISOString(),
+      });
+    });
+  }
+
   async openSupportCase(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
@@ -1405,13 +2655,48 @@ export class VendorFulfilmentService {
     requireSystemOrVendor(input.context);
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
     const result = await this.#pool.query(
-      `SELECT vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-              version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-              package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-              pickup_otp_attempts, decline_reason_code
-         FROM marketplace.vendor_orders
-        WHERE vendor_location_id=$1
-        ORDER BY created_at DESC, vendor_order_id DESC LIMIT $2`,
+      `SELECT o.vendor_order_id, o.order_reference, o.lifecycle_state,
+              o.total_minor::text AS total_minor,
+              o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
+              o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
+              o.pickup_otp_attempts, o.decline_reason_code,
+              method.fulfilment_method,
+              collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
+              resolution.reason_code AS resolution_reason_code,
+              resolution.actor_kind AS resolution_actor_kind,
+              resolution.occurred_at AS resolution_occurred_at
+         FROM marketplace.vendor_orders o
+         LEFT JOIN LATERAL (
+           SELECT cvg.fulfilment_method
+             FROM marketplace.checkout_groups cg
+             JOIN marketplace.checkout_quote_groups cqg
+               ON cqg.checkout_quote_id = cg.checkout_quote_id
+              AND cqg.vendor_location_id = o.vendor_location_id
+             JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+            WHERE cg.checkout_group_id = o.checkout_group_id
+            LIMIT 1
+         ) method ON true
+         LEFT JOIN LATERAL (
+           SELECT a.assignment_state, w.wait_state,
+                  CASE WHEN w.ended_at IS NULL THEN w.started_at END AS partner_waiting_since
+             FROM marketplace.delivery_assignments a
+             LEFT JOIN marketplace.partner_wait_timers w
+               ON w.delivery_assignment_id = a.delivery_assignment_id
+            WHERE a.vendor_order_id = o.vendor_order_id
+            ORDER BY a.created_at DESC
+            LIMIT 1
+         ) collection ON true
+         LEFT JOIN LATERAL (
+           SELECT e.reason_code, e.actor_kind, e.occurred_at
+             FROM marketplace.vendor_order_events e
+            WHERE e.vendor_order_id = o.vendor_order_id
+              AND e.resulting_state = o.lifecycle_state
+              AND o.lifecycle_state IN ('CANCELLED', 'EXPIRED')
+            ORDER BY e.occurred_at DESC
+            LIMIT 1
+         ) resolution ON true
+        WHERE o.vendor_location_id=$1
+        ORDER BY o.created_at DESC, o.vendor_order_id DESC LIMIT $2`,
       [input.vendor_location_id, limit],
     );
     return Object.freeze(result.rows.map((row) => projectSummary(row as Record<string, unknown>)));
@@ -1422,11 +2707,47 @@ export class VendorFulfilmentService {
     readonly vendor_order_id: UuidV7;
   }): Promise<VendorOrderSummary> {
     const result = await this.#pool.query(
-      `SELECT vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-              version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-              package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-              pickup_otp_attempts, decline_reason_code
-         FROM marketplace.vendor_orders WHERE vendor_order_id=$1`,
+      `SELECT o.vendor_order_id, o.order_reference, o.lifecycle_state,
+              o.total_minor::text AS total_minor,
+              o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
+              o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
+              o.pickup_otp_attempts, o.decline_reason_code,
+              method.fulfilment_method,
+              collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
+              resolution.reason_code AS resolution_reason_code,
+              resolution.actor_kind AS resolution_actor_kind,
+              resolution.occurred_at AS resolution_occurred_at
+         FROM marketplace.vendor_orders o
+         LEFT JOIN LATERAL (
+           SELECT cvg.fulfilment_method
+             FROM marketplace.checkout_groups cg
+             JOIN marketplace.checkout_quote_groups cqg
+               ON cqg.checkout_quote_id = cg.checkout_quote_id
+              AND cqg.vendor_location_id = o.vendor_location_id
+             JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+            WHERE cg.checkout_group_id = o.checkout_group_id
+            LIMIT 1
+         ) method ON true
+         LEFT JOIN LATERAL (
+           SELECT a.assignment_state, w.wait_state,
+                  CASE WHEN w.ended_at IS NULL THEN w.started_at END AS partner_waiting_since
+             FROM marketplace.delivery_assignments a
+             LEFT JOIN marketplace.partner_wait_timers w
+               ON w.delivery_assignment_id = a.delivery_assignment_id
+            WHERE a.vendor_order_id = o.vendor_order_id
+            ORDER BY a.created_at DESC
+            LIMIT 1
+         ) collection ON true
+         LEFT JOIN LATERAL (
+           SELECT e.reason_code, e.actor_kind, e.occurred_at
+             FROM marketplace.vendor_order_events e
+            WHERE e.vendor_order_id = o.vendor_order_id
+              AND e.resulting_state = o.lifecycle_state
+              AND o.lifecycle_state IN ('CANCELLED', 'EXPIRED')
+            ORDER BY e.occurred_at DESC
+            LIMIT 1
+         ) resolution ON true
+        WHERE o.vendor_order_id=$1`,
       [input.vendor_order_id],
     );
     const row = result.rows[0];
@@ -1434,20 +2755,42 @@ export class VendorFulfilmentService {
     return projectSummary(row as Record<string, unknown>);
   }
 
+  /**
+   * The pick list, for the store that owns the order.
+   *
+   * Scoped by location: the route's guard proves membership at
+   * `:vendor_location_id`, and this refuses an order that is not that
+   * location's -- previously any vendor member could read any store's pick
+   * list by order id.
+   */
   async listPicks(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
+    readonly vendor_location_id: UuidV7;
   }): Promise<readonly PickRecord[]> {
+    await requireVendorMemberPool(this.#pool, input.context, input.vendor_location_id);
     const result = await this.#pool.query(
-      `SELECT p.pick_id, p.vendor_order_line_id, p.pick_state, p.actual_quantity,
+      `SELECT COALESCE(p.pick_id,l.vendor_order_line_id) AS pick_id,
+              l.vendor_order_line_id, COALESCE(p.pick_state,'PENDING') AS pick_state,
+              p.actual_quantity,
               p.actual_unit_price_minor::text AS actual_unit_price_minor,
-              p.substitution_variant_id, p.version, l.product_title_snapshot AS product_title,
+              p.substitution_variant_id, COALESCE(p.version,0) AS version,
+              l.product_title_snapshot AS product_title,
               l.quantity AS ordered_quantity, l.unit_price_minor::text AS ordered_unit_price_minor
-         FROM marketplace.vendor_order_line_picks p
-         JOIN marketplace.vendor_order_lines l USING(vendor_order_line_id)
-        WHERE p.vendor_order_id=$1 ORDER BY p.updated_at`,
-      [input.vendor_order_id],
+         FROM marketplace.vendor_order_lines l
+         JOIN marketplace.vendor_orders o USING (vendor_order_id)
+         LEFT JOIN marketplace.vendor_order_line_picks p USING(vendor_order_line_id)
+        WHERE l.vendor_order_id=$1 AND o.vendor_location_id=$2
+        ORDER BY l.vendor_order_line_id`,
+      [input.vendor_order_id, input.vendor_location_id],
     );
+    if (result.rows.length === 0) {
+      const owned = await this.#pool.query(
+        `SELECT 1 FROM marketplace.vendor_orders WHERE vendor_order_id=$1 AND vendor_location_id=$2`,
+        [input.vendor_order_id, input.vendor_location_id],
+      );
+      if (!owned.rows[0]) throw new FulfilmentNotFoundError();
+    }
     return Object.freeze(result.rows.map((row) => projectPick(row as Record<string, unknown>)));
   }
 

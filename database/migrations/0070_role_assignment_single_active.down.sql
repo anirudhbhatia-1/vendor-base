@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS marketplace.role_assignments_one_active_per_role;

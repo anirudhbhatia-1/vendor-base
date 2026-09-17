@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,6 +7,7 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction as tx } from './transaction.js';
 
 export class CustomerCartInputError extends Error {}
 export class CustomerCartNotFoundError extends Error {}
@@ -21,10 +23,27 @@ export type SubstitutionPreference = 'ALLOW_SAME_STORE' | 'ASK_CUSTOMER' | 'NO_S
 export interface CartLine {
   readonly cart_line_id: UuidV7;
   readonly catalogue_variant_id: UuidV7;
+  readonly catalogue_product_id: UuidV7;
   readonly quantity: number;
   readonly substitution_preference: SubstitutionPreference;
   readonly lifecycle_state: 'ACTIVE' | 'REMOVED' | 'STALE';
   readonly version: number;
+  /**
+   * Presentation facts resolved from the current catalogue.
+   *
+   * The read model previously returned identifiers only, so every cart screen
+   * had nothing to render but `catalogue_variant_id.slice(0, 12)` — a customer
+   * was shown a UUID fragment where the product name belongs. These are the
+   * *current* catalogue values, deliberately: a cart is not an order and holds
+   * no price snapshot, which is why the quote revalidates before checkout.
+   */
+  readonly title: string;
+  readonly unit_label: string;
+  readonly category: string;
+  readonly variable_weight: boolean;
+  readonly image_reference: string | null;
+  readonly unit_price_minor: number | null;
+  readonly line_total_minor: number | null;
 }
 
 export interface CartVendorGroup {
@@ -36,6 +55,20 @@ export interface CartVendorGroup {
   readonly lifecycle_state: 'ACTIVE' | 'INVALID' | 'REMOVED';
   readonly version: number;
   readonly lines: readonly CartLine[];
+  /**
+   * The named store this group belongs to, and whether it can be ordered from.
+   *
+   * MKT-01 and CUS-30 make the vendor group the organising unit of the cart, so
+   * a group that cannot say which shop it is, or whether its minimum is met, is
+   * not showing the customer the thing the architecture says they chose.
+   * `subtotal_minor` is null when any line has no active price — an unpriced
+   * line makes the sum a guess, and a guessed total is worse than none.
+   */
+  readonly location_name: string;
+  readonly minimum_order_minor: number;
+  readonly subtotal_minor: number | null;
+  readonly minimum_met: boolean;
+  readonly fulfilment_modes: readonly string[];
 }
 
 export interface Cart {
@@ -59,21 +92,6 @@ function customer(context: RequestContext): UuidV7 {
   return context.actor.actor_id;
 }
 
-async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 interface GroupRow {
   readonly cart_vendor_group_id: string;
   readonly vendor_location_id: string;
@@ -82,15 +100,25 @@ interface GroupRow {
   readonly tip_minor: string;
   readonly lifecycle_state: CartVendorGroup['lifecycle_state'];
   readonly version: number;
+  readonly location_name: string;
+  readonly minimum_order_minor: string;
+  readonly fulfilment_modes: readonly string[];
 }
 interface LineRow {
   readonly cart_line_id: string;
   readonly cart_vendor_group_id: string;
   readonly catalogue_variant_id: string;
+  readonly catalogue_product_id: string;
   readonly quantity: number;
   readonly substitution_preference: SubstitutionPreference;
   readonly lifecycle_state: CartLine['lifecycle_state'];
   readonly version: number;
+  readonly title: string;
+  readonly unit_label: string;
+  readonly category: string;
+  readonly variable_weight: boolean;
+  readonly image_reference: string | null;
+  readonly unit_price_minor: string | null;
 }
 interface CartRow {
   readonly cart_id: string;
@@ -100,13 +128,24 @@ interface CartRow {
 }
 
 function projectLine(row: LineRow): CartLine {
+  // Integer minor units throughout: the multiply happens on whole paise, never
+  // on a rupee float.
+  const unitPrice = row.unit_price_minor === null ? null : Number(row.unit_price_minor);
   return Object.freeze({
     cart_line_id: parseUuidV7(row.cart_line_id),
     catalogue_variant_id: parseUuidV7(row.catalogue_variant_id),
+    catalogue_product_id: parseUuidV7(row.catalogue_product_id),
     quantity: row.quantity,
     substitution_preference: row.substitution_preference,
     lifecycle_state: row.lifecycle_state,
     version: row.version,
+    title: row.title,
+    unit_label: row.unit_label,
+    category: row.category,
+    variable_weight: row.variable_weight,
+    image_reference: row.image_reference,
+    unit_price_minor: unitPrice,
+    line_total_minor: unitPrice === null ? null : unitPrice * row.quantity,
   });
 }
 
@@ -119,18 +158,41 @@ async function loadCart(client: PoolClient, cartId: string): Promise<Cart> {
   const cartRow = cart.rows[0];
   if (!cartRow) throw new CustomerCartNotFoundError();
   const groups = await client.query<GroupRow>(
-    `SELECT cart_vendor_group_id, vendor_location_id, fulfilment_method, customer_note,
-            tip_minor::text AS tip_minor, lifecycle_state, version
-       FROM marketplace.cart_vendor_groups
-      WHERE cart_id = $1 AND lifecycle_state <> 'REMOVED'
-      ORDER BY created_at ASC`,
+    `SELECT g.cart_vendor_group_id, g.vendor_location_id, g.fulfilment_method, g.customer_note,
+            g.tip_minor::text AS tip_minor, g.lifecycle_state, g.version,
+            l.location_name, l.minimum_order_minor::text AS minimum_order_minor,
+            COALESCE(
+              (SELECT array_agg(DISTINCT fulfilment_mode)
+                 FROM marketplace.vendor_location_fulfilment_modes
+                WHERE vendor_location_id = l.vendor_location_id),
+              ARRAY[]::text[]
+            ) AS fulfilment_modes
+       FROM marketplace.cart_vendor_groups g
+       JOIN marketplace.vendor_locations l ON l.vendor_location_id = g.vendor_location_id
+      WHERE g.cart_id = $1 AND g.lifecycle_state <> 'REMOVED'
+      ORDER BY g.created_at ASC`,
     [cartId],
   );
   const lines = await client.query<LineRow>(
     `SELECT l.cart_line_id, l.cart_vendor_group_id, l.catalogue_variant_id, l.quantity,
-            l.substitution_preference, l.lifecycle_state, l.version
+            l.substitution_preference, l.lifecycle_state, l.version,
+            p.catalogue_product_id, p.title, p.unit_label, p.category, p.variable_weight,
+            price.price_minor::text AS unit_price_minor,
+            (SELECT i.object_reference
+               FROM marketplace.catalogue_product_images i
+              WHERE i.catalogue_product_id = p.catalogue_product_id
+              ORDER BY i.position ASC
+              LIMIT 1) AS image_reference
        FROM marketplace.cart_lines l
        JOIN marketplace.cart_vendor_groups g ON g.cart_vendor_group_id = l.cart_vendor_group_id
+       JOIN marketplace.catalogue_product_variants v
+         ON v.catalogue_variant_id = l.catalogue_variant_id
+       JOIN marketplace.catalogue_products p
+         ON p.catalogue_product_id = v.catalogue_product_id
+       LEFT JOIN LATERAL (
+         SELECT cp.price_minor FROM marketplace.catalogue_prices cp
+          WHERE cp.catalogue_variant_id = v.catalogue_variant_id AND cp.effective_until IS NULL
+       ) price ON true
       WHERE g.cart_id = $1 AND l.lifecycle_state <> 'REMOVED'
       ORDER BY l.created_at ASC`,
     [cartId],
@@ -149,8 +211,16 @@ async function loadCart(client: PoolClient, cartId: string): Promise<Cart> {
     lifecycle_state: cartRow.lifecycle_state,
     version: cartRow.version,
     groups: Object.freeze(
-      groups.rows.map((group) =>
-        Object.freeze({
+      groups.rows.map((group) => {
+        const groupLines = (linesByGroup.get(group.cart_vendor_group_id) ?? []).map(projectLine);
+        // One unpriced line makes the subtotal a guess. A cart that guesses is
+        // how a customer arrives at checkout expecting a different number.
+        const priced = groupLines.every((line) => line.line_total_minor !== null);
+        const subtotal = priced
+          ? groupLines.reduce((sum, line) => sum + (line.line_total_minor ?? 0), 0)
+          : null;
+        const minimum = Number(group.minimum_order_minor);
+        return Object.freeze({
           cart_vendor_group_id: parseUuidV7(group.cart_vendor_group_id),
           vendor_location_id: parseUuidV7(group.vendor_location_id),
           fulfilment_method: group.fulfilment_method,
@@ -158,11 +228,14 @@ async function loadCart(client: PoolClient, cartId: string): Promise<Cart> {
           tip_minor: Number(group.tip_minor),
           lifecycle_state: group.lifecycle_state,
           version: group.version,
-          lines: Object.freeze(
-            (linesByGroup.get(group.cart_vendor_group_id) ?? []).map(projectLine),
-          ),
-        }),
-      ),
+          lines: Object.freeze(groupLines),
+          location_name: group.location_name,
+          minimum_order_minor: minimum,
+          subtotal_minor: subtotal,
+          minimum_met: subtotal !== null && subtotal >= minimum,
+          fulfilment_modes: Object.freeze([...group.fulfilment_modes]),
+        });
+      }),
     ),
   });
 }
@@ -212,7 +285,7 @@ export class CustomerCartService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-customer-cart',
       max: 8,
@@ -249,19 +322,32 @@ export class CustomerCartService {
       const existingRow = existing.rows[0];
       if (existingRow) return loadCart(client, existingRow.cart_id);
       const cartId = createUuidV7({ now_ms: now.getTime() });
-      await client.query(
+      const inserted = await client.query<{ cart_id: string }>(
         `INSERT INTO marketplace.carts (cart_id, user_id, request_id, correlation_id, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$5)`,
+         VALUES ($1,$2,$3,$4,$5,$5)
+         ON CONFLICT (user_id) WHERE lifecycle_state = 'ACTIVE' DO NOTHING
+         RETURNING cart_id`,
         [cartId, userId, ids.request, ids.correlation, now],
       );
-      await recordEvent(client, {
-        cart_id: parseUuidV7(cartId),
-        event_type: 'CART_CREATED',
-        reason_code: 'CUSTOMER_STARTED_CART',
-        ids,
-        now,
-      });
-      return loadCart(client, cartId);
+      const insertedId = inserted.rows[0]?.cart_id;
+      if (insertedId) {
+        await recordEvent(client, {
+          cart_id: parseUuidV7(insertedId),
+          event_type: 'CART_CREATED',
+          reason_code: 'CUSTOMER_STARTED_CART',
+          ids,
+          now,
+        });
+        return loadCart(client, insertedId);
+      }
+      const concurrent = await client.query<{ cart_id: string }>(
+        `SELECT cart_id FROM marketplace.carts
+          WHERE user_id = $1 AND lifecycle_state = 'ACTIVE'`,
+        [userId],
+      );
+      const concurrentId = concurrent.rows[0]?.cart_id;
+      if (!concurrentId) throw new CustomerCartConflictError('Active cart could not be resolved');
+      return loadCart(client, concurrentId);
     });
   }
 
@@ -276,6 +362,7 @@ export class CustomerCartService {
       request: parseRequestId(input.context.request_id),
       correlation: parseUuidV7(input.context.correlation_id),
     };
+    const cart = await this.currentCart({ context: input.context, now });
     return tx(this.#pool, async (client) => {
       const owned = await client.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM marketplace.customer_addresses
@@ -283,12 +370,13 @@ export class CustomerCartService {
         [input.customer_address_id, userId],
       );
       if (owned.rows[0]?.count !== '1') throw new CustomerCartInputError('Address is not owned');
-      const cart = await this.currentCart({ context: input.context, now });
-      await client.query(
+      const changed = await client.query<{ cart_id: string }>(
         `UPDATE marketplace.carts SET customer_address_id=$2, version=version+1, updated_at=$3
-          WHERE cart_id=$1`,
-        [cart.cart_id, input.customer_address_id, now],
+          WHERE cart_id=$1 AND user_id=$4 AND lifecycle_state='ACTIVE'
+          RETURNING cart_id`,
+        [cart.cart_id, input.customer_address_id, now, userId],
       );
+      if (!changed.rows[0]) throw new CustomerCartConflictError('Active cart changed');
       await recordEvent(client, {
         cart_id: cart.cart_id,
         event_type: 'ADDRESS_CHANGED',
@@ -395,11 +483,22 @@ export class CustomerCartService {
     });
   }
 
+  /**
+   * Changes a line's quantity and, optionally, its substitution rule.
+   *
+   * The rule could previously only be chosen when the line was added and never
+   * afterwards, so a customer who wanted "no substitution" on something already
+   * in the basket had to remove it and add it again. CUS-34 makes the choice a
+   * per-line decision, which means a changeable one. It rides the same
+   * optimistic-version command so the two can never disagree about which
+   * version of the line was edited.
+   */
   async setLineQuantity(input: {
     readonly context: RequestContext;
     readonly cart_line_id: UuidV7;
     readonly expected_version: number;
     readonly quantity: number;
+    readonly substitution_preference?: SubstitutionPreference;
     readonly now?: Date;
   }): Promise<Cart> {
     const userId = customer(input.context);
@@ -414,13 +513,24 @@ export class CustomerCartService {
     };
     return tx(this.#pool, async (client) => {
       const updated = await client.query<{ cart_id: string; cart_vendor_group_id: string }>(
-        `UPDATE marketplace.cart_lines l SET quantity=$3, version=l.version+1, updated_at=$4
+        `UPDATE marketplace.cart_lines l
+            SET quantity=$3,
+                substitution_preference=COALESCE($6, l.substitution_preference),
+                version=l.version+1,
+                updated_at=$4
            FROM marketplace.cart_vendor_groups g, marketplace.carts c
           WHERE l.cart_line_id=$1 AND l.version=$2 AND l.lifecycle_state='ACTIVE'
             AND g.cart_vendor_group_id=l.cart_vendor_group_id AND c.cart_id=g.cart_id
             AND c.user_id=$5
         RETURNING c.cart_id, l.cart_vendor_group_id`,
-        [input.cart_line_id, input.expected_version, input.quantity, now, userId],
+        [
+          input.cart_line_id,
+          input.expected_version,
+          input.quantity,
+          now,
+          userId,
+          input.substitution_preference ?? null,
+        ],
       );
       const row = updated.rows[0];
       if (!row) throw new CustomerCartNotFoundError();
@@ -429,7 +539,10 @@ export class CustomerCartService {
         cart_vendor_group_id: parseUuidV7(row.cart_vendor_group_id),
         cart_line_id: input.cart_line_id,
         event_type: 'LINE_QUANTITY_CHANGED',
-        reason_code: 'CUSTOMER_CHANGED_QUANTITY',
+        reason_code:
+          input.substitution_preference === undefined
+            ? 'CUSTOMER_CHANGED_QUANTITY'
+            : 'CUSTOMER_CHANGED_SUBSTITUTION_RULE',
         ids,
         now,
       });

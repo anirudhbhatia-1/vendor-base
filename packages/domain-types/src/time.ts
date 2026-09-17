@@ -30,7 +30,19 @@ export function createUtcInstant(value: Date | number | string): UtcInstant {
   return canonicalValue as UtcInstant;
 }
 
+/**
+ * A fixed offset is not a time zone. ECMA-402 accepts offset identifiers such as
+ * `+05:30` as a `timeZone`, so `Intl` alone let one through while the error message
+ * promised an IANA name. An offset carries no daylight-saving or historical rules, so
+ * a vendor stored with one would compute its own opening hours wrongly for half the
+ * year in any zone that observes DST — silently, and only in some months.
+ */
+const OFFSET_SHAPED = /^[+-]\d{1,2}(?::?\d{2})?$/;
+
 export function createIanaTimeZone(value: string): IanaTimeZone {
+  if (OFFSET_SHAPED.test(value)) {
+    throw new TypeError('Timezone must be a named IANA zone, not a fixed UTC offset');
+  }
   try {
     new Intl.DateTimeFormat('en', { timeZone: value }).format(0);
   } catch {

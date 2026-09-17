@@ -9,8 +9,8 @@ Unlike dark-store quick-commerce platforms, this product does not own inventory 
 - Delivery Partner App / Portal
 - Admin Console
 
-> **Status:** Local company development is the only active path. Phases 2–12 are implemented within that approved scope: Phases 2–11 as governed vertical slices, and Phase 12 as the subset a company-local synthetic environment can genuinely prove — English/Hindi localization (migration `0033`) with a CI missing-translation gate, cross-role capability probe, and an outbox transient-retry drill. Deferred Phase 12 items — accessibility review, low-end device / poor network testing, production-scale performance measurement, and stakeholder gate signatures — are documented with named owners in [`docs/engineering/launch-readiness-and-localization.md`](docs/engineering/launch-readiness-and-localization.md). The Step 2.6 online-test skeleton and partially created synthetic cloud resources are paused under D-12.
-> **Documentation baseline:** 18 August 2026 · online-test work paused; local development active
+> **Status:** Local application development remains active. D-13 additionally permits Supabase as a database-only synthetic development target: API and worker still run locally, all non-database providers remain fake/local, and no production authority is implied. The broader Step 2.6 online-test/cloud deployment remains paused under D-12.
+> **Documentation baseline:** 29 August 2026 · local and Supabase-database development active
 
 ## Start here
 
@@ -23,6 +23,15 @@ Use the documents in this order before implementation:
 5. Read [workflow.md](workflow.md) for cross-role chronology and operational handoffs.
 6. Execute through [implementation.md](implementation.md), the canonical build contract for identifiers, timers, APIs, data, events, slices, tests, and release gates.
 7. Apply [rules.md](rules.md) to every contributor and change.
+
+To use Supabase for the synthetic development database, follow the
+[Supabase development database runbook](runbooks/supabase-dev/README.md). Do not paste or commit the
+connection string.
+
+Production database preparation is isolated from development and documented in the
+[Supabase production database runbook](runbooks/supabase-production/README.md) and
+[D-14](docs/decisions/D-14.md). Passing these database controls does not by itself declare the full
+marketplace production-ready.
 
 If documents conflict, stop and resolve the conflict using the authority table in `implementation.md` §1. Do not encode an assumption in code.
 
@@ -207,7 +216,7 @@ Improve cross-store delivery consolidation, then consider B2B ordering, more sto
 - [Implementation Blueprint](implementation.md) is the executable contract for terminology, IDs, state records, timers, endpoints, persistence, workers, permissions, build slices, tests, releases, and rollback.
 - [Test-to-Production Replacement Register](docs/production/test-to-production-replacement-register.md) lists every known synthetic, fake, local-only, or unproven component and the evidence required before production use.
 - [Free Online Company-Test Migration Plan](docs/production/free-online-company-test-migration-plan.md) maps every local component to a researched free-tier or open-source online candidate, defines the implementation/change structure, and identifies unavoidable production costs.
-- [ADR-003](docs/architecture/ADR-003-free-online-company-test-stack.md) records Cloudflare, Supabase Free, OCI Always Free, FCM/Web Push, Grafana Cloud, PostHog, and GitHub Free as researched future online company-test targets; [D-12](docs/decisions/D-12.md) pauses their execution and keeps local development active.
+- [ADR-003](docs/architecture/ADR-003-free-online-company-test-stack.md) records the researched online-test stack. [D-12](docs/decisions/D-12.md) pauses the broader cloud deployment; [D-13](docs/decisions/D-13.md) narrowly resumes Supabase as a database-only synthetic development target.
 - [Continuous Integration](docs/engineering/continuous-integration.md) documents the least-privilege GitHub Actions gate, safe evidence, local equivalent, and external activation requirements.
 - [Online-Test Deployment](docs/engineering/online-test-deployment.md) documents the controlled Cloudflare/Supabase/OCI skeleton, and the [setup runbook](runbooks/online-test/README.md) gives the account, deployment, health, evidence, and rollback sequence.
 - [AI Rules and Boundaries](rules.md) defines what AI contributors may do, must verify, must not do, and when they must stop for approval.
@@ -228,4 +237,6 @@ These gates do not permit engineers to invent production policy. Their IDs, owne
 
 ## Project status
 
-Phases 2–10 are verified complete within their approved local scope. The current head migration is `0029_durable_ledger_account_catalogue`; `pnpm db:verify:connected` rehearses all 30 migrations forward and back and runs the connected identity, vendor, catalogue, inventory, cart, grouped-checkout, fulfilment, partner, money, aggregate, messaging, job, and access scenarios. Phase 10's 22 money scenarios prove authorization/capture/void/refund outcomes, settlement component preservation, idempotent payout schedules and batches, provider-statement classification, owned exception queues, immutable history, maker-checker corrections, and ledger conservation. See [the complete money lifecycle engineering note](docs/engineering/complete-money-lifecycle.md). The Step 2.6 repository skeleton remains for reference, but D-12 pauses all further online setup. Four synthetic Cloudflare snapshots and an empty Supabase/PostGIS baseline may still exist externally; neither is an active environment. R2 and OCI were not activated. Product validation remains a local, concierge-style pilot followed by the vertical slices in `implementation.md` §12. Shared online testing, staging, production providers, and real customer/payment data remain separately gated.
+Phases 2–10 are verified complete within their approved local scope. The current head migration is `0045_gated_capabilities`, which adds the register enforcing that every capability `FEATURES.md` marks Gated stays unavailable until a named approval is recorded against it. It follows `0044_delivery_assignment_vendor_order`, which links a delivery assignment to the vendor order it carries so a partner cannot self-assert custody of packages the vendor never released. `pnpm db:verify:connected` rehearses all 46 migrations forward and back and runs the connected identity, vendor, catalogue, inventory, cart, grouped-checkout, fulfilment, partner, money, aggregate, messaging, job, and access scenarios.
+
+**Local end-to-end (post-sprint):** Admin, vendor, and partner web applications authenticate exclusively through Supabase email/password. Admin provisioning creates the Supabase user and marketplace identity, role, scope, and lifecycle records through idempotent onboarding commands. Customers authenticate through the OTP session flow. Vendors publish priced, stocked products through `POST /vendor/locations/:id/catalogue/products`; customers discover them, complete grouped checkout, and receive persisted order history; the worker creates per-order delivery offers that eligible partners can accept. `POST /auth/password/verify` remains temporarily available only for existing native clients and is [explicitly deprecated](docs/engineering/native-auth-migration-todo.md). Local adapters remain synthetic and production readiness is not claimed until the external launch gates are complete.

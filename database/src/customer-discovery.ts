@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -11,6 +12,16 @@ export class CustomerDiscoveryInputError extends Error {}
 export class CustomerDiscoveryNotFoundError extends Error {}
 export class CustomerDiscoveryConflictError extends Error {}
 export class CustomerDiscoveryAuthorizationError extends Error {}
+
+/** One product hit, always carrying the shop that sells it (MKT-01, EXC-02). */
+export interface ProductSearchHit {
+  readonly vendor_location_id: UuidV7;
+  readonly catalogue_product_id: UuidV7;
+  readonly catalogue_variant_id: UuidV7;
+  readonly title: string;
+  readonly price_minor: number | null;
+  readonly is_available: boolean;
+}
 
 export interface StoreSummary {
   readonly vendor_location_id: UuidV7;
@@ -35,7 +46,14 @@ export interface StorefrontProduct {
   readonly availability_state: string | null;
   readonly is_stale: boolean;
   readonly substitution_available: boolean;
-  readonly image_references: readonly string[];
+  /**
+   * Identifiers of this product's servable images, in display order.
+   *
+   * Only rows that actually carry stored bytes are listed — a fixture row that
+   * names no object would otherwise produce a URL that 404s and a broken image
+   * where a designed category placeholder belongs.
+   */
+  readonly image_ids: readonly string[];
 }
 
 export interface Storefront {
@@ -72,7 +90,7 @@ export interface ShopRequest {
   readonly lifecycle_state: 'CLOSED' | 'OPEN' | 'TRIAGED';
 }
 
-const storeName = /^SYNTH [A-Za-z0-9][A-Za-z0-9 &'().,-]{1,118}$/;
+const storeName = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'().,/-]{1,118}$/u;
 const pinCode = /^[1-9][0-9]{5}$/;
 
 // Stopwords and common synonyms kept intentionally small; the goal at this
@@ -90,6 +108,55 @@ const synonyms: Readonly<Record<string, readonly string[]>> = Object.freeze({
   tamatar: ['tomato', 'टमाटर'],
   टमाटर: ['tomato', 'tamatar'],
 });
+
+/**
+ * Where "near me" is measured from.
+ *
+ * Discovery was reachable only from a saved address, which meant a visitor had
+ * to sign in and save one before a single shop appeared — while
+ * `architecture.md` §6.1 asks for public store pages and CUS-08 makes location
+ * permission optional. Both origins produce the same one-row `origin`
+ * relation, so the discovery queries are unchanged apart from where they start.
+ */
+export type DiscoveryOrigin =
+  | { readonly kind: 'ADDRESS'; readonly customer_address_id: UuidV7; readonly user_id: UuidV7 }
+  | { readonly kind: 'POINT'; readonly latitude: number; readonly longitude: number };
+
+/**
+ * Both forms consume exactly two placeholders, so every later parameter in the
+ * discovery queries keeps its number.
+ */
+function originRelation(origin: DiscoveryOrigin): {
+  readonly sql: string;
+  readonly params: readonly [unknown, unknown];
+} {
+  if (origin.kind === 'ADDRESS') {
+    return {
+      params: [origin.customer_address_id, origin.user_id],
+      sql: `SELECT a.coordinates
+              FROM marketplace.customer_addresses a
+             WHERE a.customer_address_id = $1 AND a.user_id = $2
+               AND a.lifecycle_state = 'ACTIVE'`,
+    };
+  }
+  return {
+    // Longitude first: PostGIS takes x,y, and reversing them is the most common
+    // way to place a Jaipur shop in the Indian Ocean.
+    params: [origin.longitude, origin.latitude],
+    sql: `SELECT ST_SetSRID(
+              ST_MakePoint($1::double precision, $2::double precision), 4326
+            )::geography AS coordinates`,
+  };
+}
+
+function requireCoordinate(latitude: number, longitude: number): void {
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+    throw new CustomerDiscoveryInputError('Latitude must be between -90 and 90');
+  }
+  if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    throw new CustomerDiscoveryInputError('Longitude must be between -180 and 180');
+  }
+}
 
 function customer(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'customer') throw new CustomerDiscoveryAuthorizationError();
@@ -146,7 +213,7 @@ export class CustomerDiscoveryService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-customer-discovery',
       max: 8,
@@ -170,9 +237,53 @@ export class CustomerDiscoveryService {
     readonly now?: Date;
   }): Promise<readonly StoreSummary[]> {
     const userId = customer(input.context);
-    const limit = Math.min(Math.max(input.limit ?? 20, 1), 50);
-    const offset = Math.max(input.offset ?? 0, 0);
-    const now = input.now ?? new Date();
+    const stores = await this.#discoverStores(
+      {
+        customer_address_id: input.customer_address_id,
+        kind: 'ADDRESS',
+        user_id: userId,
+      },
+      input,
+    );
+    await recordEvent(this.#pool, {
+      user_id: userId,
+      event_type: 'STORE_DISCOVERY',
+      result_count: stores.length,
+      context: input.context,
+      now: input.now ?? new Date(),
+    });
+    return stores;
+  }
+
+  /**
+   * The same feed, for someone who has not signed in yet.
+   *
+   * No discovery event is recorded: those are keyed to a user, and inventing an
+   * identity for an anonymous visitor would corrupt the funnel reporting
+   * (ADM-56) rather than improve it.
+   */
+  async discoverStoresNear(input: {
+    readonly latitude: number;
+    readonly longitude: number;
+    readonly limit?: number;
+    readonly offset?: number;
+    readonly now?: Date;
+  }): Promise<readonly StoreSummary[]> {
+    requireCoordinate(input.latitude, input.longitude);
+    return this.#discoverStores(
+      { kind: 'POINT', latitude: input.latitude, longitude: input.longitude },
+      input,
+    );
+  }
+
+  async #discoverStores(
+    origin: DiscoveryOrigin,
+    options: { readonly limit?: number; readonly offset?: number; readonly now?: Date },
+  ): Promise<readonly StoreSummary[]> {
+    const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
+    const offset = Math.max(options.offset ?? 0, 0);
+    const now = options.now ?? new Date();
+    const from = originRelation(origin);
     const result = await this.#pool.query<{
       vendor_location_id: string;
       location_name: string;
@@ -186,13 +297,36 @@ export class CustomerDiscoveryService {
       rating_count: string;
       is_open_now: boolean;
     }>(
-      `SELECT l.vendor_location_id, l.location_name, l.category,
+      `WITH origin AS (${from.sql})
+        SELECT l.vendor_location_id, l.location_name, l.category,
               ST_Distance(l.coordinates, a.coordinates)::text AS distance_meters,
               l.minimum_order_minor::text AS minimum_order_minor, l.currency,
+              -- Platform delivery is only offered when somebody could actually
+              -- perform it. Dispatch looks for a partner who is online, still
+              -- eligible, and within five kilometres of the shop; promising a
+              -- courier the dispatcher will never find is a promise the
+              -- platform cannot keep, and the customer sees it as a bug at the
+              -- worst moment. The shop's own delivery and collection stay.
               COALESCE(
-                (SELECT array_agg(DISTINCT fulfilment_mode)
-                   FROM marketplace.vendor_location_fulfilment_modes
-                  WHERE vendor_location_id = l.vendor_location_id),
+                (SELECT array_agg(DISTINCT fm.fulfilment_mode)
+                   FROM marketplace.vendor_location_fulfilment_modes fm
+                  WHERE fm.vendor_location_id = l.vendor_location_id
+                    AND (
+                      fm.fulfilment_mode <> 'PLATFORM_DELIVERY'
+                      OR EXISTS (
+                        SELECT 1
+                          FROM marketplace.partner_availability pa
+                         WHERE pa.availability_state = 'ONLINE'
+                           AND ST_DWithin(pa.current_coordinates, l.coordinates, 5000)
+                           AND EXISTS (
+                             SELECT 1 FROM marketplace.partner_eligibilities pe
+                              WHERE pe.user_id = pa.partner_user_id
+                                AND pe.state = 'ELIGIBLE'
+                                AND (pe.eligible_until IS NULL
+                                     OR pe.eligible_until > $3::timestamptz)
+                           )
+                      )
+                    )),
                 ARRAY[]::text[]
               ) AS fulfilment_modes,
               EXISTS (
@@ -201,25 +335,17 @@ export class CustomerDiscoveryService {
                    AND h.weekday = EXTRACT(DOW FROM $3::timestamptz)::smallint
                    AND $3::timestamptz::time BETWEEN h.opens_at AND h.closes_at
               ) AS is_open_now
-         FROM marketplace.customer_addresses a
+         FROM origin a
          JOIN marketplace.vendor_service_zones z
            ON z.lifecycle_state = 'ACTIVE' AND ST_Covers(z.boundary, a.coordinates)
          JOIN marketplace.vendor_locations l
            ON l.vendor_location_id = z.vendor_location_id AND l.lifecycle_state = 'ACTIVE'
          JOIN marketplace.vendor_publication_cases p
            ON p.vendor_location_id = l.vendor_location_id AND p.lifecycle_state = 'PUBLISHED'
-        WHERE a.customer_address_id = $1 AND a.user_id = $2 AND a.lifecycle_state = 'ACTIVE'
         ORDER BY distance_meters ASC, l.vendor_location_id ASC
         LIMIT $4 OFFSET $5`,
-      [input.customer_address_id, userId, now, limit, offset],
+      [...from.params, now, limit, offset],
     );
-    await recordEvent(this.#pool, {
-      user_id: userId,
-      event_type: 'STORE_DISCOVERY',
-      result_count: result.rows.length,
-      context: input.context,
-      now,
-    });
     return Object.freeze(
       result.rows.map((row) =>
         Object.freeze({
@@ -251,21 +377,67 @@ export class CustomerDiscoveryService {
     readonly fulfilment_mode?: string;
     readonly max_distance_meters?: number;
     readonly now?: Date;
-  }): Promise<
-    readonly {
-      readonly vendor_location_id: UuidV7;
-      readonly catalogue_product_id: UuidV7;
-      readonly catalogue_variant_id: UuidV7;
-      readonly title: string;
-      readonly price_minor: number | null;
-      readonly is_available: boolean;
-    }[]
-  > {
+  }): Promise<readonly ProductSearchHit[]> {
     const userId = customer(input.context);
     const normalized = normalizeTerm(input.term);
-    const terms = expandTerm(normalized);
-    const limit = Math.min(Math.max(input.limit ?? 20, 1), 50);
     const now = input.now ?? new Date();
+    const results = await this.#searchProducts(
+      {
+        customer_address_id: input.customer_address_id,
+        kind: 'ADDRESS',
+        user_id: userId,
+      },
+      input,
+    );
+    await this.#recordSearch(userId, normalized, input.term, now);
+    await recordEvent(this.#pool, {
+      user_id: userId,
+      event_type: results.length === 0 ? 'SEARCH_ZERO_RESULT' : 'SEARCH_RUN',
+      result_count: results.length,
+      context: input.context,
+      now,
+    });
+    return results;
+  }
+
+  /**
+   * The same ranked product search, before sign-in.
+   *
+   * Neither the search history (CUS-17) nor the funnel event is written: both
+   * belong to a person, and an anonymous visitor is not one.
+   */
+  async searchProductsNear(input: {
+    readonly latitude: number;
+    readonly longitude: number;
+    readonly term: string;
+    readonly limit?: number;
+    readonly category?: string;
+    readonly available_only?: boolean;
+    readonly fulfilment_mode?: string;
+    readonly max_distance_meters?: number;
+  }): Promise<readonly ProductSearchHit[]> {
+    requireCoordinate(input.latitude, input.longitude);
+    return this.#searchProducts(
+      { kind: 'POINT', latitude: input.latitude, longitude: input.longitude },
+      input,
+    );
+  }
+
+  async #searchProducts(
+    origin: DiscoveryOrigin,
+    options: {
+      readonly term: string;
+      readonly limit?: number;
+      readonly category?: string;
+      readonly available_only?: boolean;
+      readonly fulfilment_mode?: string;
+      readonly max_distance_meters?: number;
+    },
+  ): Promise<readonly ProductSearchHit[]> {
+    const normalized = normalizeTerm(options.term);
+    const terms = expandTerm(normalized);
+    const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
+    const from = originRelation(origin);
 
     const result = await this.#pool.query<{
       vendor_location_id: string;
@@ -275,11 +447,12 @@ export class CustomerDiscoveryService {
       price_minor: string | null;
       is_available: boolean;
     }>(
-      `SELECT p.vendor_location_id, p.catalogue_product_id, v.catalogue_variant_id, p.title,
+      `WITH origin AS (${from.sql})
+        SELECT p.vendor_location_id, p.catalogue_product_id, v.catalogue_variant_id, p.title,
               price.price_minor::text AS price_minor,
               COALESCE(item.availability_state IN ('AVAILABLE','LOW_STOCK','VENDOR_CONFIRMS'), false)
                 AS is_available
-         FROM marketplace.customer_addresses a
+         FROM origin a
          JOIN marketplace.vendor_service_zones z
            ON z.lifecycle_state = 'ACTIVE' AND ST_Covers(z.boundary, a.coordinates)
          JOIN marketplace.vendor_locations l
@@ -297,38 +470,46 @@ export class CustomerDiscoveryService {
          LEFT JOIN marketplace.inventory_items item
            ON item.vendor_location_id = p.vendor_location_id
           AND item.product_reference = p.product_reference
-        WHERE a.customer_address_id = $1 AND a.user_id = $2 AND a.lifecycle_state = 'ACTIVE'
-          AND (p.search_document @@ plainto_tsquery('simple', $3)
+        WHERE (p.search_document @@ plainto_tsquery('simple', $3)
                OR lower(p.title) LIKE ANY (SELECT '%' || unnest($4::text[]) || '%')
-               OR lower(p.category) = ANY ($4::text[]))
+               OR lower(p.category) = ANY ($4::text[])
+               -- Requirement 1 lists "store" among the term kinds to normalize, and
+               -- the store name appeared in no WHERE clause anywhere in this file:
+               -- typing a shop's name returned nothing, from any surface. Matched
+               -- against the expanded term array so a store name gets the same
+               -- synonym and transliteration handling a product title gets.
+               OR lower(l.location_name) LIKE ANY (SELECT '%' || unnest($4::text[]) || '%')
+               -- Requirement 1 asks for common misspellings, and trigram
+               -- similarity appeared only in the ORDER BY, where it can rerank
+               -- matches but never produce one: a misspelling was findable only
+               -- if somebody had enumerated it in the synonym table, so
+               -- "tomatoe" returned nothing at all. The %> operator is word
+               -- similarity, so
+               -- it compares the term against the closest word in the title
+               -- rather than the whole string, which a long product title would
+               -- otherwise dilute below any useful threshold. Uses the existing
+               -- catalogue_products_title_trigram GIN index.
+               OR lower(p.title) %> $3)
           AND ($5::text IS NULL OR p.category=$5)
           AND ($6::boolean=false OR COALESCE(item.availability_state IN ('AVAILABLE','LOW_STOCK','VENDOR_CONFIRMS'),false))
           AND ($7::text IS NULL OR EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes fm WHERE fm.vendor_location_id=l.vendor_location_id AND fm.fulfilment_mode=$7))
           AND ($8::integer IS NULL OR ST_Distance(l.coordinates,a.coordinates) <= $8)
         ORDER BY is_available DESC,
                  ts_rank(p.search_document, plainto_tsquery('simple', $3)) DESC,
-                 similarity(lower(p.title), $3) DESC, p.title ASC
+                 similarity(lower(p.title), $3) DESC, p.title ASC,
+                 p.catalogue_product_id ASC
         LIMIT $9`,
       [
-        input.customer_address_id,
-        userId,
+        ...from.params,
         normalized,
         terms,
-        input.category ?? null,
-        input.available_only ?? false,
-        input.fulfilment_mode ?? null,
-        input.max_distance_meters ?? null,
+        options.category ?? null,
+        options.available_only ?? false,
+        options.fulfilment_mode ?? null,
+        options.max_distance_meters ?? null,
         limit,
       ],
     );
-    await this.#recordSearch(userId, normalized, input.term, now);
-    await recordEvent(this.#pool, {
-      user_id: userId,
-      event_type: result.rows.length === 0 ? 'SEARCH_ZERO_RESULT' : 'SEARCH_RUN',
-      result_count: result.rows.length,
-      context: input.context,
-      now,
-    });
     return Object.freeze(
       result.rows.map((row) =>
         Object.freeze({
@@ -343,13 +524,39 @@ export class CustomerDiscoveryService {
     );
   }
 
+  /**
+   * Requirement 5 of step 6.3 measures zero-result *and* search-to-cart outcomes.
+   * The zero-result half was recorded from the first slice; SEARCH_TO_CART existed
+   * only as a member of the event-type union and was never written by anything, so
+   * half the funnel this step asks for could not be measured at all.
+   *
+   * Attribution is explicit rather than inferred. Treating "this customer searched
+   * a few minutes ago" as conversion would invent a measurement definition nobody
+   * approved, and would silently count adds that had nothing to do with a search.
+   * The caller states the add came from search results; unattributed adds are not
+   * counted, so this metric is a lower bound rather than a guess.
+   */
+  async recordSearchToCart(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+  }): Promise<void> {
+    const userId = customer(input.context);
+    await recordEvent(this.#pool, {
+      context: input.context,
+      event_type: 'SEARCH_TO_CART',
+      now: input.now ?? new Date(),
+      result_count: 1,
+      user_id: userId,
+    });
+  }
+
   async recentSearches(input: {
     readonly context: RequestContext;
   }): Promise<readonly RecentSearch[]> {
     const userId = customer(input.context);
     const result = await this.#pool.query<{ display_term: string; last_searched_at: Date }>(
       `SELECT display_term, last_searched_at FROM marketplace.customer_recent_searches
-        WHERE user_id = $1 ORDER BY last_searched_at DESC LIMIT 10`,
+        WHERE user_id = $1 ORDER BY last_searched_at DESC, customer_recent_search_id ASC LIMIT 10`,
       [userId],
     );
     return Object.freeze(result.rows.map((row) => Object.freeze({ ...row })));
@@ -395,7 +602,30 @@ export class CustomerDiscoveryService {
     readonly context: RequestContext;
     readonly vendor_location_id: UuidV7;
   }): Promise<Storefront> {
-    customer(input.context);
+    const storefront = await this.#storefront(input.vendor_location_id);
+    await recordEvent(this.#pool, {
+      user_id: customer(input.context),
+      event_type: 'STORE_VIEWED',
+      context: input.context,
+      now: new Date(),
+    });
+    return storefront;
+  }
+
+  /**
+   * The same store page, before sign-in.
+   *
+   * The projection already carries nothing personal — it is parameterised by
+   * the location alone and joins `vendor_publication_cases` on PUBLISHED — so
+   * this is the store page `architecture.md` §6.1 asks to be public, minus the
+   * per-user view event.
+   */
+  async publicStorefront(input: { readonly vendor_location_id: UuidV7 }): Promise<Storefront> {
+    return this.#storefront(input.vendor_location_id);
+  }
+
+  async #storefront(vendorLocationId: UuidV7): Promise<Storefront> {
+    const input = { vendor_location_id: vendorLocationId };
     const location = await this.#pool.query<{
       location_name: string;
       profile_description: string | null;
@@ -408,10 +638,28 @@ export class CustomerDiscoveryService {
     }>(
       `SELECT l.location_name, l.profile_description, l.category,
               l.minimum_order_minor::text AS minimum_order_minor,
+              -- Same capacity test the store list applies, so a shop's own page
+              -- never offers a delivery mode the list withheld.
               COALESCE(
-                (SELECT array_agg(DISTINCT fulfilment_mode)
-                   FROM marketplace.vendor_location_fulfilment_modes
-                  WHERE vendor_location_id = l.vendor_location_id),
+                (SELECT array_agg(DISTINCT fm.fulfilment_mode)
+                   FROM marketplace.vendor_location_fulfilment_modes fm
+                  WHERE fm.vendor_location_id = l.vendor_location_id
+                    AND (
+                      fm.fulfilment_mode <> 'PLATFORM_DELIVERY'
+                      OR EXISTS (
+                        SELECT 1
+                          FROM marketplace.partner_availability pa
+                         WHERE pa.availability_state = 'ONLINE'
+                           AND ST_DWithin(pa.current_coordinates, l.coordinates, 5000)
+                           AND EXISTS (
+                             SELECT 1 FROM marketplace.partner_eligibilities pe
+                              WHERE pe.user_id = pa.partner_user_id
+                                AND pe.state = 'ELIGIBLE'
+                                AND (pe.eligible_until IS NULL
+                                     OR pe.eligible_until > clock_timestamp())
+                           )
+                      )
+                    )),
                 ARRAY[]::text[]
               ) AS fulfilment_modes
               ,COALESCE((SELECT json_agg(json_build_object('weekday',weekday,'opens_at',opens_at,'closes_at',closes_at) ORDER BY weekday,opens_at) FROM marketplace.vendor_location_operating_hours WHERE vendor_location_id=l.vendor_location_id),'[]') AS operating_hours
@@ -437,7 +685,7 @@ export class CustomerDiscoveryService {
       price_minor: string | null;
       availability_state: string | null;
       substitution_available: boolean;
-      image_references: string[];
+      image_ids: string[];
     }>(
       `SELECT p.catalogue_product_id, v.catalogue_variant_id, p.product_reference, p.title, p.category, p.unit_label,
               p.variable_weight, price.price_minor::text AS price_minor,
@@ -446,7 +694,13 @@ export class CustomerDiscoveryService {
                 SELECT 1 FROM marketplace.catalogue_product_substitutions s
                  WHERE s.catalogue_variant_id = v.catalogue_variant_id AND s.lifecycle_state = 'ACTIVE'
               ) AS substitution_available
-              ,COALESCE((SELECT array_agg(i.object_reference ORDER BY i.position) FROM marketplace.catalogue_product_images i WHERE i.catalogue_product_id=p.catalogue_product_id),ARRAY[]::text[]) AS image_references
+              ,COALESCE(
+                (SELECT array_agg(i.catalogue_image_id::text ORDER BY i.position)
+                   FROM marketplace.catalogue_product_images i
+                  WHERE i.catalogue_product_id = p.catalogue_product_id
+                    AND i.content_sha256 IS NOT NULL),
+                ARRAY[]::text[]
+              ) AS image_ids
          FROM marketplace.catalogue_products p
          LEFT JOIN marketplace.catalogue_product_variants v
            ON v.catalogue_product_id = p.catalogue_product_id AND v.lifecycle_state = 'ACTIVE'
@@ -466,13 +720,6 @@ export class CustomerDiscoveryService {
         ORDER BY p.title ASC, p.catalogue_product_id ASC`,
       [input.vendor_location_id],
     );
-
-    await recordEvent(this.#pool, {
-      user_id: customer(input.context),
-      event_type: 'STORE_VIEWED',
-      context: input.context,
-      now: new Date(),
-    });
 
     return Object.freeze({
       vendor_location_id: input.vendor_location_id,
@@ -500,7 +747,7 @@ export class CustomerDiscoveryService {
             availability_state: row.availability_state,
             is_stale: row.availability_state === null,
             substitution_available: row.substitution_available,
-            image_references: Object.freeze([...row.image_references]),
+            image_ids: Object.freeze([...row.image_ids]),
           }),
         ),
       ),
@@ -629,7 +876,7 @@ export class CustomerDiscoveryService {
     if (!pinCode.test(input.pin_code))
       throw new CustomerDiscoveryInputError('Pin code must be six digits');
     if (!storeName.test(input.store_name))
-      throw new CustomerDiscoveryInputError('Store name must be a synthetic label');
+      throw new CustomerDiscoveryInputError('Store name contains unsupported characters');
     const note = input.note?.trim() || null;
     if (note !== null && (note.length < 1 || note.length > 240))
       throw new CustomerDiscoveryInputError('Note must be between 1 and 240 characters');

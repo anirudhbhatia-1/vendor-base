@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -7,6 +8,7 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction } from './transaction.js';
 
 export type InventoryQuantityBasis = 'COUNTED' | 'VENDOR_CONFIRMS';
 export type InventoryAvailability = 'AVAILABLE' | 'LOW_STOCK' | 'OUT_OF_STOCK' | 'VENDOR_CONFIRMS';
@@ -36,6 +38,26 @@ export interface InventoryReservationRecord {
   readonly source_reference: string;
   readonly vendor_location_id: UuidV7;
   readonly version: number;
+}
+
+/**
+ * What a stock line looks like to the shopkeeper who owns it.
+ *
+ * `inventory_items` is keyed by `(vendor_location_id, product_reference)` and
+ * carries no link to the catalogue, while the checkout quote joins the two on
+ * exactly that pair — with an inner join. A stock line whose reference matches
+ * no catalogue product is therefore invisible to every customer, and the
+ * console showed it identically to a sellable one. This read model carries the
+ * catalogue side so the difference can be stated on screen.
+ */
+export interface VendorStockLine extends InventoryItemRecord {
+  readonly catalogue_product_id: UuidV7 | null;
+  readonly catalogue_title: string | null;
+  readonly catalogue_lifecycle_state: string | null;
+  readonly unit_label: string | null;
+  readonly price_minor: number | null;
+  /** Units spoken for by carts and unfulfilled orders, not yet collected. */
+  readonly held_quantity: number;
 }
 
 export class InventoryInputError extends Error {
@@ -85,9 +107,9 @@ interface ReservationRow {
   version: number;
 }
 
-const PRODUCT_REFERENCE = /^SYNTH-PROD-[A-Z0-9-]{4,64}$/;
-const SOURCE_REFERENCE = /^SYNTH-(?:CHECKOUT|ORDER)-[A-Z0-9-]{4,64}$/;
-const SYNTHETIC_NAME = /^SYNTH [A-Za-z0-9][A-Za-z0-9 &'().-]{1,118}$/;
+const PRODUCT_REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const SOURCE_REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const DISPLAY_NAME = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'().,/%+-]{1,118}$/u;
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
 
 function actor(
@@ -128,22 +150,22 @@ function reason(value: string): string {
 
 function productReference(value: string): string {
   if (!PRODUCT_REFERENCE.test(value)) {
-    throw new InventoryInputError('Product reference must be explicitly synthetic');
+    throw new InventoryInputError('Product reference is invalid');
   }
   return value;
 }
 
 function sourceReference(value: string): string {
   if (!SOURCE_REFERENCE.test(value)) {
-    throw new InventoryInputError('Reservation source reference must be explicitly synthetic');
+    throw new InventoryInputError('Reservation source reference is invalid');
   }
   return value;
 }
 
 function displayName(value: string): string {
   const normalized = value.trim().replace(/\s+/g, ' ');
-  if (!SYNTHETIC_NAME.test(normalized)) {
-    throw new InventoryInputError('Inventory display name must be explicitly synthetic');
+  if (!DISPLAY_NAME.test(normalized)) {
+    throw new InventoryInputError('Inventory display name contains unsupported characters');
   }
   return normalized;
 }
@@ -198,21 +220,6 @@ function contextIds(context: RequestContext) {
     correlationId: parseUuidV7(context.correlation_id),
     requestId: parseRequestId(context.request_id),
   };
-}
-
-async function transaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
 }
 
 async function appendEvent(
@@ -389,7 +396,7 @@ async function expireLocked(
 export class InventoryReservationService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-inventory-reservations',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
@@ -600,6 +607,77 @@ export class InventoryReservationService {
       [input.vendor_location_id],
     );
     return Object.freeze(result.rows.map(itemRecord));
+  }
+
+  /**
+   * The stock list with its catalogue counterpart attached.
+   *
+   * Held quantity is counted here rather than fetched per row: the console
+   * previously needed a click per line to reveal soft holds, so the number
+   * that explains "8 on hand but customers can only buy 6" was hidden behind
+   * the one interaction nobody performs.
+   */
+  async listLocationStock(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+  }): Promise<readonly VendorStockLine[]> {
+    actor(input.context, ['admin', 'vendor_staff']);
+    const result = await this.#pool.query<
+      ItemRow & {
+        catalogue_product_id: string | null;
+        catalogue_title: string | null;
+        catalogue_lifecycle_state: string | null;
+        unit_label: string | null;
+        price_minor: string | null;
+        held_quantity: string;
+      }
+    >(
+      `SELECT i.*,
+              p.catalogue_product_id,
+              p.title AS catalogue_title,
+              p.lifecycle_state AS catalogue_lifecycle_state,
+              p.unit_label,
+              price.price_minor,
+              COALESCE(held.quantity, 0) AS held_quantity
+         FROM marketplace.inventory_items i
+         LEFT JOIN marketplace.catalogue_products p
+           ON p.vendor_location_id = i.vendor_location_id
+          AND p.product_reference = i.product_reference
+         LEFT JOIN LATERAL (
+           SELECT cp.price_minor
+             FROM marketplace.catalogue_product_variants v
+             JOIN marketplace.catalogue_prices cp
+               ON cp.catalogue_variant_id = v.catalogue_variant_id
+              AND cp.effective_until IS NULL
+            WHERE v.catalogue_product_id = p.catalogue_product_id
+            ORDER BY cp.price_minor ASC
+            LIMIT 1
+         ) price ON true
+         LEFT JOIN LATERAL (
+           SELECT SUM(r.quantity) AS quantity
+             FROM marketplace.inventory_reservations r
+            WHERE r.inventory_item_id = i.inventory_item_id
+              AND r.reservation_state IN ('SOFT_HELD', 'PROVISIONAL', 'COMMITTED')
+         ) held ON true
+        WHERE i.vendor_location_id = $1
+        ORDER BY i.display_name, i.inventory_item_id`,
+      [input.vendor_location_id],
+    );
+    return Object.freeze(
+      result.rows.map((row) =>
+        Object.freeze({
+          ...itemRecord(row),
+          catalogue_lifecycle_state: row.catalogue_lifecycle_state,
+          catalogue_product_id: row.catalogue_product_id
+            ? parseUuidV7(row.catalogue_product_id)
+            : null,
+          catalogue_title: row.catalogue_title,
+          held_quantity: Number(row.held_quantity),
+          price_minor: row.price_minor === null ? null : Number(row.price_minor),
+          unit_label: row.unit_label,
+        }),
+      ),
+    );
   }
 
   async listReservations(input: {

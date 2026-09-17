@@ -1,3 +1,4 @@
+import { createDatabasePool } from '@neighbourhood-store/database';
 import {
   Injectable,
   type OnApplicationBootstrap,
@@ -13,57 +14,95 @@ import {
   createRequestContext,
   createUuidV7,
 } from '@neighbourhood-store/domain-types';
+import { Queue, Worker } from 'bullmq';
 import { Pool } from 'pg';
 import { workerLogger } from './json-logger.js';
+import { closeQueuesWithin, reportQueueErrors, requireQueueReady } from './queue-readiness.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 
 const QUEUE = 'finance.payout';
 const JOB = 'finance.payout.daily_batch';
+type FinanceTrigger = { readonly kind: 'durable-job-claim' };
 
 @Injectable()
 export class FinancePayoutWorkerService implements OnApplicationBootstrap, OnApplicationShutdown {
+  readonly #shutdownGraceMs: number;
   readonly #workerId = createUuidV7();
   readonly #pool: Pool;
   readonly #money: CompleteMoneyLifecycleService;
-  #poller: NodeJS.Timeout | undefined;
+  readonly #queue: Queue<FinanceTrigger>;
+  readonly #queueWorker: Worker<FinanceTrigger>;
+  readonly #queueUrl: string;
   #running = false;
+  #stopping = false;
 
   constructor() {
     const config = loadRuntimeConfig();
-    this.#pool = new Pool({
+    this.#shutdownGraceMs = config.shutdownGraceMs;
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-finance-worker',
       connectionString: config.databaseUrl,
       max: 4,
     });
     this.#money = new CompleteMoneyLifecycleService({ connection_string: config.databaseUrl });
+    const queueOptions = {
+      connection: { url: config.valkeyUrl, maxRetriesPerRequest: null },
+      prefix: config.queuePrefix,
+    } as const;
+    this.#queue = new Queue<FinanceTrigger>('finance-scheduler', queueOptions);
+    this.#queueWorker = new Worker<FinanceTrigger>('finance-scheduler', async () => this.#poll(), {
+      ...queueOptions,
+      concurrency: 2,
+      maxStalledCount: 2,
+    });
+    reportQueueErrors({
+      component: 'finance-scheduler',
+      emitters: [this.#queue, this.#queueWorker],
+      logger: workerLogger,
+      queueUrl: config.valkeyUrl,
+    });
+    this.#queueUrl = config.valkeyUrl;
   }
 
-  onApplicationBootstrap(): void {
-    void this.#scheduleAndPoll();
-    this.#poller = setInterval(() => void this.#poll(), 15_000);
+  async onApplicationBootstrap(): Promise<void> {
+    await requireQueueReady({
+      queueUrl: this.#queueUrl,
+      ready: [this.#queue.waitUntilReady(), this.#queueWorker.waitUntilReady()],
+    });
+    await this.#money.scheduleDailyPayoutJob({ context: this.#systemContext() });
+    await this.#queue.upsertJobScheduler(
+      'finance-durable-job-claim',
+      { every: 15_000 },
+      { name: 'finance.durable-job-claim', data: { kind: 'durable-job-claim' } },
+    );
+    await this.#queue.add(
+      'finance.durable-job-claim',
+      { kind: 'durable-job-claim' },
+      { jobId: `startup-${this.#workerId}`, removeOnComplete: true },
+    );
+    workerLogger.event('finance.payout.worker.ready', {
+      local_schedule: '18:00',
+      queue: QUEUE,
+      timezone: 'Asia/Kolkata',
+    });
   }
 
   async onApplicationShutdown(): Promise<void> {
-    if (this.#poller) clearInterval(this.#poller);
+    this.#stopping = true;
+    await closeQueuesWithin({
+      close: async () => {
+        await this.#queueWorker.close();
+      },
+      graceMs: this.#shutdownGraceMs,
+      component: QUEUE,
+      logger: workerLogger,
+    });
+    await this.#queue.close();
     await Promise.all([this.#pool.end(), this.#money.close()]);
   }
 
-  async #scheduleAndPoll(): Promise<void> {
-    try {
-      await this.#money.scheduleDailyPayoutJob({ context: this.#systemContext() });
-      await this.#poll();
-      workerLogger.event('finance.payout.worker.ready', {
-        local_schedule: '18:00',
-        queue: QUEUE,
-        timezone: 'Asia/Kolkata',
-      });
-    } catch (error) {
-      workerLogger.error(error instanceof Error ? error : new Error('Finance worker setup failed'));
-    }
-  }
-
   async #poll(): Promise<void> {
-    if (this.#running) return;
+    if (this.#running || this.#stopping) return;
     this.#running = true;
     try {
       const result = await runDurableJobBatch(this.#pool, {

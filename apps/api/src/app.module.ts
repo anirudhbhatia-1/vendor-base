@@ -1,3 +1,4 @@
+import { createClient } from '@supabase/supabase-js';
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { HealthController } from './health.controller.js';
@@ -9,7 +10,10 @@ import {
   IdentityAccessService,
   IdentityPreferencesService,
   IdentitySessionService,
+  IdentityPasswordService,
   LocalProtectedObjectStorage,
+  type ProtectedObjectStorage,
+  SupabaseProtectedObjectStorage,
   OtpIdentityService,
   VendorOnboardingService,
   VendorPublicationService,
@@ -32,11 +36,32 @@ import {
   PartnerAvailabilityService,
   PartnerWaitPolicyService,
   LocalNotificationService,
+  LocalFakeMoneyProvider,
   ConfigurationAdminService,
+  AdminOnboardingService,
+  VendorSettingsService,
+  GatedCapabilityService,
+  VendorNetworkService,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
-import { ACCESS_IDENTITY, OTP_IDENTITY, SESSION_IDENTITY } from './tokens.js';
+import { AdminOnboardingController } from './admin-onboarding.controller.js';
+import { PasswordAuthController } from './password-auth.controller.js';
+import { VendorLocationSettingsController } from './vendor-settings.controller.js';
+import { AdminZonesController } from './admin-zones.controller.js';
+import { GatedCapabilitiesController } from './gated-capabilities.controller.js';
+import { SupabaseAuthService } from './supabase-auth.service.js';
+import { WhoAmIController } from './whoami.controller.js';
+import {
+  ACCESS_IDENTITY,
+  ADMIN_ONBOARDING,
+  IDENTITY_PASSWORD,
+  OTP_IDENTITY,
+  SESSION_IDENTITY,
+  GATED_CAPABILITIES,
+  VENDOR_NETWORK,
+  VENDOR_SETTINGS,
+} from './tokens.js';
 import { AuthorizationGuard } from './authorization.guard.js';
 import { AuthenticatedActorInterceptor } from './authenticated-actor.interceptor.js';
 import { AuthorizationEnforcementService } from './authorization-enforcement.service.js';
@@ -50,6 +75,7 @@ import { INVENTORY_RESERVATIONS } from './tokens.js';
 import { ASSIGNMENT_CUSTODY } from './tokens.js';
 import {
   AdminAssignmentController,
+  CustomerDeliveryRatingController,
   PartnerAssignmentController,
 } from './assignment-custody.controller.js';
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
@@ -90,14 +116,19 @@ import {
   VendorSettingsController,
 } from './vendor-staff.controller.js';
 import {
+  VendorInsightsController,
   VendorOrderFulfilmentController,
   CustomerDecisionsController,
   CustomerOrderHistoryController,
+  CustomerSupportCaseController,
+  PartnerHandoverController,
 } from './vendor-fulfilment.controller.js';
 import {
   PartnerApplicationController,
   AdminPartnerApplicationController,
+  AdminPartnerExceptionsController,
   PartnerEarningsController,
+  PartnerStandingController,
   AdminPartnerDisputeController,
   PartnerFieldOpsController,
 } from './partner-lifecycle.controller.js';
@@ -116,6 +147,11 @@ import {
   AdminCatalogueModerationController,
   CustomerAvailabilityController,
 } from './catalogue-freshness-moderation.controller.js';
+import {
+  CustomerCatalogueImageController,
+  CustomerCategoriesController,
+  PublicDiscoveryController,
+} from './customer-catalogue.controller.js';
 
 @Module({
   controllers: [
@@ -125,6 +161,7 @@ import {
     VendorOnboardingController,
     VendorPublicationController,
     VendorInventoryController,
+    CustomerDeliveryRatingController,
     PartnerAssignmentController,
     AdminAssignmentController,
     MoneyLifecycleController,
@@ -139,12 +176,17 @@ import {
     VendorStaffController,
     VendorAccessController,
     VendorSettingsController,
+    VendorInsightsController,
     VendorOrderFulfilmentController,
     CustomerDecisionsController,
     CustomerOrderHistoryController,
+    CustomerSupportCaseController,
+    PartnerHandoverController,
     PartnerApplicationController,
     AdminPartnerApplicationController,
+    AdminPartnerExceptionsController,
     PartnerEarningsController,
+    PartnerStandingController,
     AdminPartnerDisputeController,
     PartnerFieldOpsController,
     CompleteMoneyAdminController,
@@ -160,11 +202,29 @@ import {
     AdminAccessController,
     NotificationsController,
     ConfigurationController,
+    AdminOnboardingController,
+    PasswordAuthController,
+    CustomerCatalogueImageController,
+    CustomerCategoriesController,
+    PublicDiscoveryController,
+    VendorLocationSettingsController,
+    AdminZonesController,
+    GatedCapabilitiesController,
+    WhoAmIController,
   ],
   providers: [
     LifecycleService,
     OtpLifecycleService,
     AuthorizationEnforcementService,
+    {
+      provide: SupabaseAuthService,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new SupabaseAuthService({
+          supabase_url: config.supabaseUrl,
+          database_url: config.databaseUrl,
+        }),
+    },
     { provide: APP_FILTER, useClass: RequestExceptionFilter },
     { provide: APP_GUARD, useClass: AuthorizationGuard },
     { provide: APP_INTERCEPTOR, useClass: AuthenticatedActorInterceptor },
@@ -207,19 +267,32 @@ import {
     {
       provide: PROTECTED_OBJECT_STORAGE,
       inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new LocalProtectedObjectStorage({
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>): ProtectedObjectStorage => {
+        if (config.objectStorageDriver === 'filesystem') {
+          return new LocalProtectedObjectStorage({
+            grant_key: config.objectStorageGrantKey,
+            root_directory: config.objectStorageRoot,
+          });
+        }
+        // loadRuntimeConfig has already refused this driver without buckets; the
+        // check is here so a future edit cannot reach the client with none.
+        if (!config.objectStorageBuckets || !config.supabaseUrl || !config.supabaseServiceRoleKey) {
+          throw new Error('The supabase object-storage driver needs its buckets, URL and key');
+        }
+        return new SupabaseProtectedObjectStorage({
+          buckets: config.objectStorageBuckets,
           grant_key: config.objectStorageGrantKey,
-          root_directory: config.objectStorageRoot,
-        }),
+          storage: createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
+            auth: { persistSession: false },
+          }).storage,
+        });
+      },
     },
     {
       provide: VENDOR_ONBOARDING,
       inject: [RUNTIME_CONFIG, PROTECTED_OBJECT_STORAGE],
-      useFactory: (
-        config: ReturnType<typeof loadRuntimeConfig>,
-        storage: LocalProtectedObjectStorage,
-      ) => new VendorOnboardingService({ connection_string: config.databaseUrl, storage }),
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, storage: ProtectedObjectStorage) =>
+        new VendorOnboardingService({ connection_string: config.databaseUrl, storage }),
     },
     {
       provide: VENDOR_PUBLICATION,
@@ -241,9 +314,12 @@ import {
     },
     {
       provide: CATALOGUE_PRODUCTS,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new CatalogueProductService({ connection_string: config.databaseUrl }),
+      inject: [RUNTIME_CONFIG, PROTECTED_OBJECT_STORAGE],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, storage: ProtectedObjectStorage) =>
+        new CatalogueProductService({
+          connection_string: config.databaseUrl,
+          storage,
+        }),
     },
     {
       provide: CUSTOMER_ADDRESSES,
@@ -267,13 +343,23 @@ import {
       provide: GROUPED_CHECKOUT,
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new GroupedCheckoutService({ connection_string: config.databaseUrl }),
+        new GroupedCheckoutService({
+          connection_string: config.databaseUrl,
+          provider: new LocalFakeMoneyProvider({
+            clearing_account_reference: config.providerClearingAccountReference,
+            webhook_key: config.paymentWebhookKey,
+          }),
+        }),
     },
     {
       provide: VENDOR_STAFF,
       inject: [RUNTIME_CONFIG, ACCESS_IDENTITY],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>, access: IdentityAccessService) =>
-        new VendorStaffService({ connection_string: config.databaseUrl, access }),
+        new VendorStaffService({
+          access,
+          connection_string: config.databaseUrl,
+          hash_key: config.otpHashKey,
+        }),
     },
     {
       provide: VENDOR_FULFILMENT,
@@ -335,7 +421,13 @@ import {
       provide: MONEY_LIFECYCLE,
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new MoneyLifecycleService({ connection_string: config.databaseUrl }),
+        new MoneyLifecycleService({
+          connection_string: config.databaseUrl,
+          provider: new LocalFakeMoneyProvider({
+            clearing_account_reference: config.providerClearingAccountReference,
+            webhook_key: config.paymentWebhookKey,
+          }),
+        }),
     },
     {
       provide: COMPLETE_MONEY_LIFECYCLE,
@@ -348,6 +440,46 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new AdminControlPlaneService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: IDENTITY_PASSWORD,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new IdentityPasswordService({
+          connection_string: config.databaseUrl,
+          hash_key: config.otpHashKey,
+        }),
+    },
+    {
+      provide: ADMIN_ONBOARDING,
+      inject: [RUNTIME_CONFIG, IDENTITY_PASSWORD],
+      useFactory: (
+        config: ReturnType<typeof loadRuntimeConfig>,
+        passwords: IdentityPasswordService,
+      ) =>
+        new AdminOnboardingService({
+          connection_string: config.databaseUrl,
+          hash_key: config.otpHashKey,
+          password_service: passwords,
+        }),
+    },
+    {
+      provide: VENDOR_SETTINGS,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new VendorSettingsService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: VENDOR_NETWORK,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new VendorNetworkService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: GATED_CAPABILITIES,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new GatedCapabilityService({ connection_string: config.databaseUrl }),
     },
   ],
 })

@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   parseRequestId,
   parseUuidV7,
@@ -56,7 +57,7 @@ export class LocaleRegistryService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-locale-registry',
       max: 4,

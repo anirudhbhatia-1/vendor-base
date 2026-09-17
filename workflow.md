@@ -1,7 +1,7 @@
 # End-to-End Workflow Architecture — Neighbourhood Store Marketplace
 
 **Document status:** Product and implementation workflow reference
-**Version:** v0.2 · synchronized 13 August 2026
+**Version:** v0.3 · synchronized 6 September 2026
 **Surfaces:** Customer App/Web, Vendor Portal, Delivery Partner App/Portal, Admin Console
 **Launch model:** One city, selected zones, multi-store checkout with vendor-scoped orders, prepaid payments, pickup/vendor delivery/platform delivery
 **Languages:** English and Hindi for every core workflow
@@ -57,7 +57,7 @@ flowchart LR
     M --> P["Order completed"]
     N --> P
     O --> P
-    P --> Q["Capture, ledger, vendor fee, earnings"]
+    P --> Q["Reconcile capture/refunds, ledger, vendor fee, earnings"]
     Q --> R["Vendor and partner payouts"]
     R --> S["Reconciliation, rating, support closure, audit"]
 ```
@@ -67,7 +67,7 @@ flowchart LR
 ### 4.1 First entry
 
 1. The app opens in a white/light theme and offers **English / हिंदी**.
-2. The user chooses a role-specific entry: Customer, Vendor, Delivery Partner, or Admin.
+2. The user opens the separate Customer, Vendor, Delivery Partner, or Admin PWA/Android app. Selecting a role never grants membership or permissions.
 3. The platform loads only the navigation and actions allowed for that role.
 4. Phone OTP is used for customers, vendors, and delivery partners. Admins use the approved staff authentication flow with role-based access.
 5. OTP requests are rate-limited. OTP values, tokens, full addresses, bank details, and prescriptions are never logged.
@@ -194,8 +194,8 @@ stateDiagram-v2
 
 ### 6.5 Order placement and vendor response
 
-1. Payment gateway authorizes the combined quoted amount.
-2. The platform atomically creates the checkout group, one order per vendor, immutable line/fee allocations, payment reference, first order events, and outbox events.
+1. The platform atomically locks the cart version and creates holds, checkout group, child-order drafts, allocation snapshots, payment attempt, ledger intents and outbox before gateway calls.
+2. Provider order creation occurs outside that transaction. Hosted checkout, signature verification, durable webhooks and reconciliation confirm capture before vendor release. Unknown payment remains pending; late payment cannot resurrect expired holds. See D-15.
 3. Customer sees the grouped checkout as `Processing`; each vendor sees only its own `Placed` order and receives a high-priority notification with its requested items, quantities, units, notes, substitution preferences, fulfilment method, and required response time.
 4. Each vendor independently accepts with a preparation estimate or declines with a reason.
 5. The initial response target is five minutes unless configured otherwise.
@@ -209,7 +209,7 @@ stateDiagram-v2
 4. If the customer's saved rule already permits the change within its limit, the platform applies it and notifies the customer.
 5. Otherwise, the order moves to `Awaiting customer decision`. The customer receives the original item, proposed item/weight, price difference, and decision deadline.
 6. Customer approves or rejects. No response follows the customer's preselected fallback; if none exists, the item is removed or the order is escalated according to published policy.
-7. The payment module adjusts planned capture or creates a traceable partial-refund path. Material changes are never hidden.
+7. The payment module refunds reductions or requests an explicitly approved top-up within the newly approved cap. Refusal follows the published remove-line/cancellation policy. Material changes are never hidden.
 8. Vendor completes picking, seals/packages the order, records package count and handling notes, and marks it ready.
 
 ### 6.7 Fulfilment branch
@@ -217,7 +217,7 @@ stateDiagram-v2
 #### Customer pickup
 
 1. Customer receives `Ready for pickup`, store directions, hours, and pickup instructions.
-2. Customer or approved collector presents order ID/OTP.
+2. Customer or approved collector identifies the order and presents its valid pickup OTP. An order ID alone never authorizes handover.
 3. Vendor verifies the code, hands over the correct package count, and marks `Picked up`.
 4. Platform moves the order to `Completed` after payment and integrity checks.
 
@@ -415,11 +415,11 @@ Every transition records previous state, next state, actor, role, timestamp, rea
 ### 10.3 Payment and ledger workflow
 
 1. Every vendor quote reserves its fee formula/version and intended amount; the checkout-group quote records the combined authorization amount.
-2. Checkout authorizes payment once; duplicate requests reuse the same checkout group, vendor orders, and payment result.
+2. Checkout persists its attempt before provider calls and confirms capture before vendor release. Duplicate requests reuse the attempt/result; unknown outcomes reconcile before retrying money movement.
 3. Immutable allocation records map items, taxes, fees, discounts, tips, authorization buffer, refunds, and final capture amounts to vendor orders.
 4. Approved substitutions/weights determine each vendor order's final capturable allocation.
 5. Delivery/pickup proof triggers that vendor order's completion but does not hide an unresolved checkout-level payment mismatch.
-6. Payment is captured as the aggregate eligible amount, or through a provider-approved equivalent, under the approved completion rule.
+6. Fulfilment determines settlement eligibility, not delayed initial capture. Reduced totals refund child allocations; higher totals require approved and confirmed top-up under D-15. Repeated partial captures are not assumed.
 7. Append-only ledger entries reconcile checkout-level customer payment with per-order vendor receivable, partner earning, platform/vendor fee, delivery revenue, tax, discount, tip, refund, and adjustment.
 8. Normal vendor fee is posted only for an eligible successfully completed vendor order. A sibling order's failure does not change that result.
 9. Vendor and partner amounts become payout-eligible after the configured dispute/completion window.
@@ -607,3 +607,9 @@ An order is operationally finished only when all applicable checks pass:
 The current workflow includes vegetables and kirana first, with bakery, dairy, meat, and specialty stores added only after operational validation. Multi-store checkout is supported through separate vendor orders and separate fulfilment promises. Automatic combined multi-pickup routing, pharmacy ordering, COD, automated route optimization, platform-owned stock, subscriptions, and a 10-minute promise remain outside the approved MVP.
 
 Future features should extend these state machines and audit rules rather than bypass them. Any change to pricing, maximum distance, pharmacy, COD, payment, payout, cancellation, data access, or business model requires product-owner approval and synchronized updates to the PRD, design, architecture, rules, tests, and this document.
+
+## Current staging contract and verification status
+
+[D-15](docs/decisions/D-15.md) is the synchronized current-workstream decision for eight clients, staging providers, TLS/BFF boundaries, pre-payment durable checkout, weight caps/top-ups, role invitations, guest-cart merge, internal publication testing and privacy controls. Earlier conflicting local-only or deferred-provider wording is historical, not an active implementation restriction. Public production remains gated.
+
+Scope labels are not completion claims. See the [phase conformance audit](docs/engineering/phase-conformance-audit.md) for reviewed steps, executable evidence and remaining gaps. Customer final prices and charge components remain visible; internal fee formulas/margins do not enter customer APIs. Moving maps, masked calling, POS sync, COD, pharmacy and consolidation remain deferred/gated.

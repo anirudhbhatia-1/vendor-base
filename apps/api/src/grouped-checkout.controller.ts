@@ -1,52 +1,31 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
   Get,
   Headers,
   Inject,
-  NotFoundException,
   Param,
   Post,
   Query,
 } from '@nestjs/common';
-import {
-  CheckoutConflictError,
-  CheckoutInputError,
-  CheckoutNotFoundError,
-  CheckoutPaymentDeclinedError,
-  GroupedCheckoutService,
-  type FakeProviderScenario,
-} from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { GroupedCheckoutService, type PaymentMethod } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { GROUPED_CHECKOUT } from './tokens.js';
-
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function uuid(value: unknown): UuidV7 {
-  try {
-    return parseUuidV7(String(value));
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function scenario(value: unknown): FakeProviderScenario {
-  if (!['SUCCESS', 'DECLINE', 'UNKNOWN', 'MALFORMED'].includes(String(value)))
-    throw new BadRequestException();
-  return String(value) as FakeProviderScenario;
-}
-function map(error: unknown): never {
-  if (error instanceof CheckoutInputError) throw new BadRequestException(error.message);
-  if (error instanceof CheckoutNotFoundError) throw new NotFoundException();
-  if (error instanceof CheckoutConflictError) throw new ConflictException(error.message);
-  if (error instanceof CheckoutPaymentDeclinedError)
-    throw new ConflictException('Synthetic payment declined');
-  throw error;
+import { object, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
+/**
+ * The prepaid method, validated server-side.
+ *
+ * Absent is accepted — a client that has not been updated still checks out —
+ * but an unrecognised value is rejected rather than stored. `COD` therefore
+ * fails here as well as at the database constraint (GAT-01).
+ */
+function paymentMethod(value: unknown): PaymentMethod | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!['UPI', 'CARD', 'WALLET'].includes(String(value))) throw new BadRequestException();
+  return String(value) as PaymentMethod;
 }
 const checkout = RequireAuthorization({
   capability: 'customer.checkout.manage',
@@ -63,7 +42,7 @@ export class GroupedCheckoutController {
         cart_id: uuid(object(raw).cart_id),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
   @Post('groups') @checkout async place(@Body() raw: unknown) {
@@ -71,14 +50,15 @@ export class GroupedCheckoutController {
     try {
       const idempotencyKey =
         typeof value.idempotency_key === 'string' ? value.idempotency_key : undefined;
+      const method = paymentMethod(value.payment_method);
       return await this.service.place({
         context: currentRequestContext(),
         checkout_quote_id: uuid(value.checkout_quote_id),
-        provider_scenario: scenario(value.provider_scenario),
+        ...(method === undefined ? {} : { payment_method: method }),
         ...(idempotencyKey === undefined ? {} : { idempotency_key: idempotencyKey }),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
   @Get('groups/:checkout_group_id') @checkout async get(@Param('checkout_group_id') id: string) {
@@ -88,7 +68,7 @@ export class GroupedCheckoutController {
         checkout_group_id: uuid(id),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -107,12 +87,12 @@ export class GroupedCheckoutController {
         ...(rawLimit ? { limit: Number(rawLimit) } : {}),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
   @Post('provider-webhook')
-  async webhook(@Body() raw: unknown, @Headers('x-synthetic-signature') signature: string) {
+  async webhook(@Body() raw: unknown, @Headers('x-provider-signature') signature: string) {
     const value = object(raw);
     try {
       return await this.service.receiveWebhook({
@@ -124,7 +104,7 @@ export class GroupedCheckoutController {
         signature: signature ?? '',
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }

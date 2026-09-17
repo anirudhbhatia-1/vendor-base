@@ -2,7 +2,7 @@ import { withDatabaseClient } from '../src/client.js';
 import {
   loadDatabaseConfig,
   parseTarget,
-  requireOnlineTestMigrationConfirmation,
+  requireRemoteMigrationConfirmation,
 } from '../src/config.js';
 import { migrateDown, migrateUp, migrationStatus } from '../src/migrations.js';
 import { writeEvent } from '../src/output.js';
@@ -15,13 +15,13 @@ const steps = stepsIndex === -1 ? 1 : Number(process.argv[stepsIndex + 1]);
 
 await withDatabaseClient(config, async (client) => {
   if (command === 'up') {
-    requireOnlineTestMigrationConfirmation(target);
+    requireRemoteMigrationConfirmation(target);
     const count = await migrateUp(client);
     writeEvent('database.migration.up.complete', { count, target });
     return;
   }
   if (command === 'down') {
-    requireOnlineTestMigrationConfirmation(target);
+    requireRemoteMigrationConfirmation(target);
     const count = await migrateDown(client, steps);
     writeEvent('database.migration.down.complete', { count, target });
     return;

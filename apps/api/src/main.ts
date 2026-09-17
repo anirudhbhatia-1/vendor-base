@@ -1,8 +1,10 @@
+import './telemetry.js';
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from './app.module.js';
 import { apiLogger } from './json-logger.js';
+import { allowedMethods, isAllowedOrigin, parseConfiguredOrigins } from './cors.js';
 import { RUNTIME_CONFIG, type RuntimeConfig } from './runtime-config.js';
 
 async function bootstrap(): Promise<void> {
@@ -12,9 +14,14 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, {
     logger: apiLogger,
   });
+  const configuredOrigins = parseConfiguredOrigins(process.env.CORS_ALLOWED_ORIGINS);
   app.enableCors({
-    methods: ['GET', 'POST', 'PUT'],
-    origin: /^http:\/\/(?:127\.0\.0\.1|localhost):31(?:00|01|02|03)$/,
+    methods: [...allowedMethods],
+    origin: (origin, callback) => {
+      // A same-origin or non-browser request sends no Origin header.
+      if (!origin) callback(null, true);
+      else callback(null, isAllowedOrigin(origin, configuredOrigins));
+    },
   });
   app.enableShutdownHooks(['SIGINT', 'SIGTERM']);
 

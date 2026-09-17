@@ -10,9 +10,7 @@ import {
   AdminControlPlaneService,
   AdminControlStateError,
 } from '../src/admin-control-plane.js';
-function check(value: unknown, message: string): asserts value {
-  if (!value) throw new Error(message);
-}
+import { check } from './verify-support.js';
 export async function verifyAdminControlPlane(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, application_name: 'admin-control-verifier' });
   const service = new AdminControlPlaneService({ connection_string: connectionString });

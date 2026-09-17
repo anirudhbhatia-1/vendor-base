@@ -1,28 +1,25 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { useRouter } from 'next/navigation';
+import type {
+  CustomerSettings,
+  Language,
+  NotificationPreference,
+} from '@neighbourhood-store/contracts';
+import { ApiError } from '@neighbourhood-store/contracts';
+import {
+  type BrowserSession,
+  customerApiClient,
+  requestCustomerOtp,
+  restoreCustomerSession,
+  signOutCustomer,
+  storeCustomerSession,
+  verifyCustomerOtp,
+} from './customer-session';
+import { customerLoginReturn } from './login-return';
 
 type Step = 'phone' | 'code' | 'verified';
-type SessionTokens = {
-  access_expires_at: string;
-  access_token: string;
-  refresh_token: string;
-  session_id: string;
-};
-type Consent = { consent_kind: string; decision: 'GRANTED' | 'WITHDRAWN' };
-type NotificationPreference = {
-  channel: 'PUSH' | 'SMS';
-  effective_enabled: boolean;
-  notification_kind: 'MARKETING' | 'ORDER_STATUS' | 'SECURITY' | 'SUPPORT';
-  preference_enabled: boolean | null;
-  user_controllable: boolean;
-  version: number;
-};
-type CustomerSettings = {
-  consents: Consent[];
-  notifications: NotificationPreference[];
-  profile: { display_name: string | null; language: 'EN' | 'HI'; version: number };
-};
 
 function uuidV7(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -37,31 +34,43 @@ function uuidV7(): string {
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:3001';
-
-export function SignInPanel() {
+export function SignInPanel({
+  redirectAfterSignIn = false,
+  returnTo = '/',
+}: {
+  redirectAfterSignIn?: boolean;
+  returnTo?: string;
+}) {
+  const router = useRouter();
   const [step, setStep] = useState<Step>('phone');
-  const [phone, setPhone] = useState('SYNTH-PHONE-CUSTOMER-001');
+  const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [challengeId, setChallengeId] = useState('');
   const [deviceId] = useState(() => uuidV7());
   const [busy, setBusy] = useState(false);
-  const [session, setSession] = useState<SessionTokens | null>(null);
+  const [session, setSession] = useState<BrowserSession | null>(null);
   const [settings, setSettings] = useState<CustomerSettings | null>(null);
   const [displayName, setDisplayName] = useState('');
-  const [language, setLanguage] = useState<'EN' | 'HI'>('EN');
-  const [message, setMessage] = useState('Use a fictional identifier. No SMS will be sent.');
+  const [language, setLanguage] = useState<Language>('EN');
+  const [message, setMessage] = useState('Enter your mobile number to continue.');
+  const [messageIsError, setMessageIsError] = useState(false);
+  const [accessDenied, setAccessDenied] = useState(false);
 
-  async function authenticatedFetch(token: string, path: string, init?: RequestInit) {
-    return fetch(`${apiUrl}${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(init?.body ? { 'content-type': 'application/json' } : {}),
-        ...init?.headers,
-      },
-    });
-  }
+  /**
+   * Status and failure shared one polite live region, so a screen reader queued
+   * "that code was wrong" behind whatever it was already saying. Verification has a
+   * bounded attempt count and the code expires, so a missed failure is not a cosmetic
+   * problem: it can cost the attempt that locks the account out. Failures announce
+   * assertively; ordinary progress stays polite so it does not interrupt.
+   */
+  const showStatus = (text: string) => {
+    setMessageIsError(false);
+    setMessage(text);
+  };
+  const showError = (text: string) => {
+    setMessageIsError(true);
+    setMessage(text);
+  };
 
   function acceptSettings(next: CustomerSettings) {
     setSettings(next);
@@ -69,38 +78,64 @@ export function SignInPanel() {
     setLanguage(next.profile.language);
   }
 
-  async function reloadSettings(token: string) {
-    const response = await authenticatedFetch(token, '/auth/customer/preferences');
-    if (!response.ok) throw new Error('Customer settings could not be loaded.');
-    acceptSettings((await response.json()) as CustomerSettings);
+  async function reloadSettings() {
+    const next = await (await customerApiClient()).auth.customerPreferences();
+    acceptSettings(next);
   }
+
+  useEffect(() => {
+    let live = true;
+    void restoreCustomerSession()
+      .then(async (tokens) => {
+        if (!live || !tokens) return;
+        try {
+          setSession(tokens);
+          setStep('verified');
+          if (redirectAfterSignIn) {
+            router.replace(customerLoginReturn(returnTo));
+            router.refresh();
+            return;
+          }
+          await reloadSettings();
+          if (!live) return;
+          setStep('verified');
+          showStatus('Your session was restored.');
+        } catch {
+          if (live)
+            showError(
+              'You are signed in, but account settings could not load. Retry loading them below.',
+            );
+        }
+      })
+      .catch((error: unknown) => {
+        if (live && error instanceof ApiError && error.status === 403) setAccessDenied(true);
+        if (live)
+          showError(
+            error instanceof Error
+              ? error.message
+              : 'Session checking is temporarily unavailable. Try again.',
+          );
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   async function requestOtp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
-    setMessage('Requesting a protected synthetic code…');
+    showStatus('Requesting a verification code…');
     try {
-      const response = await fetch(`${apiUrl}/auth/otp/request`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          device_id: deviceId,
-          phone_identifier: phone,
-          request_key: `signin-${uuidV7().replaceAll('-', '')}`,
-        }),
+      const body = await requestCustomerOtp({
+        device_id: deviceId,
+        phone_identifier: phone,
+        request_key: `signin-${uuidV7().replaceAll('-', '')}`,
       });
-      if (!response.ok)
-        throw new Error(
-          response.status === 429
-            ? 'Too many requests. Wait before retrying.'
-            : 'The local OTP service is unavailable.',
-        );
-      const body = (await response.json()) as { challenge_id: string };
       setChallengeId(body.challenge_id);
       setStep('code');
-      setMessage('Code created. Retrieve it only with the protected local test helper.');
+      showStatus('Verification code requested. Enter the six-digit code to continue.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The request could not be completed.');
+      showError(error instanceof Error ? error.message : 'The request could not be completed.');
     } finally {
       setBusy(false);
     }
@@ -109,35 +144,31 @@ export function SignInPanel() {
   async function verifyOtp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
-    setMessage('Verifying code and enrolling this account as a customer…');
+    showStatus('Verifying code and enrolling this account as a customer…');
     try {
-      const response = await fetch(`${apiUrl}/auth/otp/verify`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ challenge_id: challengeId, code, device_id: deviceId }),
+      const session = await verifyCustomerOtp({
+        challenge_id: challengeId,
+        code,
+        device_id: deviceId,
       });
-      if (!response.ok)
-        throw new Error(
-          response.status === 401
-            ? 'That code is wrong, expired, or locked.'
-            : 'Verification is temporarily unavailable.',
-        );
-      const body = (await response.json()) as { tokens: SessionTokens | null };
-      if (!body.tokens) throw new Error('This code was already used. Request a new code.');
-      const enrolment = await authenticatedFetch(body.tokens.access_token, '/auth/customer/enrol', {
-        method: 'POST',
-      });
-      if (!enrolment.ok) throw new Error('The signed-in account could not be enrolled.');
-      await reloadSettings(body.tokens.access_token);
-      window.sessionStorage.setItem(
-        'neighbourhood.customer.access-token',
-        body.tokens.access_token,
-      );
-      setSession(body.tokens);
+      storeCustomerSession(session);
+      setSession(session);
       setStep('verified');
-      setMessage('Signed in and explicitly enrolled as a customer for this local test.');
+      setCode('');
+      setChallengeId('');
+      showStatus('Signed in successfully.');
+      if (redirectAfterSignIn) {
+        router.replace(customerLoginReturn(returnTo));
+        router.refresh();
+        return;
+      }
+      await reloadSettings().catch(() =>
+        showError(
+          'You are signed in, but account settings could not load. Retry loading them below.',
+        ),
+      );
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Verification could not be completed.');
+      showError(error instanceof Error ? error.message : 'Verification could not be completed.');
     } finally {
       setBusy(false);
     }
@@ -148,19 +179,17 @@ export function SignInPanel() {
     if (!session || !settings) return;
     setBusy(true);
     try {
-      const response = await authenticatedFetch(session.access_token, '/auth/customer/profile', {
-        method: 'PUT',
-        body: JSON.stringify({
-          display_name: displayName.trim() || null,
-          expected_version: settings.profile.version,
-          language,
-        }),
+      await (
+        await customerApiClient()
+      ).auth.updateProfile({
+        display_name: displayName.trim() || null,
+        expected_version: settings.profile.version,
+        language,
       });
-      if (!response.ok) throw new Error('Profile was not saved. Reload if another edit won.');
-      await reloadSettings(session.access_token);
-      setMessage('Optional profile and language preference saved.');
+      await reloadSettings();
+      showStatus('Optional profile and language preference saved.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Profile was not saved.');
+      showError(error instanceof Error ? error.message : 'Profile was not saved.');
     } finally {
       setBusy(false);
     }
@@ -173,20 +202,18 @@ export function SignInPanel() {
     );
     setBusy(true);
     try {
-      const response = await authenticatedFetch(session.access_token, '/auth/customer/consents', {
-        method: 'POST',
-        body: JSON.stringify({
-          consent_kind: 'MARKETING',
-          decision: granted ? 'WITHDRAWN' : 'GRANTED',
-          policy_version: 'marketing.test.v1',
-          source: 'CUSTOMER_PWA',
-        }),
+      await (
+        await customerApiClient()
+      ).auth.updateConsent({
+        consent_kind: 'MARKETING',
+        decision: granted ? 'WITHDRAWN' : 'GRANTED',
+        policy_version: 'marketing.v1',
+        source: 'CUSTOMER_PWA',
       });
-      if (!response.ok) throw new Error('Marketing consent was not changed.');
-      await reloadSettings(session.access_token);
-      setMessage(granted ? 'Marketing consent withdrawn.' : 'Marketing consent granted.');
+      await reloadSettings();
+      showStatus(granted ? 'Marketing consent withdrawn.' : 'Marketing consent granted.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Consent was not changed.');
+      showError(error instanceof Error ? error.message : 'Consent was not changed.');
     } finally {
       setBusy(false);
     }
@@ -196,45 +223,37 @@ export function SignInPanel() {
     if (!session) return;
     setBusy(true);
     try {
-      const response = await authenticatedFetch(
-        session.access_token,
-        `/auth/customer/notifications/${preference.notification_kind}/${preference.channel}`,
-        {
-          method: 'PUT',
-          body: JSON.stringify({
-            enabled: !preference.effective_enabled,
-            expected_version: preference.version,
-          }),
-        },
-      );
-      if (!response.ok) throw new Error('Notification preference was not changed.');
-      await reloadSettings(session.access_token);
-      setMessage('Notification preference saved. Required alerts remain enabled.');
+      await (
+        await customerApiClient()
+      ).auth.updateNotification(preference.notification_kind, preference.channel, {
+        enabled: !preference.effective_enabled,
+        expected_version: preference.version,
+      });
+      await reloadSettings();
+      showStatus('Notification preference saved. Required alerts remain enabled.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Preference was not changed.');
+      showError(error instanceof Error ? error.message : 'Preference was not changed.');
     } finally {
       setBusy(false);
     }
   }
 
   async function signOut() {
-    if (!session) return;
     setBusy(true);
-    setMessage('Signing out…');
+    showStatus('Signing out…');
     try {
-      const response = await authenticatedFetch(session.access_token, '/auth/sessions/sign-out', {
-        method: 'POST',
-      });
-      if (!response.ok) throw new Error('The session could not be revoked.');
+      await signOutCustomer();
       setSession(null);
-      window.sessionStorage.removeItem('neighbourhood.customer.access-token');
+      setAccessDenied(false);
       setSettings(null);
       setCode('');
       setChallengeId('');
       setStep('phone');
-      setMessage('Signed out. The local access and refresh tokens were cleared from memory.');
+      showStatus('Signed out securely.');
+      router.replace('/login');
+      router.refresh();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Sign-out could not be completed.');
+      showError(error instanceof Error ? error.message : 'Sign-out could not be completed.');
     } finally {
       setBusy(false);
     }
@@ -247,35 +266,43 @@ export function SignInPanel() {
   return (
     <section className="sign-in-card" aria-labelledby="sign-in-title">
       <div className="sign-in-heading">
-        <p className="step-label">Identity foundation · Step {step === 'phone' ? '1' : '2'} of 2</p>
+        <p className="step-label">
+          {step === 'verified'
+            ? 'Account settings'
+            : `Sign in · Step ${step === 'phone' ? '1' : '2'} of 2`}
+        </p>
         <h2 id="sign-in-title">
-          {step === 'verified' ? 'Your local test account' : 'Sign in safely'}
+          {step === 'verified' ? 'Profile and preferences' : 'Sign in safely'}
         </h2>
       </div>
 
-      {step === 'phone' && (
+      {step === 'phone' && !accessDenied && (
         <form onSubmit={requestOtp}>
-          <label htmlFor="phone-identifier">Fictional phone identifier</label>
+          <label htmlFor="phone-identifier">Mobile number</label>
+          {/* The API accepts an E.164 number or a SYNTH-PHONE-… development
+              identity. This field allowed only the former, so every seeded
+              local identity was rejected by the browser before a request was
+              ever made: the form simply refused to submit. */}
           <input
             id="phone-identifier"
             value={phone}
-            onChange={(event) => setPhone(event.target.value.toUpperCase())}
-            pattern="SYNTH-PHONE-[A-Z0-9][A-Z0-9-]{2,47}"
-            autoComplete="off"
+            onChange={(event) => setPhone(event.target.value)}
+            pattern="(\+[1-9][0-9]{7,14}|SYNTH-PHONE-[A-Za-z0-9][A-Za-z0-9-]{2,47})"
+            inputMode="tel"
+            autoComplete="tel"
+            placeholder="+919876543210"
             required
           />
-          <p className="field-help">
-            Format: SYNTH-PHONE-NAME-001. Real phone numbers are rejected.
-          </p>
+          <p className="field-help">Include the country code, for example +919876543210.</p>
           <button type="submit" disabled={busy}>
-            {busy ? 'Requesting…' : 'Request test code'}
+            {busy ? 'Requesting…' : 'Send verification code'}
           </button>
         </form>
       )}
 
       {step === 'code' && (
         <form onSubmit={verifyOtp}>
-          <label htmlFor="otp-code">Six-digit test code</label>
+          <label htmlFor="otp-code">Six-digit verification code</label>
           <input
             id="otp-code"
             value={code}
@@ -316,7 +343,7 @@ export function SignInPanel() {
                 minute: '2-digit',
               })}
             </time>
-            . Tokens remain in memory only.
+            . This device keeps a rotating session until it expires, is revoked, or you sign out.
           </p>
           <form onSubmit={saveProfile} className="settings-block">
             <h3>Optional profile</h3>
@@ -332,7 +359,7 @@ export function SignInPanel() {
             <select
               id="language"
               value={language}
-              onChange={(event) => setLanguage(event.target.value as 'EN' | 'HI')}
+              onChange={(event) => setLanguage(event.target.value as Language)}
             >
               <option value="EN">English</option>
               <option value="HI">हिन्दी</option>
@@ -386,9 +413,49 @@ export function SignInPanel() {
         </div>
       )}
 
-      <p className="status-message" role="status" aria-live="polite">
-        {message}
-      </p>
+      {step === 'verified' && session && !settings ? (
+        <div className="button-row">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void reloadSettings()
+                .then(() => showStatus('Account settings loaded.'))
+                .catch(() =>
+                  showError('Account settings are still unavailable. Your sign-in has been kept.'),
+                )
+                .finally(() => setBusy(false));
+            }}
+          >
+            Retry account settings
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => void signOut()}
+          >
+            Sign out
+          </button>
+        </div>
+      ) : null}
+
+      {accessDenied ? (
+        <button type="button" disabled={busy} onClick={() => void signOut()}>
+          Sign out to use another account
+        </button>
+      ) : null}
+
+      {messageIsError ? (
+        <p className="status-message status-message-error" role="alert">
+          {message}
+        </p>
+      ) : (
+        <p className="status-message" role="status" aria-live="polite">
+          {message}
+        </p>
+      )}
     </section>
   );
 }

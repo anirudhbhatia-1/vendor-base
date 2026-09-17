@@ -30,12 +30,19 @@ import {
 import { AuthorizationEnforcementService } from './authorization-enforcement.service.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { SESSION_IDENTITY } from './tokens.js';
+import { SupabaseAuthInvalidTokenError, SupabaseAuthService } from './supabase-auth.service.js';
 
-function bearerToken(value: string | string[] | undefined): string {
+type BearerKind = { kind: 'nsa'; token: string } | { kind: 'jwt'; token: string };
+
+function bearerToken(value: string | string[] | undefined): BearerKind {
   const header = Array.isArray(value) ? value[0] : value;
-  const match = /^Bearer (nsa_[A-Za-z0-9_-]{43})$/.exec(header ?? '');
-  if (!match?.[1]) throw new UnauthorizedException();
-  return match[1];
+  const raw = (header ?? '').replace(/^Bearer\s+/i, '').trim();
+  if (!raw) throw new UnauthorizedException();
+  if (/^nsa_[A-Za-z0-9_-]{43}$/.test(raw)) return { kind: 'nsa', token: raw };
+  // A JWT is three base64url segments separated by dots.
+  if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(raw))
+    return { kind: 'jwt', token: raw };
+  throw new UnauthorizedException();
 }
 
 function routeUuid(
@@ -63,6 +70,7 @@ export class AuthorizationGuard implements CanActivate {
     @Inject(SESSION_IDENTITY) private readonly sessions: IdentitySessionService,
     @Inject(AuthorizationEnforcementService)
     private readonly enforcement: AuthorizationEnforcementService,
+    @Inject(SupabaseAuthService) private readonly supabaseAuth: SupabaseAuthService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -77,21 +85,44 @@ export class AuthorizationGuard implements CanActivate {
     if (!requirement && !sessionRequired) return true;
 
     const request = context.switchToHttp().getRequest<AuthorizedRequest>();
-    let principal;
-    try {
-      principal = await this.sessions.authenticateAccess({
-        access_token: bearerToken(request.headers.authorization),
-        context: currentRequestContext(),
-      });
-    } catch (error) {
-      if (
-        error instanceof SessionInvalidError ||
-        error instanceof SessionReplayDetectedError ||
-        error instanceof SessionForbiddenError
-      ) {
-        throw new UnauthorizedException();
+    const bearer = bearerToken(request.headers.authorization);
+    let principal: import('@neighbourhood-store/database').SessionPrincipal;
+    if (bearer.kind === 'jwt') {
+      if (!this.supabaseAuth.isConfigured()) throw new UnauthorizedException();
+      try {
+        const supabasePrincipal = await this.supabaseAuth.verify(bearer.token);
+        principal = await this.sessions.bindSupabaseSession({
+          context: currentRequestContext(),
+          external_session_id: supabasePrincipal.external_session_id,
+          user_id: supabasePrincipal.user_id,
+        });
+      } catch (error) {
+        if (
+          error instanceof SupabaseAuthInvalidTokenError ||
+          error instanceof SessionInvalidError ||
+          error instanceof SessionReplayDetectedError ||
+          error instanceof SessionForbiddenError
+        ) {
+          throw new UnauthorizedException();
+        }
+        throw error;
       }
-      throw error;
+    } else {
+      try {
+        principal = await this.sessions.authenticateAccess({
+          access_token: bearer.token,
+          context: currentRequestContext(),
+        });
+      } catch (error) {
+        if (
+          error instanceof SessionInvalidError ||
+          error instanceof SessionReplayDetectedError ||
+          error instanceof SessionForbiddenError
+        ) {
+          throw new UnauthorizedException();
+        }
+        throw error;
+      }
     }
     request[AUTHENTICATED_SESSION] = principal;
     if (!requirement) return true;

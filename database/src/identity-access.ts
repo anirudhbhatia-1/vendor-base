@@ -1,3 +1,5 @@
+import { createDatabasePool } from './database-pool.js';
+import { enrolCustomerInTransaction } from './customer-enrolment.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,6 +8,8 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction } from './transaction.js';
+import { grantRoleAssignment } from './role-grants.js';
 
 export type ActorKind = 'admin' | 'customer' | 'partner' | 'vendor_staff';
 export type AdminScopeKind = 'GLOBAL' | 'VENDOR_LOCATION' | 'ZONE';
@@ -95,21 +99,6 @@ function requireFutureWindow(now: Date, validUntil?: Date): Date | null {
   return validUntil ?? null;
 }
 
-async function transaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 function contextIds(context: RequestContext) {
   return {
     correlationId: parseUuidV7(context.correlation_id),
@@ -141,7 +130,7 @@ export class IdentityAccessService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-identity-access',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
@@ -166,33 +155,17 @@ export class IdentityAccessService {
       readonly valid_until?: Date;
     },
   ): Promise<UuidV7> {
-    const roleAssignmentId = createUuidV7({ now_ms: input.now.getTime() });
     const { correlationId, requestId } = contextIds(input.context);
-    await client.query(
-      `INSERT INTO marketplace.role_assignments
-         (role_assignment_id, user_id, role_key, valid_from, valid_until,
-          granted_by_user_id, request_id, correlation_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $4, $4)`,
-      [
-        roleAssignmentId,
-        parseUuidV7(input.user_id),
-        input.role_key,
-        input.now,
-        requireFutureWindow(input.now, input.valid_until),
-        input.granted_by_user_id ? parseUuidV7(input.granted_by_user_id) : null,
-        requestId,
-        correlationId,
-      ],
-    );
-    await this.#event(client, {
-      context: input.context,
-      event_type: 'ROLE_GRANTED',
-      now: input.now,
+    return grantRoleAssignment(client, {
+      user_id: parseUuidV7(input.user_id),
+      role_key: input.role_key,
+      granted_by_user_id: input.granted_by_user_id ? parseUuidV7(input.granted_by_user_id) : null,
       reason_code: 'AUTHORIZED_GRANT',
-      role_assignment_id: roleAssignmentId,
-      user_id: input.user_id,
+      now: input.now,
+      request_id: requestId,
+      correlation_id: correlationId,
+      valid_until: requireFutureWindow(input.now, input.valid_until),
     });
-    return roleAssignmentId;
   }
 
   async #event(
@@ -237,19 +210,9 @@ export class IdentityAccessService {
     readonly user_id: UuidV7;
   }): Promise<UuidV7> {
     const now = input.now ?? new Date();
-    return transaction(this.#pool, async (client) => {
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-        `role:${input.user_id}:CUSTOMER`,
-      ]);
-      const existing = await client.query<{ role_assignment_id: string }>(
-        `SELECT role_assignment_id FROM marketplace.role_assignments
-          WHERE user_id = $1 AND role_key = 'CUSTOMER' AND state = 'ACTIVE'
-            AND valid_from <= $2 AND (valid_until IS NULL OR valid_until > $2)`,
-        [parseUuidV7(input.user_id), now],
-      );
-      if (existing.rows[0]) return parseUuidV7(existing.rows[0].role_assignment_id);
-      return this.#insertAssignment(client, { ...input, now, role_key: 'CUSTOMER' });
-    });
+    return transaction(this.#pool, (client) =>
+      enrolCustomerInTransaction(client, { ...input, now }),
+    );
   }
 
   async grantVendorMembership(input: {

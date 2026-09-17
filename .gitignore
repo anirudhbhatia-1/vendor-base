@@ -27,10 +27,16 @@ uploads/
 !.env.example
 infrastructure/online-test/release.env
 infrastructure/online-test/secrets/
+infrastructure/supabase-production/secrets/
 *.pem
 *.key
 *.p12
 *.pfx
+# TLS trust material for the managed databases. `*.pem`/`*.key` already covered
+# the private halves; the Supabase CA arrives as a .crt and was sitting
+# untracked-but-committable, one `git add .` away from entering history.
+*.crt
+*.cer
 
 # Editor and operating-system files
 .DS_Store
@@ -43,3 +49,12 @@ infrastructure/online-test/secrets/
 npm-debug.log*
 pnpm-debug.log*
 .gstack/
+
+# Vendored design handoff bundle
+design-handoff/
+handoff.zip
+
+# Operational spreadsheets and reports kept beside the checkout for convenience.
+# Not source, and they routinely carry names, hours and pay.
+*.xlsx
+*.xlsm

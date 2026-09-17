@@ -1,10 +1,5 @@
 import { createHash } from 'node:crypto';
-import {
-  createAuthenticatedActor,
-  createRequestContext,
-  createUuidV7,
-  type UuidV7,
-} from '@neighbourhood-store/domain-types';
+import { createUuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import {
   FieldOpsAuthorizationError,
@@ -19,46 +14,7 @@ import {
   PartnerLifecycleNotFoundError,
   PartnerLifecycleService,
 } from '../src/partner-lifecycle.js';
-
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-function partnerContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'delivery_partner',
-      session_id: createUuidV7(),
-    }),
-  });
-}
-function adminContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'admin',
-      session_id: createUuidV7(),
-    }),
-  });
-}
-function systemContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'system',
-      session_id: createUuidV7(),
-    }),
-  });
-}
-async function rejects(work: () => Promise<unknown>, kind: new () => Error, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof kind, `${message} (raised ${String(error)})`);
-    return;
-  }
-  throw new Error(message);
-}
+import { check, rejects, adminContext, partnerContext, systemContext } from './verify-support.js';
 
 export async function verifyPartnerLifecycle(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, max: 4 });
@@ -131,6 +87,22 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     check(submitted.lifecycle_state === 'SUBMITTED', 'submit did not advance state');
     check(submitted.submitted_at !== null, 'submitted_at not recorded');
 
+    // A submitted application has to be discoverable. Review was reachable only
+    // by typing a case id, and nothing in the product shows one to a reviewer,
+    // so an application submitted through the app waited on a decision nobody
+    // could find.
+    const queue = await lifecycle.listApplicationsForAdmin({ context: adminContext(adminId) });
+    const queued = queue.find(
+      (entry) => entry.partner_application_id === submitted.partner_application_id,
+    );
+    check(queued !== undefined, 'A submitted partner application was not in the review queue');
+    check(queued?.awaiting_review === true, 'A submitted application was not marked for review');
+    // A draft belongs to the applicant, not to a reviewer's inbox.
+    check(
+      queue.every((entry) => entry.lifecycle_state !== 'DRAFT'),
+      'Draft applications leaked into the review queue',
+    );
+
     // Cross-partner cannot read another's application
     await rejects(
       () =>
@@ -191,6 +163,21 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     check(
       partnerGrant.rows[0]?.role_count === '1' && partnerGrant.rows[0]?.eligible === '1',
       'Partner approval did not grant DELIVERY_PARTNER role + ELIGIBLE eligibility',
+    );
+    // The grant is in the access history, attributed to the approval. It was
+    // not: approval inserted the role directly and wrote no ROLE_GRANTED event,
+    // so a partner's access record began with nothing.
+    const partnerGrantEvent = await pool.query<{ reason_code: string; role_key: string }>(
+      `SELECT e.reason_code, ra.role_key
+         FROM marketplace.access_membership_events e
+         JOIN marketplace.role_assignments ra USING (role_assignment_id)
+        WHERE e.user_id=$1 AND e.event_type='ROLE_GRANTED' AND ra.role_key='DELIVERY_PARTNER'`,
+      [applicantId],
+    );
+    check(
+      partnerGrantEvent.rows.length === 1 &&
+        partnerGrantEvent.rows[0]?.reason_code === 'APPLICATION_COMPLETE',
+      'Partner approval left no ROLE_GRANTED event carrying the approval reason',
     );
 
     // Cannot approve an already-decided application (version guard)
@@ -375,9 +362,23 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       reason_code: 'ROADSIDE_INCIDENT',
       now,
     });
-    // Resolve the open UNREACHABLE_CUSTOMER exception
+    // A partner reports; operations direct. Returning, cancelling and
+    // reassigning move custody and money, so they are not the reporter's to
+    // record even on their own assignment (DLP-40).
+    await rejects(
+      () =>
+        fieldOps.resolveException({
+          context: partnerContext(applicantId),
+          delivery_assignment_id: deliveryAssignmentId,
+          exception_kind: 'UNREACHABLE_CUSTOMER',
+          resolution_state: 'RETURN_TO_VENDOR',
+          reason_code: 'CUSTOMER_UNREACHABLE_AFTER_ATTEMPTS',
+        }),
+      FieldOpsAuthorizationError,
+      'A partner was allowed to direct a return on their own assignment',
+    );
     const resolvedException = await fieldOps.resolveException({
-      context: partnerContext(applicantId),
+      context: adminContext(adminId),
       delivery_assignment_id: deliveryAssignmentId,
       exception_kind: 'UNREACHABLE_CUSTOMER',
       resolution_state: 'RETURN_TO_VENDOR',
@@ -385,11 +386,14 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     });
     check(resolvedException.resolution_state === 'RETURN_TO_VENDOR', 'resolution not recorded');
 
-    // Resolving with no matching OPEN raises NotFound
+    // Resolving with no matching OPEN raises NotFound. Authorization is checked
+    // before the lookup — a caller who may not direct a cancellation must not
+    // learn from the error whether an exception exists — so this uses an
+    // operations context to reach the lookup at all.
     await rejects(
       () =>
         fieldOps.resolveException({
-          context: partnerContext(applicantId),
+          context: adminContext(adminId),
           delivery_assignment_id: deliveryAssignmentId,
           exception_kind: 'PROHIBITED_GOODS',
           resolution_state: 'CANCEL',

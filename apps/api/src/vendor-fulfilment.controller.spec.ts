@@ -5,6 +5,7 @@ import { AUTHORIZATION_REQUIREMENT, type AuthorizationRequirement } from './auth
 import {
   CustomerDecisionsController,
   CustomerOrderHistoryController,
+  PartnerHandoverController,
   VendorOrderFulfilmentController,
 } from './vendor-fulfilment.controller.js';
 
@@ -75,4 +76,18 @@ test('declares an authorization requirement on every exposed vendor fulfilment r
     (name) => name !== 'constructor',
   );
   assert.deepEqual([...exposed].sort(), [...vendorRoutes].sort());
+});
+
+test('scopes the partner pickup code to the assignment its holder acts on', () => {
+  // The code lands on the vendor order, but the person minting it is the
+  // partner, and the guard has to tie them to this assignment -- otherwise any
+  // partner could mint a code for any order at the counter.
+  const rule = Reflect.getMetadata(
+    AUTHORIZATION_REQUIREMENT,
+    PartnerHandoverController.prototype.pickupOtp,
+  ) as AuthorizationRequirement | undefined;
+  assert.equal(rule?.capability, 'partner.assignment.act');
+  assert.equal(rule?.delivery_assignment_id_param, 'delivery_assignment_id');
+  assert.equal(rule?.conceal_resource, true);
+  assert.equal(rule?.vendor_location_id_param, undefined);
 });

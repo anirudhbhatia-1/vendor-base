@@ -16,26 +16,10 @@ import {
   CatalogueImportNotFoundError,
   CatalogueProductService,
 } from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { CATALOGUE_PRODUCTS } from './tokens.js';
 import { currentRequestContext } from './request-context-storage.js';
-
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function body(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function string(value: Record<string, unknown>, name: string): string {
-  if (typeof value[name] !== 'string') throw new BadRequestException();
-  return value[name];
-}
+import { object, stringField, uuid } from './request-fields.js';
 const managesCatalogue = RequireAuthorization({
   capability: 'vendor.catalogue.manage',
   conceal_resource: true,
@@ -53,14 +37,14 @@ export class CatalogueImportController {
   @Post()
   @managesCatalogue
   async stage(@Param('vendor_location_id') vendorLocationId: string, @Body() raw: unknown) {
-    const value = body(raw);
+    const value = object(raw);
     try {
       return await this.catalogue.stageImport({
         context: currentRequestContext(),
         vendor_location_id: uuid(vendorLocationId),
-        source_filename: string(value, 'source_filename'),
-        csv_content: string(value, 'csv_content'),
-        idempotency_key: string(value, 'idempotency_key'),
+        source_filename: stringField(value, 'source_filename'),
+        csv_content: stringField(value, 'csv_content'),
+        idempotency_key: stringField(value, 'idempotency_key'),
       });
     } catch (error) {
       if (error instanceof CatalogueImportInputError) throw new BadRequestException();
@@ -85,7 +69,8 @@ export class CatalogueImportController {
       if (error instanceof CatalogueImportInputError) throw new BadRequestException();
       if (error instanceof CatalogueImportAuthorizationError) throw new BadRequestException();
       if (error instanceof CatalogueImportNotFoundError) throw new BadRequestException();
-      if (error instanceof CatalogueImportConflictError) throw new ConflictException();
+      if (error instanceof CatalogueImportConflictError)
+        throw new ConflictException({ error_code: 'ORDER_STATE_CONFLICT' });
       throw error;
     }
   }

@@ -1,8 +1,11 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors, radii, spacing } from '@neighbourhood-store/ui-tokens/native';
+import { createRawRequester } from '@neighbourhood-store/contracts';
 
-const apiUrl = 'http://10.0.2.2:3001';
+const globalEnv =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+const apiUrl = globalEnv['EXPO_PUBLIC_API_URL'] ?? 'http://10.0.2.2:3001';
 type Address = {
   customer_address_id: string;
   label: string;
@@ -32,45 +35,23 @@ type Quote = {
   groups: { vendor_location_id: string; total_minor: number; promise: string }[];
 };
 
-export function Marketplace() {
-  const [token, setToken] = useState('');
+export function Marketplace({ accessToken = '' }: { accessToken?: string } = {}) {
+  const token = accessToken;
   const [address, setAddress] = useState<Address | null>(null);
   const [stores, setStores] = useState<Store[]>([]);
   const [store, setStore] = useState<Storefront | null>(null);
   const [quote, setQuote] = useState<Quote | null>(null);
-  const [message, setMessage] = useState('Paste a synthetic customer token, then open the market.');
+  const [message, setMessage] = useState('Sign in above, then open the market.');
   async function request(path: string, init?: RequestInit) {
-    const response = await fetch(`${apiUrl}${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(init?.body ? { 'content-type': 'application/json' } : {}),
-      },
-    });
-    if (!response.ok) throw new Error(`Request failed (${response.status}).`);
-    return response.json();
+    const raw = createRawRequester({ baseUrl: apiUrl, getToken: () => token });
+    return raw<unknown>(path, init);
   }
   async function openMarket() {
     try {
       const body = (await request('/customer/addresses')) as { addresses: Address[] };
-      let selected = body.addresses.find((a) => a.is_selected) ?? body.addresses[0];
+      const selected = body.addresses.find((a) => a.is_selected);
       if (!selected) {
-        selected = (await request('/customer/addresses', {
-          method: 'POST',
-          body: JSON.stringify({
-            address_reference: `SYNTH-ADDRESS-ANDROID-${Date.now().toString(36).toUpperCase()}`,
-            label: 'SYNTH Android Home',
-            pin_code: '302020',
-            latitude: 26.8505,
-            longitude: 75.7628,
-            coordinate_source: 'MANUAL_PIN',
-            landmark: 'SYNTH Mansarovar',
-            delivery_instructions: 'SYNTH Test delivery',
-          }),
-        })) as Address;
-        await request(`/customer/addresses/${selected.customer_address_id}/select`, {
-          method: 'POST',
-        });
+        throw new Error('Add and select a delivery address in Account before opening your market.');
       }
       setAddress(selected);
       const found = (await request(
@@ -136,7 +117,6 @@ export function Marketplace() {
         method: 'POST',
         body: JSON.stringify({
           checkout_quote_id: quote.checkout_quote_id,
-          provider_scenario: 'SUCCESS',
           idempotency_key: `android-${quote.checkout_quote_id}`,
           payment_method: 'UPI',
         }),
@@ -153,14 +133,7 @@ export function Marketplace() {
     <View style={s.panel}>
       <Text style={s.kicker}>JAIPUR MARKET LANE</Text>
       <Text style={s.heading}>Shop the server-backed marketplace.</Text>
-      <TextInput
-        autoCapitalize="none"
-        value={token}
-        onChangeText={setToken}
-        placeholder="Synthetic customer access token"
-        style={s.input}
-      />
-      <Button label="Open my market" onPress={openMarket} />
+      <Button label="Open my market" onPress={openMarket} disabled={!token} />
       <Text style={s.message}>{message}</Text>
       {address && (
         <Text style={s.meta}>

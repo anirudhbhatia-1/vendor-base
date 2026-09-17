@@ -2,7 +2,25 @@
   "name": "@neighbourhood-store/i18n",
   "version": "0.0.0",
   "private": true,
-  "description": "Shared English and Hindi translation keys and message catalogues.",
+  "description": "Locale runtime, React hook, and EN/HI translation helpers.",
   "license": "UNLICENSED",
-  "type": "module"
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./src/react.ts",
+      "default": "./dist/react.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test:unit": "node --import tsx --test src/*.spec.ts"
+  },
+  "peerDependencies": {
+    "react": "19.2.3"
+  }
 }

@@ -4,12 +4,13 @@ import {
   createUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
-import { CatalogueFreshnessModerationService } from '../src/catalogue-freshness-moderation.js';
+import {
+  CatalogueFreshnessModerationService,
+  CatalogueModerationAuthorizationError,
+} from '../src/catalogue-freshness-moderation.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
+import { check } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 function context(kind: 'admin' | 'vendor_staff') {
   return createRequestContext({
     actor: createAuthenticatedActor({
@@ -149,6 +150,51 @@ export async function verifyCatalogueFreshnessModeration(connectionString: strin
     check(
       events.rows[0]?.count === '2',
       'Moderation decision did not preserve opening and decision evidence',
+    );
+
+    // Requirement 5 asks that one vendor cannot read or edit another vendor's
+    // catalogue, and the moderation surface is where that is easiest to get wrong: the
+    // queue is deliberately cross-vendor, so it lists every vendor's cases. Three
+    // methods guard it with `assertAdmin` and nothing exercised any of them -- this
+    // verifier had no rejection assertion at all. Removing the guard from `listQueue`
+    // would have exposed every vendor's moderation cases to any authenticated actor
+    // with the suite still green.
+    const refusesVendor = async (operation: () => Promise<unknown>) => {
+      try {
+        await operation();
+        return false;
+      } catch (error: unknown) {
+        return error instanceof CatalogueModerationAuthorizationError;
+      }
+    };
+    check(
+      await refusesVendor(() => catalogue.listQueue({ context: context('vendor_staff') })),
+      'A vendor read the cross-vendor moderation queue',
+    );
+    check(
+      await refusesVendor(() =>
+        catalogue.openCase({
+          context: context('vendor_staff'),
+          inventory_item_id: freshId,
+          now,
+          reason_code: 'RESTRICTED_CATEGORY',
+        }),
+      ),
+      'A vendor opened a moderation case',
+    );
+    check(
+      await refusesVendor(() =>
+        catalogue.decideCase({
+          context: context('vendor_staff'),
+          correction_reason: 'Vendor decided their own case.',
+          expected_version: opened.version,
+          moderation_case_id: opened.moderation_case_id,
+          moderation_state: 'CLEARED',
+          now,
+          reason_code: 'RESTRICTED_CATEGORY',
+        }),
+      ),
+      'A vendor decided their own moderation case',
     );
   } finally {
     await catalogue.close();

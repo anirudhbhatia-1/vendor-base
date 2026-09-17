@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
   ForbiddenException,
   Get,
@@ -11,15 +10,11 @@ import {
   Post,
   Put,
   Req,
-  UnprocessableEntityException,
 } from '@nestjs/common';
 import {
   IdentityAccessService,
+  CustomerEnrolmentDeniedError,
   IdentityPreferencesService,
-  PreferenceIdentityError,
-  PreferenceInputError,
-  PreferenceVersionConflictError,
-  RequiredNotificationError,
   type ConsentDecision,
   type ConsentKind,
   type ConsentSource,
@@ -36,18 +31,8 @@ import {
 } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ACCESS_IDENTITY, IDENTITY_PREFERENCES } from './tokens.js';
-
-function objectBody(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-
-function stringField(body: Record<string, unknown>, field: string): string {
-  const value = body[field];
-  if (typeof value !== 'string') throw new BadRequestException();
-  return value;
-}
-
+import { object, stringField } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 function versionField(body: Record<string, unknown>): number {
   const value = body.expected_version;
   if (!Number.isSafeInteger(value) || (value as number) < 0) throw new BadRequestException();
@@ -58,16 +43,6 @@ function customerUserId(): UuidV7 {
   const actor = currentRequestContext().actor;
   if (!actor || actor.actor_kind !== 'customer') throw new ForbiddenException();
   return actor.actor_id;
-}
-
-function translate(error: unknown): never {
-  if (error instanceof PreferenceInputError || error instanceof TypeError) {
-    throw new BadRequestException();
-  }
-  if (error instanceof PreferenceVersionConflictError) throw new ConflictException();
-  if (error instanceof RequiredNotificationError) throw new UnprocessableEntityException();
-  if (error instanceof PreferenceIdentityError) throw new ForbiddenException();
-  throw error;
 }
 
 const manageCustomerSettings = RequireAuthorization({
@@ -88,10 +63,15 @@ export class CustomerPreferencesController {
   async enrol(@Req() request: AuthorizedRequest) {
     const principal = request[AUTHENTICATED_SESSION];
     if (!principal) throw new ForbiddenException();
-    const roleAssignmentId = await this.access.grantCustomer({
-      context: currentRequestContext(),
-      user_id: principal.user_id,
-    });
+    const roleAssignmentId = await this.access
+      .grantCustomer({
+        context: currentRequestContext(),
+        user_id: principal.user_id,
+      })
+      .catch((error: unknown) => {
+        if (error instanceof CustomerEnrolmentDeniedError) throw new ForbiddenException();
+        throw error;
+      });
     return { role_assignment_id: roleAssignmentId, role_key: 'CUSTOMER' as const };
   }
 
@@ -104,7 +84,7 @@ export class CustomerPreferencesController {
   @Put('profile')
   @manageCustomerSettings
   async updateProfile(@Body() rawBody: unknown) {
-    const body = objectBody(rawBody);
+    const body = object(rawBody);
     const displayName = body.display_name;
     if (displayName !== null && typeof displayName !== 'string') throw new BadRequestException();
     try {
@@ -116,14 +96,15 @@ export class CustomerPreferencesController {
         user_id: customerUserId(),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
   @Post('consents')
   @manageCustomerSettings
   async recordConsent(@Body() rawBody: unknown) {
-    const body = objectBody(rawBody);
+    const body = object(rawBody);
     const requestedSource = body.source;
     if (
       requestedSource !== undefined &&
@@ -142,7 +123,8 @@ export class CustomerPreferencesController {
         user_id: customerUserId(),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -153,7 +135,7 @@ export class CustomerPreferencesController {
     @Param('channel') channel: string,
     @Body() rawBody: unknown,
   ) {
-    const body = objectBody(rawBody);
+    const body = object(rawBody);
     if (typeof body.enabled !== 'boolean') throw new BadRequestException();
     try {
       return await this.preferences.setNotificationPreference({
@@ -165,7 +147,32 @@ export class CustomerPreferencesController {
         user_id: customerUserId(),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  @Get('privacy-requests')
+  @RequireAuthorization({ capability: 'customer.privacy.manage', conceal_resource: false })
+  async privacyRequests() {
+    return { requests: await this.preferences.listPrivacyRequests(customerUserId()) };
+  }
+
+  @Post('privacy-requests')
+  @RequireAuthorization({ capability: 'customer.privacy.manage', conceal_resource: false })
+  async requestPrivacy(@Body() rawBody: unknown) {
+    const body = object(rawBody);
+    const kind = body.request_kind;
+    if (kind !== 'DATA_EXPORT' && kind !== 'ACCOUNT_DELETION') throw new BadRequestException();
+    try {
+      return await this.preferences.requestPrivacyAction({
+        context: currentRequestContext(),
+        request_kind: kind,
+        user_id: customerUserId(),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }

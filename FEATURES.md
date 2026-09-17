@@ -1,7 +1,7 @@
 # Finished Product Feature Catalogue — Neighbourhood Store Marketplace
 
 **Status:** Canonical product-capability catalogue
-**Version:** v1.0 · 13 August 2026
+**Version:** v1.1 · 6 September 2026
 **Applies to:** Customer App/Web, Vendor Portal, Delivery Partner App/Portal, Admin Console, backend services, workers, integrations, data, finance, support, security, and operations
 
 ## 1. Purpose
@@ -271,7 +271,7 @@ If this catalogue conflicts with those documents, implementation stops until the
 | DLP-25 | Package count and condition agreement | Launch | Partner and vendor confirm counts, condition, fragile/cold handling, and exceptions before pickup. |
 | DLP-26 | Server-confirmed custody | Launch | Custody begins only after the server accepts proof; local capture never displays false completion. |
 | DLP-27 | Customer navigation | Launch | Exact customer address and permitted instructions appear only after custody begins. |
-| DLP-28 | Masked customer contact | Launch | Partners contact customers through approved time-bounded channels without seeing personal phone numbers. |
+| DLP-28 | Protected customer contact | Launch | Backend participant messages and support protect personal phone numbers; masked calling is deferred under COM-08. |
 | DLP-29 | Arrival at customer | Launch | The partner records arrival with the permitted location and fallback process. |
 | DLP-30 | Delivery OTP | Launch | A fresh OTP is the default completion proof and includes expiry, replay, and attempt controls. |
 | DLP-31 | Alternative proof | Gated | Photo, signature, or another proof appears only for approved scenarios with consent, retention, and support policy. |
@@ -411,7 +411,7 @@ If this catalogue conflicts with those documents, implementation stops until the
 | ENG-04 | Reservation lifecycle | Launch | Inventory progresses through no reservation, soft hold, provisional placement, committed acceptance, release, or expiry. |
 | ENG-05 | Last-unit concurrency protection | Launch | Competing customers cannot both commit the final counted unit. |
 | ENG-06 | Quote snapshots | Launch | Orders retain the product, price, tax, fee, promise, policy, and customer-preference facts accepted at checkout. |
-| ENG-07 | Payment allocation by child order | Launch | The authorized amount is allocated explicitly across vendor orders for independent capture, refund, and reconciliation. |
+| ENG-07 | Payment allocation by child order | Launch | Captured payment is allocated across vendor orders for independent refunds, settlement eligibility and reconciliation; repeated partial captures are not assumed. |
 | ENG-08 | Append-only double-entry ledger | Launch | Vendor, partner, customer, platform, tax, refund, and payout movements balance per currency and are never overwritten. |
 | ENG-09 | Independent settlement | Launch | Each child order can settle, refund, or remain under review without corrupting siblings. |
 | ENG-10 | Transactional outbox | Launch | Business state and follow-up events commit together; consumers are idempotent and tolerate duplicate delivery. |
@@ -432,7 +432,7 @@ If this catalogue conflicts with those documents, implementation stops until the
 | COM-05 | Deep links to safe context | Launch | Notifications open the exact authorized order, assignment, decision, or case state. |
 | COM-06 | Template-first messaging | Launch | Common customer/vendor/partner communications use localized, approved templates. |
 | COM-07 | Auditable delivery attempts | Launch | Channel, provider reference, attempt, result, and retry state remain observable. |
-| COM-08 | Privacy-safe masked calling | Launch | Approved active-order cases can use time-bounded masked contact without recording call content by default. |
+| COM-08 | Privacy-safe masked calling | Later | Approved active-order cases can use time-bounded masked contact without recording call content by default. |
 
 ## 10. Security, privacy, trust, and compliance
 
@@ -574,3 +574,9 @@ The production MVP is ready only when all **Launch** features required by the se
 12. Product, engineering, operations, finance, security/privacy, legal/compliance, and support owners sign the applicable production gates.
 
 Features marked **Later** do not block the initial production MVP. Features marked **Gated** must remain unavailable until their named approvals and controls pass. Features marked **Excluded** must not appear accidentally through configuration, provider behaviour, or implementation shortcuts.
+
+## Current staging contract and verification status
+
+[D-15](docs/decisions/D-15.md) is the synchronized current-workstream decision for eight clients, staging providers, TLS/BFF boundaries, pre-payment durable checkout, weight caps/top-ups, role invitations, guest-cart merge, internal publication testing and privacy controls. Earlier conflicting local-only or deferred-provider wording is historical, not an active implementation restriction. Public production remains gated.
+
+Scope labels are not completion claims. See the [phase conformance audit](docs/engineering/phase-conformance-audit.md) for reviewed steps, executable evidence and remaining gaps. Customer final prices and charge components remain visible; internal fee formulas/margins do not enter customer APIs. Moving maps, masked calling, POS sync, COD, pharmacy and consolidation remain deferred/gated.

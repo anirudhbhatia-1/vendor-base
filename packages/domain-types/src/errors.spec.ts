@@ -26,6 +26,9 @@ test('builds the stable standard error envelope with request reference', () => {
       retryable: false,
       field_errors: [],
       current_state: 'READY',
+      // Present and empty rather than absent, so a client never has to guess
+      // whether a refusal carries structured detail.
+      details: {},
       support_reference: null,
     },
   });
@@ -52,4 +55,20 @@ test('validates field errors and exposes retryability only from the registry', (
     /path is invalid/,
   );
   assert.throws(() => createLocalizationKey('Human readable sentence'), /dotted notation/);
+});
+
+test('a refusal can carry the structured detail that explains it', () => {
+  // `missing_checks` and `available_quantity` were attached to their exceptions
+  // and discarded in transit, leaving the generic "not allowed in the current
+  // state" for a vendor whose publication checklist was the thing they needed.
+  const requestId = createRequestId({
+    now_ms: 2_000,
+    random_bytes: (length) => new Uint8Array(length),
+  });
+  const response = createStandardError('PUBLICATION_INCOMPLETE', requestId, {
+    details: { missing_checks: ['CATALOGUE_REVIEWED'] },
+  });
+  assert.deepEqual(response.error.details, { missing_checks: ['CATALOGUE_REVIEWED'] });
+  assert.equal(errorHttpStatus('PUBLICATION_INCOMPLETE'), 422);
+  assert.equal(errorHttpStatus('INVENTORY_UNAVAILABLE'), 422);
 });

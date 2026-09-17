@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,11 +7,15 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { resolveFinancialPolicy } from './financial-policy.js';
 import {
   LocalFakeMoneyProvider,
-  SYNTHETIC_FINANCIAL_POLICY,
+  calculateCommissionAmount,
   type FakeProviderScenario,
+  type FinancialPolicy,
+  type MoneyProviderAdapter,
 } from './money-policy.js';
+import { transaction as tx } from './transaction.js';
 
 export class MoneyInputError extends Error {
   readonly code = 'INVALID_ARGUMENT';
@@ -25,11 +30,11 @@ export class MoneyAuthorizationError extends Error {
   readonly code = 'FORBIDDEN';
 }
 
-const COMMAND = /^SYNTH-CMD-[A-Z0-9-]{4,64}$/;
-const CHECKOUT = /^SYNTH-CHECKOUT-[A-Z0-9-]{4,64}$/;
-const ORDER = /^SYNTH-ORDER-[A-Z0-9-]{4,64}$/;
-const POLICY = /^SYNTH-POLICY-[A-Z0-9-]{4,64}$/;
-const OPERATION = /^SYNTH-(PAY|REF|PAYOUT)-[A-Z0-9-]{4,64}$/;
+const COMMAND = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const CHECKOUT = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const ORDER = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const POLICY = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const OPERATION = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
 
 export interface PaymentRecord {
   readonly amount_minor: number;
@@ -44,7 +49,7 @@ export interface PaymentRecord {
 }
 
 function text(value: string, pattern: RegExp, label: string): string {
-  if (!pattern.test(value)) throw new MoneyInputError(`${label} is invalid or not synthetic`);
+  if (!pattern.test(value)) throw new MoneyInputError(`${label} is invalid`);
   return value;
 }
 function minor(value: number, label: string, minimum = 0): number {
@@ -58,6 +63,24 @@ function actor(context: RequestContext, kind = 'admin'): UuidV7 {
     throw new MoneyAuthorizationError('Authenticated finance authority is required');
   }
   return context.actor.actor_id;
+}
+/**
+ * A finance operation caused either by a person or by a committed domain event.
+ *
+ * Capture and settlement are consequences of the order lifecycle, so the worker
+ * has to be able to perform them; requiring an administrator meant they could
+ * only ever be run by hand. The actor is still recorded truthfully, so a
+ * movement the platform made is never filed as one an administrator made.
+ */
+function financeAutomation(context: RequestContext): {
+  readonly id: UuidV7;
+  readonly kind: string;
+} {
+  const kind = context.actor?.actor_kind;
+  if (!context.actor || (kind !== 'admin' && kind !== 'system')) {
+    throw new MoneyAuthorizationError('Finance administrator or system worker is required');
+  }
+  return { id: context.actor.actor_id, kind: kind as string };
 }
 function contextIds(context: RequestContext) {
   return {
@@ -78,30 +101,15 @@ function record(row: Record<string, unknown>): PaymentRecord {
     voided_amount_minor: Number(row.voided_amount_minor ?? 0),
   });
 }
-async function tx<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 export class MoneyLifecycleService {
   readonly #pool: Pool;
-  readonly #provider: LocalFakeMoneyProvider;
+  readonly #provider: MoneyProviderAdapter;
 
   constructor(input: {
     readonly connection_string: string;
-    readonly provider?: LocalFakeMoneyProvider;
+    readonly provider?: MoneyProviderAdapter;
   }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-money',
       max: 12,
@@ -110,6 +118,61 @@ export class MoneyLifecycleService {
   }
   async close() {
     await this.#pool.end();
+  }
+
+  /**
+   * Read models for the admin finance queue.
+   *
+   * The finance surface was write-only: an operator could propose a refund but
+   * had no way to find the payment it applies to, because payments are keyed by
+   * checkout reference and nothing exposed them.
+   */
+  /**
+   * The fee model in force right now.
+   *
+   * For callers that have no priced order to date the policy from — the manual
+   * finance routes. Anything settling a real order should resolve the policy as
+   * of that order's quote instead, so it divides by the rules it was sold under.
+   */
+  async resolveActiveFinancialPolicy(input: { readonly at?: Date } = {}) {
+    return resolveFinancialPolicy(this.#pool, input);
+  }
+
+  async listPayments(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+  }): Promise<readonly Record<string, unknown>[]> {
+    actor(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const rows = await this.#pool.query(
+      `SELECT payment_transaction_id, source_checkout_reference, provider_operation_reference,
+              payment_state, amount_minor::text AS amount_minor, currency, provider_scenario,
+              version, created_at, updated_at
+         FROM marketplace.payment_transactions
+        ORDER BY created_at DESC, payment_transaction_id DESC
+        LIMIT $1`,
+      [limit],
+    );
+    return rows.rows;
+  }
+
+  async listRefunds(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+  }): Promise<readonly Record<string, unknown>[]> {
+    actor(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const rows = await this.#pool.query(
+      `SELECT refund_id, payment_transaction_id, source_order_reference,
+              provider_operation_reference, refund_state, trigger_code,
+              refund_total_minor::text AS refund_total_minor, approval_expires_at,
+              version, created_at, updated_at
+         FROM marketplace.refunds
+        ORDER BY created_at DESC, refund_id DESC
+        LIMIT $1`,
+      [limit],
+    );
+    return rows.rows;
   }
 
   async createPayment(input: {
@@ -277,9 +340,17 @@ export class MoneyLifecycleService {
     readonly vendor_location_id: UuidV7;
     readonly completed: boolean;
     readonly now?: Date;
-    readonly policy_version_reference?: string;
+    /**
+     * The policy the order was quoted under, not today's.
+     *
+     * Required rather than defaulted: a settlement that silently used the
+     * compiled-in constant would divide an order's money by rules it was never
+     * priced against, which is the drift MKT-10 exists to prevent.
+     */
+    readonly financial_policy: FinancialPolicy;
+    readonly policy_version_reference: string;
   }) {
-    actor(input.context);
+    financeAutomation(input.context);
     const now = input.now ?? new Date();
     const customerNet =
       minor(input.customer_captured_minor, 'Captured') -
@@ -288,8 +359,12 @@ export class MoneyLifecycleService {
       0,
       minor(input.vendor_item_minor, 'Vendor items') - input.successful_refunds_minor,
     );
+    // Commission is a rate on what the vendor actually supplied, so a refunded
+    // line reduces it rather than being charged for.
     const vendorFee =
-      input.completed && remainingItems > 0 ? SYNTHETIC_FINANCIAL_POLICY.vendor_fee_minor : 0;
+      input.completed && remainingItems > 0
+        ? calculateCommissionAmount(remainingItems, input.financial_policy.commission_basis_points)
+        : 0;
     const vendorPayable = remainingItems - vendorFee;
     const partnerPayable =
       input.partner_outbound_minor +
@@ -301,7 +376,7 @@ export class MoneyLifecycleService {
     );
     const platform = customerNet - vendorPayable - partnerPayable;
     const eligibleAt = new Date(
-      now.getTime() + SYNTHETIC_FINANCIAL_POLICY.settlement_delay_seconds * 1_000,
+      now.getTime() + input.financial_policy.settlement_delay_seconds * 1_000,
     );
     return tx(this.#pool, async (client) => {
       const sourceOrder = text(input.source_order_reference, ORDER, 'Order reference');
@@ -333,11 +408,7 @@ export class MoneyLifecycleService {
         ],
       );
       const settlementId = result.rows[0].settlement_id;
-      const policy = text(
-        input.policy_version_reference ?? 'SYNTH-POLICY-D05-LOCAL-V1',
-        POLICY,
-        'Policy reference',
-      );
+      const policy = text(input.policy_version_reference, POLICY, 'Policy reference');
       const lines = [
         ['CUSTOMER', 'CAPTURE', input.customer_captured_minor],
         ['CUSTOMER', 'REFUND', -input.successful_refunds_minor],
@@ -500,7 +571,7 @@ export class MoneyLifecycleService {
         return Object.freeze(current);
       if (current.payout_state !== 'SCHEDULED' || current.version !== input.expected_version)
         throw new MoneyStateError('Payout state or version does not permit submission');
-      const outcome = this.#provider.execute({
+      const outcome = this.#provider.submitPayout({
         amount_minor: Number(current.amount_minor),
         operation_reference: current.provider_operation_reference,
         scenario: current.provider_scenario,
@@ -722,7 +793,7 @@ export class MoneyLifecycleService {
       ) {
         throw new MoneyStateError('Refund approval is stale, expired, or self-approved');
       }
-      const outcome = this.#provider.execute({
+      const outcome = this.#provider.refund({
         amount_minor: Number(refund.refund_total_minor),
         operation_reference: refund.provider_operation_reference,
         scenario: refund.provider_scenario,
@@ -808,7 +879,7 @@ export class MoneyLifecycleService {
     expected: string,
     eventType: string,
   ): Promise<PaymentRecord> {
-    const who = actor(input.context);
+    const who = financeAutomation(input.context);
     const command = text(input.command_reference, COMMAND, 'Command reference');
     const now = input.now ?? new Date();
     const ids = contextIds(input.context);
@@ -835,7 +906,7 @@ export class MoneyLifecycleService {
         `INSERT INTO marketplace.payment_events
           (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,resulting_state,
            command_reference,actor_id,actor_kind,reason_code,request_id,correlation_id,occurred_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'admin',$9,$10,$11,$12)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           createUuidV7(),
           input.payment_transaction_id,
@@ -844,18 +915,26 @@ export class MoneyLifecycleService {
           expected,
           inFlightState,
           `${command}-START`,
-          who,
+          who.id,
+          who.kind,
           `${eventType}_STARTED`,
           ids.request,
           ids.correlation,
           now,
         ],
       );
-      const outcome = this.#provider.execute({
-        amount_minor: Number(payment.amount_minor),
-        operation_reference: payment.provider_operation_reference,
-        scenario: payment.provider_scenario,
-      });
+      const outcome =
+        expected === 'CREATED'
+          ? this.#provider.authorize({
+              amount_minor: Number(payment.amount_minor),
+              operation_reference: payment.provider_operation_reference,
+              scenario: payment.provider_scenario,
+            })
+          : this.#provider.capture({
+              amount_minor: Number(payment.amount_minor),
+              operation_reference: payment.provider_operation_reference,
+              scenario: payment.provider_scenario,
+            });
       const successState = expected === 'CREATED' ? 'AUTHORIZED' : 'CAPTURED';
       const next =
         outcome === 'SUCCEEDED'
@@ -871,7 +950,7 @@ export class MoneyLifecycleService {
         `INSERT INTO marketplace.payment_events
           (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,resulting_state,
            provider_result,command_reference,actor_id,actor_kind,reason_code,request_id,correlation_id,occurred_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'admin',$10,$11,$12,$13)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [
           createUuidV7(),
           input.payment_transaction_id,
@@ -881,7 +960,8 @@ export class MoneyLifecycleService {
           next,
           outcome,
           command,
-          who,
+          who.id,
+          who.kind,
           eventType,
           ids.request,
           ids.correlation,
@@ -926,7 +1006,12 @@ export class MoneyLifecycleService {
       context,
       entries: [
         { account: payable, component: 'PAYOUT', debit: amount, credit: 0 },
-        { account: 'SYNTH-ACCOUNT-FAKE-PROVIDER', component: 'PAYOUT', debit: 0, credit: amount },
+        {
+          account: this.#provider.clearingAccountReference(),
+          component: 'PAYOUT',
+          debit: 0,
+          credit: amount,
+        },
       ],
       kind: 'PAYOUT',
       now,

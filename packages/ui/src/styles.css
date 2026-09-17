@@ -1,0 +1,1035 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Component styles for @neighbourhood-store/ui.
+
+   Every value here resolves to a token from `@neighbourhood-store/ui-tokens`.
+   There are no colour literals and no `!important`: the four apps previously
+   carried ~200 of them fighting each other's cascade, and the only way that
+   stops recurring is for the components to own their own appearance and for the
+   applications to own only layout.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* ── Shell ─────────────────────────────────────────────────────────────────── */
+
+.ns-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  background: var(--canvas);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+}
+
+.ns-shell__main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--shell-max);
+  margin-inline: auto;
+  padding: var(--space-sm) var(--shell-gutter) var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.ns-shell__main:focus {
+  outline: none;
+}
+
+.ns-shell__footer {
+  padding: var(--space-md) var(--shell-gutter);
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  padding-bottom: calc(var(--touch-target) * 2 + var(--space-xl) + env(safe-area-inset-bottom));
+}
+
+/* The dock and the tab bar stack at the bottom of the viewport, so the main
+   column reserves room for both rather than hiding its last row underneath. */
+.ns-shell:has(.ns-tabbar) .ns-shell__main {
+  padding-bottom: calc(var(--touch-target) + var(--space-xl) + env(safe-area-inset-bottom));
+}
+.ns-shell:has(.ns-dock) .ns-shell__main {
+  padding-bottom: calc(var(--touch-target) * 2 + var(--space-xl) + env(safe-area-inset-bottom));
+}
+
+.ns-shell__dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--touch-target) + var(--space-2xs) + env(safe-area-inset-bottom));
+  z-index: 30;
+  padding-inline: var(--shell-gutter);
+  pointer-events: none;
+}
+.ns-shell__dock > * {
+  pointer-events: auto;
+}
+
+/* ── Top bar ───────────────────────────────────────────────────────────────── */
+
+.ns-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.ns-topbar__row,
+.ns-topbar__context {
+  width: 100%;
+  max-width: var(--shell-max);
+  margin-inline: auto;
+  padding: var(--space-2xs) var(--shell-gutter);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+.ns-topbar__row {
+  justify-content: space-between;
+}
+.ns-topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+.ns-topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.ns-topbar__context {
+  padding-top: 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding-block: var(--space-3xs) var(--space-2xs);
+}
+
+/* ── Tab bar ───────────────────────────────────────────────────────────────── */
+
+.ns-tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 25;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: var(--space-3xs);
+  padding: var(--space-3xs) var(--space-3xs) calc(var(--space-3xs) + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.ns-tabbar a {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: var(--touch-target);
+  padding: var(--space-3xs);
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-decoration: none;
+}
+.ns-tabbar a[aria-current='page'] {
+  background: var(--accent-tint);
+  color: var(--accent-pressed);
+}
+.ns-tabbar__glyph {
+  font-size: var(--text-lg);
+  line-height: 1;
+}
+.ns-tabbar__label {
+  text-align: center;
+}
+.ns-tabbar__badge {
+  position: absolute;
+  top: 2px;
+  inset-inline-end: 12px;
+  min-width: 18px;
+  padding-inline: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--surface);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* ── Dock ──────────────────────────────────────────────────────────────────── */
+
+.ns-dock {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  max-width: var(--shell-max);
+  margin-inline: auto;
+  padding: var(--space-2xs) var(--space-xs);
+  border-radius: var(--radius-panel);
+  background: var(--surface-inverse);
+  color: var(--text-inverse);
+  box-shadow: var(--shadow-floating);
+}
+.ns-dock__copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ns-dock__title {
+  font-size: var(--text-base);
+}
+.ns-dock__detail {
+  font-size: var(--text-sm);
+  opacity: 0.85;
+}
+
+/* ── Page header ───────────────────────────────────────────────────────────── */
+
+.ns-page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+.ns-page-header__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+.ns-page-header__description {
+  margin: var(--space-3xs) 0 0;
+  color: var(--text-secondary);
+  max-width: 60ch;
+}
+.ns-page-header__actions {
+  display: flex;
+  gap: var(--space-2xs);
+  flex-wrap: wrap;
+}
+.ns-eyebrow {
+  margin: 0 0 var(--space-3xs);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────────────── */
+
+.ns-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3xs);
+  min-height: var(--touch-target);
+  padding-inline: var(--space-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  font-family: inherit;
+  font-size: var(--text-base);
+  font-weight: 650;
+  line-height: 1.2;
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+.ns-button--small {
+  min-height: 36px;
+  padding-inline: var(--space-xs);
+  font-size: var(--text-sm);
+}
+.ns-button--large {
+  min-height: var(--touch-target-field);
+  padding-inline: var(--space-md);
+  font-size: var(--text-lg);
+}
+.ns-button--block {
+  width: 100%;
+}
+.ns-button--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.ns-button--secondary {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.ns-button--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent-pressed);
+}
+.ns-button--danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--surface);
+}
+.ns-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.ns-button__spinner {
+  width: 1em;
+  height: 1em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: ns-spin 700ms linear infinite;
+}
+@keyframes ns-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.ns-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--touch-target);
+  min-height: var(--touch-target);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-lg);
+  cursor: pointer;
+}
+.ns-icon-button[aria-pressed='true'] {
+  background: var(--accent-tint);
+  color: var(--accent-pressed);
+}
+
+/* Inline, so exempt from the 44px target under the WCAG 2.5.8 inline
+   exception — it sits inside a sentence, never in a row of controls. */
+.ns-text-action {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-pressed);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ns-button--primary:hover:not(:disabled) {
+    background: var(--accent-pressed);
+    border-color: var(--accent-pressed);
+  }
+  .ns-button--secondary:hover:not(:disabled) {
+    background: var(--surface-sunken);
+  }
+  .ns-button--ghost:hover:not(:disabled),
+  .ns-icon-button:hover:not(:disabled) {
+    background: var(--accent-tint);
+  }
+}
+
+/* A solid ring at >=3:1 against every surface in the palette (WCAG 2.4.11). */
+.ns-shell :is(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-control);
+}
+
+/* ── Cards and panels ──────────────────────────────────────────────────────── */
+
+.ns-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface-raised);
+  padding: var(--space-sm);
+}
+.ns-card--sunken {
+  background: var(--surface-sunken);
+  box-shadow: none;
+}
+.ns-card--raised {
+  box-shadow: var(--shadow-raised);
+}
+.ns-card--floating {
+  box-shadow: var(--shadow-floating);
+}
+
+.ns-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.ns-panel__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-2xs);
+}
+.ns-panel__titles {
+  min-width: 0;
+}
+.ns-panel__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+}
+.ns-panel__description {
+  margin: var(--space-3xs) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  max-width: 62ch;
+}
+.ns-panel__actions {
+  display: flex;
+  gap: var(--space-2xs);
+  flex-wrap: wrap;
+}
+
+/* Translated headings run longer than their English source (UX-08). Below this
+   width the title and its actions stop competing for the same line — Hindi was
+   pushing the action onto a second row that visually collided with the title. */
+@media (max-width: 560px) {
+  .ns-panel__header,
+  .ns-page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .ns-panel__actions,
+  .ns-page-header__actions {
+    justify-content: flex-start;
+  }
+}
+
+/* ── Sheet ─────────────────────────────────────────────────────────────────── */
+
+.ns-sheet {
+  width: min(560px, 100vw);
+  max-height: 88dvh;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-overlay);
+  overflow: hidden;
+}
+.ns-sheet::backdrop {
+  background: rgba(17, 26, 21, 0.45);
+}
+.ns-sheet__grabber {
+  display: none;
+}
+.ns-sheet__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2xs);
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+.ns-sheet__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+}
+.ns-sheet__body {
+  padding: var(--space-sm);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.ns-sheet__footer {
+  padding: var(--space-xs) var(--space-sm) calc(var(--space-sm) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: var(--space-2xs);
+}
+
+/* On a phone it is a bottom sheet: full width, anchored to the bottom edge. */
+@media (max-width: 640px) {
+  .ns-sheet {
+    width: 100vw;
+    max-width: 100vw;
+    margin: auto auto 0;
+    border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+    border-bottom: 0;
+  }
+  .ns-sheet__grabber {
+    display: block;
+    width: 36px;
+    height: 4px;
+    margin: var(--space-2xs) auto 0;
+    border-radius: var(--radius-pill);
+    background: var(--border-strong);
+  }
+}
+
+/* ── Status ────────────────────────────────────────────────────────────────── */
+
+.ns-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: 2px var(--space-2xs);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  white-space: nowrap;
+}
+.ns-pill--neutral {
+  background: var(--surface-sunken);
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+.ns-pill--progress {
+  background: var(--information-tint);
+  border-color: color-mix(in srgb, var(--information) 35%, transparent);
+  color: var(--information);
+}
+.ns-pill--information {
+  background: var(--information-tint);
+  border-color: color-mix(in srgb, var(--information) 35%, transparent);
+  color: var(--information);
+}
+.ns-pill--success {
+  background: var(--success-tint);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  color: var(--success);
+}
+.ns-pill--warning {
+  background: var(--warning-tint);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  color: var(--warning);
+}
+.ns-pill--danger {
+  background: var(--danger-tint);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  color: var(--danger);
+}
+
+.ns-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ns-timeline__item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: var(--space-2xs);
+  padding-bottom: var(--space-sm);
+}
+.ns-timeline__item::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: 13px;
+  top: 24px;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+.ns-timeline__item:last-child::before {
+  display: none;
+}
+.ns-timeline__marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+.ns-timeline__item--current .ns-timeline__marker {
+  background: var(--accent-tint);
+  border-color: var(--accent);
+  color: var(--accent-pressed);
+}
+.ns-timeline__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ns-timeline__time,
+.ns-timeline__actor {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.ns-timeline__detail {
+  margin: var(--space-3xs) 0 0;
+  font-size: var(--text-sm);
+}
+
+/* ── Non-happy states ──────────────────────────────────────────────────────── */
+
+.ns-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-lg) var(--space-sm);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-panel);
+  text-align: center;
+}
+.ns-state--error {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-tint);
+}
+.ns-state__glyph {
+  font-size: var(--text-2xl);
+  line-height: 1;
+  color: var(--text-secondary);
+}
+.ns-state--error .ns-state__glyph {
+  color: var(--danger);
+}
+.ns-state__title {
+  margin: 0;
+  font-weight: 700;
+}
+.ns-state__description,
+.ns-state__reference {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  max-width: 48ch;
+}
+.ns-state__reference {
+  font-variant-numeric: tabular-nums;
+}
+
+.ns-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  width: 100%;
+}
+.ns-skeleton__line {
+  display: block;
+  height: 12px;
+  border-radius: var(--radius-control);
+  background: linear-gradient(
+    90deg,
+    var(--surface-sunken) 25%,
+    color-mix(in srgb, var(--surface-sunken) 55%, var(--surface)) 50%,
+    var(--surface-sunken) 75%
+  );
+  background-size: 200% 100%;
+  animation: ns-shimmer 1.4s linear infinite;
+}
+.ns-skeleton--block .ns-skeleton__line {
+  height: 20px;
+}
+.ns-skeleton--tile .ns-skeleton__line {
+  height: 120px;
+}
+.ns-skeleton__line:last-child {
+  width: 70%;
+}
+@keyframes ns-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.ns-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-sunken);
+  font-size: var(--text-sm);
+}
+.ns-notice__glyph {
+  font-weight: 700;
+  line-height: var(--leading-normal);
+}
+.ns-notice--information {
+  background: var(--information-tint);
+  border-color: color-mix(in srgb, var(--information) 35%, transparent);
+}
+.ns-notice--success {
+  background: var(--success-tint);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+}
+.ns-notice--warning {
+  background: var(--warning-tint);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+}
+.ns-notice--danger {
+  background: var(--danger-tint);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+/* ── Fields ────────────────────────────────────────────────────────────────── */
+
+.ns-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  min-width: 0;
+}
+.ns-field__label {
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+.ns-field__hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.ns-field__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+/* 16px keeps mobile Safari from zooming the viewport on focus. */
+.ns-input,
+.ns-select {
+  width: 100%;
+  min-height: var(--touch-target-field);
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-base);
+}
+.ns-field--invalid :is(.ns-input, .ns-select) {
+  border-color: var(--danger);
+}
+
+.ns-search {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2xs);
+  position: relative;
+}
+.ns-search__field {
+  flex: 1;
+}
+.ns-search__glyph {
+  position: absolute;
+  inset-inline-start: var(--space-2xs);
+  bottom: 13px;
+  display: inline-flex;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+.ns-search .ns-input {
+  padding-inline-start: calc(var(--space-lg) + var(--space-3xs));
+}
+
+.ns-chips {
+  display: flex;
+  gap: var(--space-2xs);
+  overflow-x: auto;
+  padding-bottom: var(--space-3xs);
+  scrollbar-width: thin;
+}
+.ns-chip {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding-inline: var(--space-xs);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ns-chip--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.ns-chip__count {
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Product ───────────────────────────────────────────────────────────────── */
+
+.ns-product-image {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: var(--radius-tile);
+  object-fit: cover;
+  background: var(--surface-sunken);
+}
+.ns-product-image--thumb {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+}
+.ns-product-image--hero {
+  aspect-ratio: 4 / 3;
+}
+.ns-product-image--placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(
+    circle at 30% 25%,
+    color-mix(in srgb, var(--placeholder-hue) 24%, var(--surface)),
+    color-mix(in srgb, var(--placeholder-hue) 10%, var(--surface)) 70%
+  );
+  border: 1px solid color-mix(in srgb, var(--placeholder-hue) 22%, transparent);
+}
+.ns-product-image__glyph {
+  display: inline-flex;
+  color: color-mix(in srgb, var(--placeholder-hue) 78%, var(--text-primary));
+}
+.ns-product-image__glyph .ns-icon {
+  width: 40%;
+  height: auto;
+  aspect-ratio: 1;
+}
+.ns-product-image--thumb .ns-product-image__glyph .ns-icon {
+  width: 26px;
+}
+
+.ns-product {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface-raised);
+}
+.ns-product--stale {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--warning) 50%, transparent);
+}
+.ns-product__open {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.ns-product__open:disabled {
+  cursor: default;
+}
+.ns-product__title {
+  font-weight: 650;
+  line-height: var(--leading-tight);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ns-product__unit {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+.ns-product__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3xs);
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+.ns-product__price {
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+}
+.ns-product__footer {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3xs);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.ns-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: 2px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-control);
+  background: var(--accent-tint);
+  width: 100%;
+  justify-content: space-between;
+}
+.ns-stepper__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 36px;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+  background: var(--surface);
+  color: var(--accent-pressed);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  cursor: pointer;
+}
+.ns-stepper--medium .ns-stepper__button {
+  min-width: var(--touch-target);
+  min-height: var(--touch-target);
+}
+.ns-stepper__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ns-stepper__value {
+  flex: 1;
+  text-align: center;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-pressed);
+}
+
+/* ── Grids ─────────────────────────────────────────────────────────────────── */
+
+/* Two columns at 360px, growing by available width rather than by breakpoint,
+   so a 200% zoom reflows instead of scrolling sideways (UX-05). */
+.ns-product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-2xs);
+}
+.ns-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-sm);
+}
+.ns-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+.ns-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  flex-wrap: wrap;
+}
+.ns-rail {
+  display: flex;
+  gap: var(--space-2xs);
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  padding-bottom: var(--space-3xs);
+}
+.ns-rail > * {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+}
+
+/* Wide content never widens the document; it scrolls inside its own box. */
+.ns-scroll-x {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+@media (min-width: 900px) {
+  :root {
+    --shell-gutter: var(--space-md);
+  }
+  /* The bar stays at the bottom edge on every width — it is the same installed
+     app on a phone and on a laptop, and moving it would relearn the navigation
+     halfway up the breakpoint range. It only stops spanning the full width. */
+  .ns-tabbar {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    width: min(var(--shell-max), 100%);
+    border-inline: 1px solid var(--border);
+    border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+  }
+}
+
+/* Desktop shopping keeps primary navigation above the content. */
+@media (min-width: 900px) {
+  .ns-shell[data-role='customer'] > .ns-tabbar {
+    position: relative;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    transform: none;
+    width: 100%;
+    max-width: var(--shell-max);
+    margin-inline: auto;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    padding: var(--space-3xs) var(--shell-gutter);
+    background: var(--canvas);
+  }
+  .ns-shell[data-role='customer'] > .ns-tabbar a {
+    flex-direction: row;
+    gap: var(--space-2xs);
+    font-size: var(--text-sm);
+  }
+  .ns-shell[data-role='customer'] > .ns-shell__dock {
+    bottom: var(--space-sm);
+  }
+}
+
+/* ── Icons ─────────────────────────────────────────────────────────────────── */
+
+/* 1em and currentColor, so an icon inherits the size and colour of whatever it
+   sits in and one stroke weight holds across the whole product. */
+.ns-icon {
+  width: 1.25em;
+  height: 1.25em;
+  flex: 0 0 auto;
+  vertical-align: -0.2em;
+}
+.ns-tabbar__glyph .ns-icon {
+  width: 1.35em;
+  height: 1.35em;
+}

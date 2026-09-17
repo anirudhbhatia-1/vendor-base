@@ -1,0 +1,18 @@
+ALTER DEFAULT PRIVILEGES IN SCHEMA marketplace
+  REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM marketplace_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA marketplace
+  REVOKE USAGE, SELECT, UPDATE ON SEQUENCES FROM marketplace_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA marketplace
+  REVOKE EXECUTE ON FUNCTIONS FROM marketplace_runtime;
+
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA marketplace FROM marketplace_runtime;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA marketplace FROM marketplace_runtime;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA marketplace FROM marketplace_runtime;
+REVOKE ALL PRIVILEGES ON SCHEMA marketplace FROM marketplace_runtime;
+DO $$
+BEGIN
+  EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM marketplace_runtime', current_database());
+END
+$$;
+
+DROP ROLE IF EXISTS marketplace_runtime;

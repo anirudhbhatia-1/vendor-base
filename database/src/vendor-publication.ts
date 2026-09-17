@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,6 +7,7 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction } from './transaction.js';
 
 export type PublicationState =
   | 'APPROVED'
@@ -85,7 +87,7 @@ interface CaseRow {
 }
 
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
-const EVIDENCE = /^SYNTH-EVIDENCE-[A-Z0-9-]{6,64}$/;
+const EVIDENCE = /^[A-Z0-9][A-Z0-9._:/-]{5,127}$/;
 
 function admin(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'admin') {
@@ -109,7 +111,7 @@ function note(value: string): string {
 
 function evidence(value: string): string {
   if (!EVIDENCE.test(value)) {
-    throw new VendorPublicationInputError('Evidence reference must be explicitly synthetic');
+    throw new VendorPublicationInputError('Evidence reference is invalid');
   }
   return value;
 }
@@ -119,21 +121,6 @@ function contextIds(context: RequestContext) {
     correlationId: parseUuidV7(context.correlation_id),
     requestId: parseRequestId(context.request_id),
   };
-}
-
-async function transaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
 }
 
 function parseChecks(value: unknown): readonly PublicationCheck[] {
@@ -332,7 +319,7 @@ function summary(row: CaseRow): PublicationSummary {
 export class VendorPublicationService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-vendor-publication',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,

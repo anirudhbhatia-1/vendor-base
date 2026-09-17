@@ -49,13 +49,24 @@ function fieldAuth(method: keyof PartnerFieldOpsController): AuthorizationRequir
 
 const applicationRoutes = ['create', 'submit', 'get'] as const;
 const adminApplicationRoutes = ['startReview', 'requestChanges', 'approve', 'reject'] as const;
+/**
+ * Field routes addressed by assignment.
+ *
+ * `partner.assignment.act` carries the ACTIVE_ASSIGNMENT resource rule, which
+ * grants only when the request supplies a `delivery_assignment_id` matching the
+ * caller's active assignment — so a route using it *must* bind the parameter.
+ * This decorator did not, and the rule therefore never granted: every guided
+ * exception and every offline capture answered "not found" to its own owner.
+ */
 const fieldRoutes = [
   'saveOfflineProof',
-  'syncOfflineProof',
   'raiseException',
   'resolveException',
   'listExceptions',
 ] as const;
+
+/** Self-scoped field routes, which carry no assignment to check. */
+const selfFieldRoutes = ['listPendingProofs', 'syncOfflineProof'] as const;
 
 test('scopes every partner application route to partner.application.manage', () => {
   for (const method of applicationRoutes) {
@@ -84,5 +95,23 @@ test('field ops routes require partner.assignment.act with resource concealment'
   for (const method of fieldRoutes) {
     assert.equal(fieldAuth(method)?.capability, 'partner.assignment.act', `${method}`);
     assert.equal(fieldAuth(method)?.conceal_resource, true, `${method}`);
+    // Without this the ACTIVE_ASSIGNMENT rule has no evidence and can never
+    // grant, which is precisely how these routes came to be unreachable.
+    assert.equal(
+      fieldAuth(method)?.delivery_assignment_id_param,
+      'delivery_assignment_id',
+      `${method} must bind the assignment it acts on`,
+    );
+  }
+});
+
+test('self-scoped field routes do not claim an assignment rule they cannot satisfy', () => {
+  for (const method of selfFieldRoutes) {
+    assert.equal(fieldAuth(method)?.capability, 'partner.field.read', `${method}`);
+    assert.equal(
+      fieldAuth(method)?.delivery_assignment_id_param,
+      undefined,
+      `${method} is not addressed by assignment`,
+    );
   }
 });

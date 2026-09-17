@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   createAuthenticatedActor,
   createRequestContext,
@@ -9,12 +10,10 @@ import { Pool } from 'pg';
 import {
   AssignmentConflictError,
   AssignmentCustodyService,
+  AssignmentInputError,
   AssignmentNotFoundError,
 } from '../src/assignment-custody.js';
-
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
+import { check } from './verify-support.js';
 
 function context(kind: ActorKind, actorId: UuidV7) {
   return createRequestContext({
@@ -208,15 +207,65 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       now: new Date(now.getTime() + 15_000),
       reason_code: 'CUSTOMER_LOCATION_ARRIVAL',
     });
+    // Delivery now completes only against the customer's code (DLP-30). The
+    // hash is planted directly here because this script builds assignments
+    // without a customer session; the control being exercised is the
+    // validation, not who asked for the code.
+    const deliveryOtp = '424242';
+    await pool.query(
+      `UPDATE marketplace.delivery_assignments
+          SET delivery_otp_hash = $2, delivery_otp_expires_at = $3, delivery_otp_attempts = 0
+        WHERE delivery_assignment_id = $1`,
+      [
+        first.delivery_assignment_id,
+        createHash('sha256').update(deliveryOtp).digest('hex'),
+        new Date(now.getTime() + 900_000),
+      ],
+    );
+
+    let wrongCodeRejected = false;
+    try {
+      await service.deliver({
+        command_reference: 'SYNTH-CMD-DELIVER-WRONG-A001',
+        context: partnerOne,
+        delivery_assignment_id: first.delivery_assignment_id,
+        expected_version: arrived.version,
+        now: new Date(now.getTime() + 15_500),
+        otp: '000000',
+        proof_reference: 'SYNTH-PROOF-DELIVERY-A001',
+        reason_code: 'DELIVERY_PROOF_VERIFIED',
+      });
+    } catch {
+      wrongCodeRejected = true;
+    }
+    check(wrongCodeRejected, 'A delivery completed without the customer’s code');
+    const attempts = await pool.query<{ delivery_otp_attempts: number }>(
+      'SELECT delivery_otp_attempts FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1',
+      [first.delivery_assignment_id],
+    );
+    check(
+      attempts.rows[0]?.delivery_otp_attempts === 1,
+      'A failed code attempt was not durably counted',
+    );
+
     const delivered = await service.deliver({
       command_reference: 'SYNTH-CMD-DELIVER-A001',
       context: partnerOne,
       delivery_assignment_id: first.delivery_assignment_id,
       expected_version: arrived.version,
       now: new Date(now.getTime() + 16_000),
+      otp: deliveryOtp,
       proof_reference: 'SYNTH-PROOF-DELIVERY-A001',
       reason_code: 'DELIVERY_PROOF_VERIFIED',
     });
+    const spent = await pool.query<{ delivery_otp_hash: string | null }>(
+      'SELECT delivery_otp_hash FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1',
+      [first.delivery_assignment_id],
+    );
+    check(
+      spent.rows[0]?.delivery_otp_hash === null,
+      'The delivery code survived a completed handoff and could be replayed',
+    );
     check(
       delivered.assignment_state === 'DELIVERED' && delivered.custody_state === 'DELIVERED',
       'Delivery did not close custody',
@@ -314,6 +363,34 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       reason_code: 'RETURN_PROOF_VERIFIED',
     });
     check(state.custody_state === 'RETURNED', 'Controlled return did not close custody');
+
+    // A command reference the schema would refuse is refused here first, as
+    // input. The domain's check was wider than `assignment_event_command_shape`
+    // (it allowed underscores and any prefix), so the partner console's
+    // `SYNTH-CMD-ARRIVE_VENDOR-…` reached the database and came back as a 500
+    // -- "Something went wrong at our end" -- on every attempt to mark arrival.
+    let refusedAsInput = false;
+    try {
+      await service.create({
+        approximate_drop_area: 'SYNTH C Scheme Jaipur',
+        approximate_pickup_area: 'SYNTH Jain Stores Jaipur',
+        command_reference: 'SYNTH-CMD-ARRIVE_VENDOR-MFXQ1',
+        context: admin,
+        handling_flags: [],
+        now: new Date(now.getTime() + 29_000),
+        package_count: 1,
+        reason_code: 'SYNTH_ASSIGNMENT_CREATED',
+        source_order_reference: 'SYNTH-ORDER-SHAPE-C001',
+        vendor_location_id: locationId,
+      });
+    } catch (error) {
+      refusedAsInput = error instanceof AssignmentInputError;
+      check(
+        refusedAsInput,
+        `A command reference the schema refuses was not refused as input (raised ${String(error)})`,
+      );
+    }
+    check(refusedAsInput, 'A command reference the schema refuses was accepted');
 
     const expiring = await service.create({
       approximate_drop_area: 'SYNTH C Scheme Jaipur',

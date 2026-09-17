@@ -1,11 +1,13 @@
 # Design — Neighbourhood Store Marketplace
 
-**Status:** MVP interaction contract v0.2
-**Synchronized:** 13 August 2026
-**Product stage:** Validation / pre-implementation — no visual UI kit or production build exists yet
+**Status:** MVP interaction contract v0.3; connected UX implementation plan
+**Synchronized:** 6 September 2026
+**Product stage:** Existing UI components and routes; runtime/device UX verification incomplete
 **Related documents:** [README](README.md) · [Product Requirements Document](prd.md) · [Architecture](architecture.md) · [Workflow](workflow.md) · [Implementation](implementation.md) · [AI Rules and Boundaries](rules.md)
 
 ## 1. Purpose and scope
+
+The [connected UI/UX implementation plan](docs/engineering/ui-ux-workflow-implementation-plan.md) records current source findings, target role navigation, screen-to-feature/workflow mapping, visual direction, implementation slices and acceptance tests. Use D-15 for current staging/payment/security decisions. Existing mango/evergreen tokens and Devanagari-capable typography are the implementation baseline, not proof of visual/accessibility correctness. Masked calling and moving customer maps remain deferred; protected backend messaging is included. This amendment supersedes conflicting older visual-kit/hosting/communication assumptions below.
 
 This document turns the functional requirements in `prd.md` and the state machines in `architecture.md` into concrete pages, navigation, components, and interaction states for the four product surfaces: Customer App/Web, Vendor Portal, Delivery Partner App/Portal, and Admin Console. The customer experience uses a **local-store quick-commerce UI**: fast to scan and shop, inspired by the interaction speed of Indian quick-commerce apps, while keeping named local vendors rather than anonymous dark-store inventory.
 

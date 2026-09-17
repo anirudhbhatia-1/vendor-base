@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -39,6 +40,8 @@ function reason(value: string) {
   return value;
 }
 function command(value: string) {
+  // The shape `assignment_event_command_shape` (0014) enforces, so a reference
+  // the schema refuses is a 400 here and not a 500 from the database.
   if (!/^SYNTH-CMD-[A-Z0-9-]{4,64}$/.test(value)) throw new PartnerWaitInputError();
   return value;
 }
@@ -48,8 +51,17 @@ function ids(context: RequestContext) {
     correlation: parseUuidV7(context.correlation_id),
   };
 }
+/**
+ * How long the wait ran.
+ *
+ * A finished timer is measured to the moment it ended, not to now. Measuring
+ * against the clock regardless meant a wait that closed days ago kept counting:
+ * the partner's screen showed a number that grew forever, and the credit shown
+ * beside it grew with it.
+ */
 function elapsed(row: WaitRow, now: Date) {
-  return Math.max(0, Math.floor((now.getTime() - row.started_at.getTime()) / 1000));
+  const until = row.ended_at ?? now;
+  return Math.max(0, Math.floor((until.getTime() - row.started_at.getTime()) / 1000));
 }
 function project(row: WaitRow, now: Date, adjustmentMinor?: number) {
   return {
@@ -71,7 +83,7 @@ function requiredRow<T>(row: T | undefined, message: string): T {
 export class PartnerWaitPolicyService {
   readonly #pool: Pool;
   constructor(input: { connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'partner-wait-policy',
       connectionString: input.connection_string,
       max: 6,
@@ -102,8 +114,16 @@ export class PartnerWaitPolicyService {
       const assigned = assignment.rows[0];
       if (!assigned) throw new PartnerWaitNotFoundError();
       if (assigned.partner_user_id !== who.actor_id) throw new PartnerWaitNotFoundError();
-      if (assigned.assignment_state !== 'ARRIVED') {
-        throw new PartnerWaitConflictError('Waiting can start only after customer-area arrival');
+      // Waiting happens at two real points, and this only ever admitted the
+      // second one. DLP-23 and DLP-36 are the *vendor* wait — architecture
+      // §10.1 puts WAITING between AT_VENDOR and PICKUP_VERIFIED — so a partner
+      // standing in a shop that is not ready could never start their timer and
+      // never accrued waiting pay. ARRIVED stays valid because a customer who
+      // cannot be reached is also a wait the partner is owed for (DLP-38).
+      if (!['AT_VENDOR', 'ARRIVED'].includes(assigned.assignment_state)) {
+        throw new PartnerWaitConflictError(
+          'Waiting can start once you are at the store or at the customer',
+        );
       }
       const timerId = createUuidV7({ now_ms: now.getTime() });
       let inserted;
@@ -292,9 +312,10 @@ export class PartnerWaitPolicyService {
         `INSERT INTO marketplace.assignment_events
           (assignment_event_id,delivery_assignment_id,assignment_version,event_type,
            previous_state,resulting_state,previous_custody_state,resulting_custody_state,
-           actor_id,actor_kind,reason_code,command_reference,request_id,correlation_id,occurred_at)
+           actor_id,actor_kind,reason_code,command_reference,request_id,correlation_id,occurred_at,
+           partner_user_id)
          VALUES($1,$2,$3,'DELIVERY_FAILED','ARRIVED','DELIVERY_FAILED','IN_CUSTODY','IN_CUSTODY',
-           $4,'delivery_partner',$5,$6,$7,$8,$9)`,
+           $4,'delivery_partner',$5,$6,$7,$8,$9,$10)`,
         [
           createUuidV7({ now_ms: now.getTime() + 1 }),
           row.delivery_assignment_id,
@@ -305,6 +326,7 @@ export class PartnerWaitPolicyService {
           contextIds.request,
           contextIds.correlation,
           now,
+          row.partner_user_id,
         ],
       );
       await client.query(
@@ -364,6 +386,16 @@ export class PartnerWaitPolicyService {
     return requiredRow(updated.rows[0], 'Wait timer advance returned no row');
   }
 
+  /**
+   * Appends one wait event, idempotently.
+   *
+   * The conflict target used to name only (timer, event type), which left the
+   * separate unique index on `command_reference` uncovered: replaying a command
+   * — the exact thing a command reference exists to make safe (§15) — raised an
+   * unhandled duplicate-key error and surfaced to the partner as a server
+   * fault. Untargeted `DO NOTHING` covers every unique constraint on the table,
+   * so a repeat is a no-op rather than a crash.
+   */
   async #event(
     client: PoolClient,
     row: WaitRow,
@@ -382,7 +414,7 @@ export class PartnerWaitPolicyService {
       `INSERT INTO marketplace.partner_wait_timer_events
         (partner_wait_timer_event_id,partner_wait_timer_id,event_type,elapsed_seconds,
          actor_id,actor_kind,command_reference,reason_code,request_id,correlation_id,occurred_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(partner_wait_timer_id,event_type) DO NOTHING`,
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
       [
         createUuidV7({ now_ms: input.now.getTime() }),
         row.partner_wait_timer_id,

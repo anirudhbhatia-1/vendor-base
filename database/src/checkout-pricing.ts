@@ -1,3 +1,4 @@
+import type { ResolvedFinancialPolicy } from './financial-policy.js';
 import { calculateDistanceAmount } from './money-policy.js';
 
 export interface CheckoutPricingGroupInput {
@@ -21,7 +22,8 @@ export interface CheckoutPricingResult {
   readonly authorization_buffer_minor: 0;
   readonly currency: 'INR';
   readonly groups: readonly CheckoutPricingGroup[];
-  readonly policy_version_reference: 'SYNTH-POLICY-D05-LOCAL-V1';
+  /** The exact policy version that priced this quote, stamped onto the order. */
+  readonly policy_version_reference: string;
   readonly total_minor: number;
 }
 
@@ -32,8 +34,16 @@ function minor(value: number, label: string): number {
   return value;
 }
 
+/**
+ * Prices a checkout against a policy the caller resolved.
+ *
+ * Still a pure function of its arguments — the policy arrives as one, rather
+ * than being read from a module-level constant, so an order can be priced under
+ * the rules in force when it was quoted and re-priced under none other.
+ */
 export function calculateCheckoutPricing(
   input: readonly CheckoutPricingGroupInput[],
+  resolved: ResolvedFinancialPolicy,
 ): CheckoutPricingResult {
   if (input.length < 1 || input.length > 3)
     throw new RangeError('Checkout requires one to three groups');
@@ -41,7 +51,7 @@ export function calculateCheckoutPricing(
     if (!group.vendor_location_id) throw new TypeError('Vendor location is required');
     const itemSubtotal = minor(group.item_subtotal_minor, 'Item subtotal');
     const tip = minor(group.tip_minor, 'Tip');
-    const delivery = calculateDistanceAmount(group.route_metres);
+    const delivery = calculateDistanceAmount(group.route_metres, resolved.policy);
     const total = minor(itemSubtotal + delivery + tip, 'Group total');
     return Object.freeze({
       delivery_minor: delivery,
@@ -57,7 +67,7 @@ export function calculateCheckoutPricing(
     authorization_buffer_minor: 0,
     currency: 'INR',
     groups: Object.freeze(groups),
-    policy_version_reference: 'SYNTH-POLICY-D05-LOCAL-V1',
+    policy_version_reference: resolved.version_reference,
     total_minor: minor(
       groups.reduce((sum, group) => sum + group.total_minor, 0),
       'Checkout total',

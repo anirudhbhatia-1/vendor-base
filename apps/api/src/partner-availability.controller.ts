@@ -2,42 +2,19 @@ import {
   BadRequestException,
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Inject,
   Param,
   Post,
   Query,
-  ConflictException,
 } from '@nestjs/common';
-import {
-  PartnerAvailabilityAuthorizationError,
-  PartnerAvailabilityConflictError,
-  PartnerAvailabilityInputError,
-  PartnerAvailabilityService,
-} from '@neighbourhood-store/database';
+import { PartnerAvailabilityService } from '@neighbourhood-store/database';
 import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { PARTNER_AVAILABILITY } from './tokens.js';
-function obj(v: unknown) {
-  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new BadRequestException();
-  return v as Record<string, unknown>;
-}
-function str(v: Record<string, unknown>, k: string) {
-  if (typeof v[k] !== 'string') throw new BadRequestException();
-  return v[k] as string;
-}
-function num(v: Record<string, unknown>, k: string) {
-  if (typeof v[k] !== 'number' || !Number.isFinite(v[k])) throw new BadRequestException();
-  return v[k] as number;
-}
-function map(e: unknown): never {
-  if (e instanceof PartnerAvailabilityInputError) throw new BadRequestException(e.message);
-  if (e instanceof PartnerAvailabilityConflictError) throw new ConflictException(e.message);
-  if (e instanceof PartnerAvailabilityAuthorizationError) throw new ForbiddenException();
-  throw e;
-}
+import { numberField, object, stringField } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const own = RequireAuthorization({
   capability: 'partner.availability.manage',
   conceal_resource: true,
@@ -54,25 +31,53 @@ export class PartnerAvailabilityController {
     return this.service.summary({ context: currentRequestContext() });
   }
   @Post() @own async set(@Body() raw: unknown) {
-    const b = obj(raw),
-      state = str(b, 'state');
+    const b = object(raw),
+      state = stringField(b, 'state');
     if (!['ONLINE', 'OFFLINE', 'PAUSED'].includes(state)) throw new BadRequestException();
     try {
       return await this.service.set({
         context: currentRequestContext(),
         state: state as 'ONLINE' | 'OFFLINE' | 'PAUSED',
-        reason_code: str(b, 'reason_code'),
+        reason_code: stringField(b, 'reason_code'),
         ...(state === 'ONLINE'
           ? {
-              latitude: num(b, 'latitude'),
-              longitude: num(b, 'longitude'),
-              accuracy_meters: num(b, 'accuracy_meters'),
-              battery_percent: num(b, 'battery_percent'),
+              latitude: numberField(b, 'latitude'),
+              longitude: numberField(b, 'longitude'),
+              accuracy_meters: numberField(b, 'accuracy_meters'),
+              battery_percent: numberField(b, 'battery_percent'),
             }
           : {}),
       });
     } catch (e) {
-      map(e);
+      translateDomainError(e);
+    }
+  }
+  /**
+   * Presence, once a minute while online. Without it an ONLINE row from a
+   * session that ended silently kept receiving offers indefinitely, ahead of
+   * partners who were actually there.
+   */
+  @Post('heartbeat') @own async heartbeat(@Body() raw: unknown) {
+    const b = object(raw);
+    const located = typeof b['latitude'] === 'number' && typeof b['longitude'] === 'number';
+    try {
+      return await this.service.heartbeat({
+        context: currentRequestContext(),
+        ...(located
+          ? {
+              latitude: numberField(b, 'latitude'),
+              longitude: numberField(b, 'longitude'),
+              ...(typeof b['accuracy_meters'] === 'number'
+                ? { accuracy_meters: numberField(b, 'accuracy_meters') }
+                : {}),
+            }
+          : {}),
+        ...(typeof b['battery_percent'] === 'number'
+          ? { battery_percent: numberField(b, 'battery_percent') }
+          : {}),
+      });
+    } catch (e) {
+      translateDomainError(e);
     }
   }
 }
@@ -92,7 +97,7 @@ export class AdminPartnerDispatchController {
         }),
       };
     } catch (e) {
-      map(e);
+      translateDomainError(e);
     }
   }
 }

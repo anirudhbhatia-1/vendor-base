@@ -1,0 +1,2 @@
+DROP INDEX marketplace.delivery_assignment_ratings_by_partner;
+DROP TABLE marketplace.delivery_assignment_ratings;

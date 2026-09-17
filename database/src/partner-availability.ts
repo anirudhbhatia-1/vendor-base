@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -14,12 +15,23 @@ function partner(c: RequestContext) {
   return c.actor.actor_id;
 }
 function admin(c: RequestContext) {
-  if (c.actor?.actor_kind !== 'admin') throw new PartnerAvailabilityAuthorizationError();
+  if (c.actor?.actor_kind !== 'admin' && c.actor?.actor_kind !== 'system')
+    throw new PartnerAvailabilityAuthorizationError();
 }
+/**
+ * How recently a partner's device must have confirmed presence for dispatch to
+ * consider them. The apps heartbeat once a minute while online; five minutes
+ * absorbs a backgrounded tab or a patchy connection without letting a session
+ * that ended silently keep receiving offers. A partner whose presence has
+ * lapsed is still ONLINE on their own screen -- they are simply not offered
+ * work until the next heartbeat arrives.
+ */
+export const PRESENCE_WINDOW_SECONDS = 5 * 60;
+
 export class PartnerAvailabilityService {
   readonly #pool: Pool;
   constructor(i: { connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: i.connection_string,
       application_name: 'partner-availability',
       max: 6,
@@ -79,7 +91,7 @@ export class PartnerAvailabilityService {
       if ((input.battery_percent ?? 100) < 20) warnings.push('LOW_BATTERY');
       if ((input.accuracy_meters ?? 0) > 100) warnings.push('LOW_LOCATION_ACCURACY');
       const row = await client.query(
-        `INSERT INTO marketplace.partner_availability(partner_user_id,availability_state,current_coordinates,location_accuracy_meters,battery_percent,online_since,accumulated_online_seconds,warning_codes,updated_at) VALUES($1,$2,CASE WHEN $3::float IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326)::geography END,$5,$6,CASE WHEN $2='ONLINE' THEN $7::timestamptz ELSE NULL END,$8,$9,$7::timestamptz) ON CONFLICT(partner_user_id) DO UPDATE SET availability_state=$2,current_coordinates=COALESCE(EXCLUDED.current_coordinates,partner_availability.current_coordinates),location_accuracy_meters=$5,battery_percent=$6,online_since=CASE WHEN $2='ONLINE' THEN COALESCE(partner_availability.online_since,$7::timestamptz) ELSE NULL END,accumulated_online_seconds=$8,warning_codes=$9,version=partner_availability.version+1,updated_at=$7::timestamptz RETURNING *`,
+        `INSERT INTO marketplace.partner_availability(partner_user_id,availability_state,current_coordinates,location_accuracy_meters,battery_percent,online_since,accumulated_online_seconds,warning_codes,updated_at,last_seen_at) VALUES($1,$2,CASE WHEN $3::float IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326)::geography END,$5,$6,CASE WHEN $2='ONLINE' THEN $7::timestamptz ELSE NULL END,$8,$9,$7::timestamptz,$7::timestamptz) ON CONFLICT(partner_user_id) DO UPDATE SET availability_state=$2,current_coordinates=COALESCE(EXCLUDED.current_coordinates,partner_availability.current_coordinates),location_accuracy_meters=$5,battery_percent=$6,online_since=CASE WHEN $2='ONLINE' THEN COALESCE(partner_availability.online_since,$7::timestamptz) ELSE NULL END,accumulated_online_seconds=$8,warning_codes=$9,version=partner_availability.version+1,updated_at=$7::timestamptz,last_seen_at=$7::timestamptz RETURNING *`,
         [
           id,
           input.state,
@@ -115,6 +127,48 @@ export class PartnerAvailabilityService {
       client.release();
     }
   }
+  /**
+   * The device saying "still here", once a minute while online.
+   *
+   * Refreshes presence and, when the device offers them, the coordinates
+   * dispatch ranks by. Writes no availability event: a heartbeat is not a
+   * decision, and sixty events an hour per partner would bury the ones that
+   * are. Refused unless the partner is ONLINE, so a client that lost the state
+   * change learns it here rather than heartbeating an offline row for ever.
+   */
+  async heartbeat(input: {
+    context: RequestContext;
+    latitude?: number;
+    longitude?: number;
+    accuracy_meters?: number;
+    battery_percent?: number;
+    now?: Date;
+  }) {
+    const id = partner(input.context);
+    const now = input.now ?? new Date();
+    const located = Number.isFinite(input.latitude) && Number.isFinite(input.longitude);
+    const r = await this.#pool.query<{ availability_state: string; last_seen_at: Date }>(
+      `UPDATE marketplace.partner_availability
+          SET last_seen_at=$2::timestamptz,
+              current_coordinates=CASE WHEN $3::boolean THEN ST_SetSRID(ST_MakePoint($5::float,$4::float),4326)::geography ELSE current_coordinates END,
+              location_accuracy_meters=COALESCE($6,location_accuracy_meters),
+              battery_percent=COALESCE($7,battery_percent)
+        WHERE partner_user_id=$1 AND availability_state='ONLINE'
+        RETURNING availability_state, last_seen_at`,
+      [
+        id,
+        now,
+        located,
+        located ? input.latitude : null,
+        located ? input.longitude : null,
+        input.accuracy_meters ?? null,
+        input.battery_percent ?? null,
+      ],
+    );
+    const row = r.rows[0];
+    if (!row) throw new PartnerAvailabilityConflictError('Heartbeat applies while online');
+    return { availability_state: row.availability_state, last_seen_at: row.last_seen_at };
+  }
   async summary(input: { context: RequestContext; now?: Date }) {
     const id = partner(input.context);
     const now = input.now ?? new Date();
@@ -133,16 +187,91 @@ export class PartnerAvailabilityService {
       }
     );
   }
+  /**
+   * Clears a partner's availability from a system context.
+   *
+   * `set` is partner-authenticated by design, so an operational event such as a
+   * suspension cannot go through it. Recording the availability event keeps the
+   * partner's own history complete rather than mutating the row silently.
+   */
+  async forceOffline(input: {
+    context: RequestContext;
+    partner_user_id: UuidV7;
+    reason_code: string;
+    now?: Date;
+  }) {
+    admin(input.context);
+    if (!/^[A-Z][A-Z0-9_]{2,63}$/.test(input.reason_code))
+      throw new PartnerAvailabilityInputError();
+    const now = input.now ?? new Date();
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      const prior = await client.query<{ availability_state: string }>(
+        `SELECT availability_state FROM marketplace.partner_availability WHERE partner_user_id=$1 FOR UPDATE`,
+        [input.partner_user_id],
+      );
+      const old = prior.rows[0];
+      if (!old || old.availability_state === 'OFFLINE') {
+        await client.query('COMMIT');
+        return false;
+      }
+      await client.query(
+        `UPDATE marketplace.partner_availability
+            SET availability_state='OFFLINE',online_since=NULL,version=version+1,updated_at=$2
+          WHERE partner_user_id=$1`,
+        [input.partner_user_id, now],
+      );
+      await client.query(
+        `INSERT INTO marketplace.partner_availability_events(event_id,partner_user_id,previous_state,resulting_state,warning_codes,actor_id,reason_code,request_id,correlation_id,occurred_at) VALUES($1,$2,$3,'OFFLINE',$4,$5,$6,$7,$8,$9)`,
+        [
+          createUuidV7(),
+          input.partner_user_id,
+          old.availability_state,
+          [],
+          input.context.actor?.actor_id ?? input.partner_user_id,
+          input.reason_code,
+          parseRequestId(input.context.request_id),
+          parseUuidV7(input.context.correlation_id),
+          now,
+        ],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Partners a vendor location may be offered work from.
+   *
+   * Availability alone is not enough: a suspended partner keeps whatever
+   * availability row they last wrote, so eligibility is re-checked here rather
+   * than trusted from the availability state.
+   */
   async eligible(input: {
     context: RequestContext;
     vendor_location_id: UuidV7;
     radius_meters?: number;
+    /** Partners who already declined the attempt being dispatched. */
+    exclude_partner_user_ids?: readonly UuidV7[];
+    now?: Date;
   }) {
     admin(input.context);
     const radius = Math.min(Math.max(input.radius_meters ?? 5000, 100), 50000);
+    const excluded = input.exclude_partner_user_ids ?? [];
+    const now = input.now ?? new Date();
+    // ONLINE alone is not presence: a session that ended without going
+    // offline stays ONLINE for ever, at the place it was. Only a partner whose
+    // device has confirmed itself inside the window is offered work.
+    const seenSince = new Date(now.getTime() - PRESENCE_WINDOW_SECONDS * 1000);
     const r = await this.#pool.query(
-      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 WHERE a.availability_state='ONLINE' AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') ORDER BY distance_meters LIMIT 50`,
-      [input.vendor_location_id, radius],
+      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 WHERE a.availability_state='ONLINE' AND a.last_seen_at>$4::timestamptz AND EXISTS(SELECT 1 FROM marketplace.partner_eligibilities e WHERE e.user_id=a.partner_user_id AND e.state='ELIGIBLE' AND (e.eligible_until IS NULL OR e.eligible_until>$5::timestamptz)) AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') AND NOT (a.partner_user_id = ANY($3::uuid[])) ORDER BY distance_meters LIMIT 50`,
+      [input.vendor_location_id, radius, excluded, seenSince, now],
     );
     return r.rows.map((x) => ({ ...x, partner_user_id: parseUuidV7(x.partner_user_id) }));
   }

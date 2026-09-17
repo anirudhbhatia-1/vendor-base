@@ -83,3 +83,51 @@
 {"ts":"2026-08-12T08:13:57.305Z","cmd":"screenshot","args":"--viewport /private/tmp/manager-categories-desktop.png","origin":"http://127.0.0.1:8766/index.html#categories","durationMs":32,"status":"ok","hasCookies":false,"mode":"launched"}
 {"ts":"2026-08-12T08:13:57.335Z","cmd":"console","args":"--errors","origin":"http://127.0.0.1:8766/index.html#categories","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
 {"ts":"2026-08-12T08:14:25.930Z","cmd":"network","args":"","origin":"http://127.0.0.1:8766/index.html#categories","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:35.479Z","cmd":"goto","args":"http://127.0.0.1:3100","origin":"http://127.0.0.1:3100/","durationMs":157,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:35.740Z","cmd":"goto","args":"http://127.0.0.1:3101","origin":"http://127.0.0.1:3101/","durationMs":95,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:36.014Z","cmd":"goto","args":"http://127.0.0.1:3102","origin":"http://127.0.0.1:3102/","durationMs":107,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:36.203Z","cmd":"goto","args":"http://127.0.0.1:3103","origin":"http://127.0.0.1:3103/","durationMs":81,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:36.303Z","cmd":"goto","args":"http://127.0.0.1:3000","origin":"http://127.0.0.1:3103/","durationMs":8,"status":"error","hasCookies":false,"mode":"launched","error":"goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3000/\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:3000/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-08-24T10:44:36.797Z","cmd":"goto","args":"http://127.0.0.1:8081","origin":"http://127.0.0.1:8081/","durationMs":427,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:37.818Z","cmd":"goto","args":"http://127.0.0.1:8082","origin":"http://127.0.0.1:8082/","durationMs":974,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:38.891Z","cmd":"goto","args":"http://127.0.0.1:8083","origin":"http://127.0.0.1:8083/","durationMs":1028,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:44:40.136Z","cmd":"goto","args":"http://127.0.0.1:8084","origin":"http://127.0.0.1:8084/","durationMs":1182,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:45:01.721Z","cmd":"goto","args":"http://127.0.0.1:3001","origin":"http://127.0.0.1:8084/","durationMs":5,"status":"error","hasCookies":false,"mode":"launched","error":"goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3001/\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:3001/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-08-24T10:45:01.782Z","cmd":"goto","args":"http://127.0.0.1:3200","origin":"chrome-error://chromewebdata/","durationMs":6,"status":"error","hasCookies":false,"mode":"launched","error":"goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3200/\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:3200/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-08-24T10:45:01.827Z","cmd":"goto","args":"http://127.0.0.1:4000","origin":"chrome-error://chromewebdata/","durationMs":2,"status":"error","hasCookies":false,"mode":"launched","error":"goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:4000/\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:4000/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-08-24T10:45:01.872Z","cmd":"goto","args":"http://127.0.0.1:8080","origin":"chrome-error://chromewebdata/","durationMs":3,"status":"error","hasCookies":false,"mode":"launched","error":"goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:8080/\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:8080/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-08-24T10:45:32.013Z","cmd":"goto","args":"http://127.0.0.1:3100","origin":"chrome-error://chromewebdata/","durationMs":4,"status":"error","hasCookies":false,"mode":"launched","error":"goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3100/\nCall log:\n\u001b[2m  - navigating to \"http://127.0.0.1:3100/\", waiting until \"domcontentloaded\"\u001b[22m\n"}
+{"ts":"2026-08-24T10:45:32.079Z","cmd":"snapshot","args":"-i -a -o .gstack/qa-reports/screenshots/customer-desktop.png","origin":"chrome-error://chromewebdata/","durationMs":22,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:45:32.125Z","cmd":"console","args":"--errors","origin":"chrome-error://chromewebdata/","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:45:32.170Z","cmd":"links","args":"","origin":"chrome-error://chromewebdata/","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:03.545Z","cmd":"console","args":"--help","origin":"chrome-error://chromewebdata/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:22.432Z","cmd":"newtab","args":"http://127.0.0.1:3100","origin":"http://127.0.0.1:3100/","durationMs":365,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:22.510Z","cmd":"console","args":"--clear","origin":"http://127.0.0.1:3100/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:22.606Z","cmd":"reload","args":"","origin":"http://127.0.0.1:3100/","durationMs":42,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:23.121Z","cmd":"snapshot","args":"-i -a -o .gstack/qa-reports/screenshots/customer-desktop.png","origin":"http://127.0.0.1:3100/","durationMs":457,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:23.172Z","cmd":"console","args":"--errors","origin":"http://127.0.0.1:3100/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:23.218Z","cmd":"ux-audit","args":"","origin":"http://127.0.0.1:3100/","durationMs":3,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:23.268Z","cmd":"viewport","args":"375x812","origin":"http://127.0.0.1:3100/","durationMs":3,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:23.356Z","cmd":"screenshot","args":".gstack/qa-reports/screenshots/customer-mobile.png","origin":"http://127.0.0.1:3100/","durationMs":40,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:46:23.397Z","cmd":"viewport","args":"1280x800","origin":"http://127.0.0.1:3100/","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:48:26.751Z","cmd":"goto","args":"http://127.0.0.1:3100","origin":"http://127.0.0.1:3100/","durationMs":69,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:48:55.663Z","cmd":"console","args":"--clear","origin":"http://127.0.0.1:3100/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:48:56.750Z","cmd":"snapshot","args":"-i","origin":"http://127.0.0.1:3100/","durationMs":24,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:02.441Z","cmd":"fill","args":"@e1 1234567890","origin":"http://127.0.0.1:3100/","durationMs":84,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:04.087Z","cmd":"click","args":"@e2","origin":"http://127.0.0.1:3100/","durationMs":25,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:04.786Z","cmd":"snapshot","args":"-i","origin":"http://127.0.0.1:3100/","durationMs":6,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:05.389Z","cmd":"console","args":"--errors","origin":"http://127.0.0.1:3100/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:12.303Z","cmd":"text","args":"","origin":"http://127.0.0.1:3100/","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:13.073Z","cmd":"screenshot","args":"--viewport /Users/anirudhbhatia/vendor/.gstack/qa-reports/screenshots/customer-invalid-identifier.png","origin":"http://127.0.0.1:3100/","durationMs":31,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:32.959Z","cmd":"fill","args":"@e1 SYNTH-PHONE-CUSTOMER-001","origin":"http://127.0.0.1:3100/","durationMs":12,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:34.860Z","cmd":"click","args":"@e2","origin":"http://127.0.0.1:3100/","durationMs":23,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:36.563Z","cmd":"wait","args":"--networkidle","origin":"http://127.0.0.1:3100/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:38.367Z","cmd":"text","args":"","origin":"http://127.0.0.1:3100/","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:39.414Z","cmd":"console","args":"--errors","origin":"http://127.0.0.1:3100/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:48.426Z","cmd":"goto","args":"http://127.0.0.1:3101","origin":"http://127.0.0.1:3101/","durationMs":280,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:49.586Z","cmd":"console","args":"--clear","origin":"http://127.0.0.1:3101/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:50.515Z","cmd":"reload","args":"","origin":"http://127.0.0.1:3101/","durationMs":35,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:51.509Z","cmd":"snapshot","args":"-i","origin":"http://127.0.0.1:3101/","durationMs":20,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:53.329Z","cmd":"console","args":"--errors","origin":"http://127.0.0.1:3101/","durationMs":0,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:49:54.315Z","cmd":"screenshot","args":"--viewport /Users/anirudhbhatia/vendor/.gstack/qa-reports/screenshots/vendor-desktop.png","origin":"http://127.0.0.1:3101/","durationMs":48,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-08-24T10:50:12.431Z","cmd":"stop","args":"","origin":"http://127.0.0.1:3101/","durationMs":1,"status":"ok","hasCookies":false,"mode":"launched"}

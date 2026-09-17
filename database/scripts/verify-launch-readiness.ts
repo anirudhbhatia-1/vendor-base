@@ -1,9 +1,4 @@
-import {
-  createAuthenticatedActor,
-  createRequestContext,
-  createUuidV7,
-  type UuidV7,
-} from '@neighbourhood-store/domain-types';
+import { createUuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import {
   claimOutboxBatch,
@@ -16,37 +11,8 @@ import {
   LocaleNotFoundError,
   LocaleRegistryService,
 } from '../src/locale-registry.js';
-
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-async function rejects(work: () => Promise<unknown>, kind: new () => Error, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof kind, `${message} (raised ${String(error)})`);
-    return;
-  }
-  throw new Error(message);
-}
-function customerContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'customer',
-      session_id: createUuidV7(),
-    }),
-  });
-}
-function adminContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'admin',
-      session_id: createUuidV7(),
-    }),
-  });
-}
+import { ERROR_DEFINITIONS, FIELD_ERROR_MESSAGE_KEYS } from '@neighbourhood-store/domain-types';
+import { check, rejects, customerContext, adminContext } from './verify-support.js';
 
 /**
  * Phase 12 gate script. Exercises the three synthetically verifiable
@@ -83,6 +49,27 @@ export async function verifyLaunchReadiness(connectionString: string): Promise<v
     check(
       coverage.missing.length === 0,
       `${coverage.missing.length} locale key(s) missing a translation: ${JSON.stringify(coverage.missing)}`,
+    );
+
+    // 12.3 - Every stable error code's message_key is registered.
+    //
+    // The coverage check above only sees keys that exist, so it could never catch a
+    // key the code asks for and nobody registered. All eleven kernel error codes were
+    // in exactly that position: every other user-facing string had en and hi, while
+    // these resolved to nothing, so any error response carried a key no bundle could
+    // translate.
+    const registeredKeys = new Set(
+      (await locales.listKeys({ context: adminContext(adminUserId) })).map(
+        (entry) => entry.locale_key,
+      ),
+    );
+    const unregistered = [
+      ...Object.values(ERROR_DEFINITIONS).map((definition) => definition.message_key),
+      ...Object.values(FIELD_ERROR_MESSAGE_KEYS),
+    ].filter((key) => !registeredKeys.has(key));
+    check(
+      unregistered.length === 0,
+      `Stable error message key(s) absent from the locale registry: ${JSON.stringify(unregistered)}`,
     );
 
     // 12.3 - Audience filter keeps admin labels out of a customer bundle.

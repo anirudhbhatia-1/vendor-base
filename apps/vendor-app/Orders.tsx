@@ -1,6 +1,9 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-const apiUrl = 'http://10.0.2.2:3001';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { createRawRequester } from '@neighbourhood-store/contracts';
+const globalEnv =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+const apiUrl = globalEnv['EXPO_PUBLIC_API_URL'] ?? 'http://10.0.2.2:3001';
 type Order = {
   vendor_order_id: string;
   order_reference: string;
@@ -8,21 +11,22 @@ type Order = {
   total_minor: number;
   version: number;
 };
-export function Orders() {
-  const [token, setToken] = useState('');
-  const [location, setLocation] = useState('');
+export function Orders({
+  accessToken = '',
+  vendorLocationId = '',
+}: {
+  accessToken?: string;
+  vendorLocationId?: string;
+} = {}) {
+  const token = accessToken;
+  const location = vendorLocationId;
   const [orders, setOrders] = useState<Order[]>([]);
-  const [message, setMessage] = useState('Connect the live store order desk.');
+  const [message, setMessage] = useState(
+    token && location ? 'Ready — press Load orders.' : 'Sign in and set the location UUID above.',
+  );
   async function request(path: string, init?: RequestInit) {
-    const response = await fetch(`${apiUrl}/vendor/locations/${location}/orders${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(init?.body ? { 'content-type': 'application/json' } : {}),
-      },
-    });
-    if (!response.ok) throw new Error(`Order request failed (${response.status}).`);
-    return response.json();
+    const raw = createRawRequester({ baseUrl: apiUrl, getToken: () => token });
+    return raw<unknown>(`/vendor/locations/${location}/orders${path}`, init);
   }
   async function load() {
     try {
@@ -48,14 +52,7 @@ export function Orders() {
     <View style={s.panel}>
       <Text style={s.kicker}>LIVE FULFILMENT</Text>
       <Text style={s.heading}>Accept and prepare orders</Text>
-      <TextInput value={token} onChangeText={setToken} placeholder="Vendor token" style={s.input} />
-      <TextInput
-        value={location}
-        onChangeText={setLocation}
-        placeholder="Location UUID"
-        style={s.input}
-      />
-      <Button label="Load orders" onPress={load} />
+      <Button label="Load orders" onPress={() => token && location && void load()} />
       <Text style={s.message}>{message}</Text>
       {orders.map((order) => (
         <View key={order.vendor_order_id} style={s.order}>

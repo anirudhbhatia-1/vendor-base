@@ -7,13 +7,11 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import {
+  PRESENCE_WINDOW_SECONDS,
   PartnerAvailabilityConflictError,
   PartnerAvailabilityService,
 } from '../src/partner-availability.js';
-
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
+import { check, rejects } from './verify-support.js';
 
 function context(kind: ActorKind, actorId: UuidV7) {
   return createRequestContext({
@@ -23,16 +21,6 @@ function context(kind: ActorKind, actorId: UuidV7) {
       session_id: createUuidV7(),
     }),
   });
-}
-
-async function rejects(work: () => Promise<unknown>, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof PartnerAvailabilityConflictError, `${message}: ${String(error)}`);
-    return;
-  }
-  throw new Error(message);
 }
 
 export async function verifyPartnerAvailability(connectionString: string): Promise<void> {
@@ -89,6 +77,7 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
           reason_code: 'PARTNER_STARTED_SHIFT',
           now,
         }),
+      PartnerAvailabilityConflictError,
       'Ineligible partner was allowed online',
     );
 
@@ -113,10 +102,62 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
       context: context('admin', adminId),
       vendor_location_id: locationId,
       radius_meters: 2_000,
+      now,
     });
     check(
       eligible.some((candidate) => candidate.partner_user_id === partnerId),
       'Online eligible partner was absent from dispatch search',
+    );
+
+    // Presence lapses. ONLINE is a state the partner set once; whether they are
+    // still there is a fact their device has to keep confirming. Ten partners
+    // from an acceptance run two weeks earlier were still "online" at a store
+    // on the reporting environment and outranked the one real partner nearby.
+    const lapsed = new Date(now.getTime() + (PRESENCE_WINDOW_SECONDS + 60) * 1000);
+    const unseen = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 2_000,
+      now: lapsed,
+    });
+    check(
+      !unseen.some((candidate) => candidate.partner_user_id === partnerId),
+      'A partner whose presence had lapsed was still offered to dispatch',
+    );
+    const beat = await service.heartbeat({
+      context: context('delivery_partner', partnerId),
+      latitude: 26.9103,
+      longitude: 75.8103,
+      accuracy_meters: 20,
+      now: lapsed,
+    });
+    check(
+      beat.availability_state === 'ONLINE' && beat.last_seen_at.getTime() === lapsed.getTime(),
+      'Heartbeat did not record presence',
+    );
+    const seenAgain = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 2_000,
+      now: lapsed,
+    });
+    check(
+      seenAgain.some((candidate) => candidate.partner_user_id === partnerId),
+      'A heartbeat did not restore the partner to dispatch',
+    );
+    const moved = await pool.query<{ metres: number }>(
+      `SELECT ST_Distance(current_coordinates, ST_SetSRID(ST_MakePoint(75.8103,26.9103),4326)::geography)::integer AS metres
+         FROM marketplace.partner_availability WHERE partner_user_id=$1`,
+      [partnerId],
+    );
+    check(moved.rows[0]?.metres === 0, 'Heartbeat did not carry the device position');
+    const beatsWithoutEvents = await pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM marketplace.partner_availability_events WHERE partner_user_id=$1',
+      [partnerId],
+    );
+    check(
+      beatsWithoutEvents.rows[0]?.count === '1',
+      'A heartbeat wrote an availability event; only state changes are events',
     );
 
     const offlineAt = new Date(now.getTime() + 3_600_000);
@@ -135,6 +176,15 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
       now: offlineAt,
     });
     check(summary.availability_state === 'OFFLINE', 'Availability summary is stale');
+    await rejects(
+      () =>
+        service.heartbeat({
+          context: context('delivery_partner', partnerId),
+          now: new Date(offlineAt.getTime() + 60_000),
+        }),
+      PartnerAvailabilityConflictError,
+      'An offline partner was allowed to heartbeat as present',
+    );
     check(summary.trips_today === '0', 'Unexpected trip count in fresh availability fixture');
 
     const events = await pool.query<{ count: string }>(

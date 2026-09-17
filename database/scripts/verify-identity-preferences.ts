@@ -46,9 +46,18 @@ export async function verifyIdentityPreferences(connectionString: string): Promi
       empty.profile.display_name !== null ||
       empty.profile.language !== 'EN' ||
       empty.consents.length !== 0 ||
-      empty.notifications.length !== 8
+      // Four kinds across three channels. IN_APP joined PUSH and SMS in 0056;
+      // it had been a deliverable channel since 0037 with no policy behind it,
+      // so every in-app notification was silently discarded.
+      empty.notifications.length !== 12
     ) {
       throw new Error('New customer settings did not return privacy-minimal defaults');
+    }
+    const inAppOrderStatus = empty.notifications.find(
+      (item) => item.notification_kind === 'ORDER_STATUS' && item.channel === 'IN_APP',
+    );
+    if (!inAppOrderStatus?.effective_enabled) {
+      throw new Error('Order updates cannot reach the customer’s in-app inbox by default');
     }
     const requiredSecurity = empty.notifications.find(
       (item) => item.notification_kind === 'SECURITY' && item.channel === 'SMS',
@@ -268,14 +277,8 @@ export async function verifyIdentityPreferences(connectionString: string): Promi
       preference_classification: string;
     }>(
       `SELECT
-         (SELECT count(*)::text FROM (
-            SELECT retention_class, retention_review_at FROM marketplace.users
-            UNION ALL SELECT retention_class, retention_review_at FROM marketplace.phone_identities
-            UNION ALL SELECT retention_class, retention_review_at FROM marketplace.devices
-            UNION ALL SELECT retention_class, retention_review_at FROM marketplace.sessions
-            UNION ALL SELECT retention_class, retention_review_at FROM marketplace.otp_challenges
-            UNION ALL SELECT retention_class, retention_review_at FROM marketplace.role_assignments
-          ) sensitive WHERE retention_class IS NULL OR retention_review_at IS NULL) AS missing_retention,
+         (SELECT count(*)::text FROM marketplace.unclassified_retention_rows())
+           AS missing_retention,
          (SELECT data_classification FROM marketplace.customer_profiles WHERE user_id = $1)
            AS profile_classification,
          (SELECT data_classification FROM marketplace.consents WHERE user_id = $1 LIMIT 1)
@@ -284,6 +287,46 @@ export async function verifyIdentityPreferences(connectionString: string): Promi
            WHERE user_id = $1 LIMIT 1) AS preference_classification`,
       [customer],
     );
+    // What actually protects this is the schema, not a row scan.
+    //
+    // The check here used to count rows where `retention_class IS NULL` across six
+    // hard-coded tables. Every one of those columns is declared NOT NULL, so the count
+    // could only ever be zero: the assertion could not fail and proved nothing. It also
+    // named six tables while fifteen carry the columns.
+    //
+    // The meaningful question is whether a sensitive table can be added *without* the
+    // classification, so this asserts the declaration: both columns present, both NOT
+    // NULL, on every table that classifies anything, and the coverage not shrinking.
+    const declaration = await pool.query<{
+      classified: string;
+      nullable: string;
+      unpaired: string;
+    }>(
+      `WITH classified AS (
+         SELECT table_name,
+                count(*) FILTER (WHERE column_name = 'retention_class') AS has_class,
+                count(*) FILTER (WHERE column_name = 'retention_review_at') AS has_review,
+                count(*) FILTER (WHERE is_nullable = 'YES') AS nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'marketplace'
+            AND column_name IN ('retention_class', 'retention_review_at')
+          GROUP BY table_name
+       )
+       SELECT count(*)::text AS classified,
+              coalesce(sum(nullable), 0)::text AS nullable,
+              count(*) FILTER (WHERE has_class <> 1 OR has_review <> 1)::text AS unpaired
+         FROM classified`,
+    );
+    const declared = declaration.rows[0];
+    if (Number(declared?.classified ?? 0) < 15) {
+      throw new Error('Retention classification covers fewer tables than it did');
+    }
+    if (declared?.unpaired !== '0') {
+      throw new Error('A table carries one retention column without the other');
+    }
+    if (declared.nullable !== '0') {
+      throw new Error('A retention classification column is nullable and can be left unset');
+    }
     if (
       retention.rows[0]?.missing_retention !== '0' ||
       retention.rows[0].profile_classification !== 'RESTRICTED' ||

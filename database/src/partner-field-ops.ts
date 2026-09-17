@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -5,7 +6,8 @@ import {
   type RequestContext,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
-import { Pool, type PoolClient } from 'pg';
+import { Pool } from 'pg';
+import { transaction as tx } from './transaction.js';
 
 export class FieldOpsInputError extends Error {}
 export class FieldOpsNotFoundError extends Error {}
@@ -78,6 +80,10 @@ export interface ExceptionEvent {
 }
 
 const digest = /^[a-f0-9]{64}$/;
+// The column's own CHECK is narrower than this used to be, so a key the
+// service accepted was rejected by the database — surfacing as a 500 on every
+// offline capture rather than a 400 the caller could act on. Kept identical to
+// `partner_offline_proof_key_shape`.
 const keyReference = /^SYNTH-PARTNER-KEY-[A-Z0-9-]{4,64}$/;
 const reasonCode = /^[A-Z][A-Z0-9_]{2,63}$/;
 
@@ -94,6 +100,25 @@ const exceptionKinds: ReadonlySet<ExceptionKind> = new Set([
   'VEHICLE_FAILURE',
   'PROHIBITED_GOODS',
 ]);
+/**
+ * Resolutions a partner may record themselves.
+ *
+ * These are accounts of what the partner did — they tried again, they carried
+ * on, they escalated. Everything else *directs* the delivery, and the workflow
+ * places that with operations: support authorises a return destination and its
+ * proof rules (§8.2.2), and cancelling or reassigning has customer, custody and
+ * money consequences the partner is not the one to weigh (§11).
+ *
+ * The UI previously offered all six to the partner, so someone standing at an
+ * unsafe address could close their own exception as CANCEL — ending an order
+ * with no operations decision anywhere in the record.
+ */
+export const PARTNER_SELF_RESOLUTIONS: ReadonlySet<ExceptionResolution> = new Set([
+  'RETRY',
+  'CONTINUE',
+  'SUPPORT',
+]);
+
 const resolutions: ReadonlySet<ExceptionResolution> = new Set([
   'OPEN',
   'RETRY',
@@ -113,21 +138,6 @@ function contextIds(context: RequestContext): Ids {
     request: parseRequestId(context.request_id),
     correlation: parseUuidV7(context.correlation_id),
   };
-}
-
-async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
 }
 
 function requirePartner(context: RequestContext): UuidV7 {
@@ -179,7 +189,7 @@ export class PartnerFieldOpsService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-partner-field-ops',
       max: 8,
@@ -217,7 +227,7 @@ export class PartnerFieldOpsService {
     if (!digest.test(input.encrypted_payload_digest))
       throw new FieldOpsInputError('encrypted_payload_digest must be a SHA-256 hex string');
     if (!keyReference.test(input.encryption_key_reference))
-      throw new FieldOpsInputError('encryption_key_reference is not a synthetic key reference');
+      throw new FieldOpsInputError('encryption_key_reference is invalid');
     if (!reasonCode.test(input.reason_code))
       throw new FieldOpsInputError('reason_code must be shouting-snake-case');
     const now = input.now ?? new Date();
@@ -446,6 +456,14 @@ export class PartnerFieldOpsService {
     if (actorKind !== 'delivery_partner' && actorKind !== 'admin' && actorKind !== 'system') {
       throw new FieldOpsAuthorizationError();
     }
+    // A partner reports; operations direct. Returning, cancelling and
+    // reassigning move custody and money, so they are not the reporter's to
+    // record even on their own assignment.
+    if (actorKind === 'delivery_partner' && !PARTNER_SELF_RESOLUTIONS.has(input.resolution_state)) {
+      throw new FieldOpsAuthorizationError(
+        'Operations decide a return, a cancellation or a reassignment',
+      );
+    }
     const actorId = actor.actor_id;
     const now = input.now ?? new Date();
     const ids = contextIds(input.context);
@@ -491,6 +509,67 @@ export class PartnerFieldOpsService {
       );
       return projectException(inserted.rows[0] as Record<string, unknown>);
     });
+  }
+
+  /**
+   * Every partner exception still waiting on an instruction (DLP-37 – DLP-42, ADM-05).
+   *
+   * The partner surface tells someone reporting an unsafe address or a missing
+   * package that operations have it and will send guidance. Nothing on the
+   * operations side could read it: exceptions were listable only per assignment,
+   * behind a capability whose resource rule grants to the partner working that
+   * assignment. So the report went nowhere, and the person waiting in the field
+   * was told to wait for a reply that could not be composed.
+   *
+   * Ordered with emergencies first and oldest first within that, which is the
+   * ranking §19 asks for: safety before everything, then age.
+   */
+  async listOpenExceptions(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+  }): Promise<
+    readonly (ExceptionEvent & {
+      readonly is_emergency: boolean;
+      readonly source_order_reference: string;
+      readonly assignment_state: string;
+    })[]
+  > {
+    const actor = input.context.actor;
+    if (!actor || (actor.actor_kind !== 'admin' && actor.actor_kind !== 'system')) {
+      throw new FieldOpsAuthorizationError();
+    }
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const result = await this.#pool.query(
+      `SELECT event.*, assignment.source_order_reference, assignment.assignment_state
+         FROM marketplace.partner_exception_events event
+         JOIN marketplace.delivery_assignments assignment USING (delivery_assignment_id)
+        WHERE event.resolution_state = 'OPEN'
+          -- An exception a later event already closed is not open work, even
+          -- though its own row still says OPEN: this table is append-only.
+          AND NOT EXISTS (
+            SELECT 1 FROM marketplace.partner_exception_events closed
+             WHERE closed.delivery_assignment_id = event.delivery_assignment_id
+               AND closed.exception_kind = event.exception_kind
+               AND closed.resolution_state <> 'OPEN'
+               AND closed.occurred_at > event.occurred_at
+          )
+        ORDER BY (event.exception_kind = ANY($1::text[])) DESC, event.occurred_at ASC
+        LIMIT $2`,
+      [[...EMERGENCY_KINDS], limit],
+    );
+    return Object.freeze(
+      result.rows.map((row) => {
+        const projected = projectException(row as Record<string, unknown>);
+        return Object.freeze({
+          ...projected,
+          is_emergency: EMERGENCY_KINDS.has(projected.exception_kind),
+          source_order_reference: (row as Record<string, unknown>)[
+            'source_order_reference'
+          ] as string,
+          assignment_state: (row as Record<string, unknown>)['assignment_state'] as string,
+        });
+      }),
+    );
   }
 
   async listExceptions(input: {

@@ -1,7 +1,7 @@
 # PRD — Neighbourhood Store Marketplace
 
-**Document status:** MVP product contract v0.2
-**Synchronized:** 13 August 2026
+**Document status:** MVP product contract v0.3; implementation evidence tracked separately
+**Synchronized:** 6 September 2026
 **Target market:** India (local launch city / pin-code cluster)  
 **Product type:** Mobile-first marketplace with Customer App, Vendor Portal, Delivery Partner App/Portal, and Admin Console
 **Related documents:** [README](README.md) · [Design](design.md) · [Architecture](architecture.md) · [Workflow](workflow.md) · [Implementation](implementation.md) · [AI Rules](rules.md)
@@ -16,7 +16,7 @@ Initial store categories:
 
 - Fruits and vegetables
 - Kirana / grocery
-- Pharmacy / medical shop (regulated workflow)
+- Pharmacy / medical shop: disabled future release, not an initial ordering category
 - Bakery, dairy, meat, and specialty stores (after launch validation)
 
 ## 2. Problem and opportunity
@@ -80,7 +80,7 @@ Make every good neighbourhood shop as easy to choose online as a major delivery 
 
 1. Vendor flags an item as unavailable, proposes a substitute, or enters final weight/price for loose produce.
 2. Customer receives an in-app notification and approves, rejects, or selects “contact me for all changes.”
-3. The payable amount is adjusted before capture or through a clearly explained partial refund process.
+3. Lower final amounts produce a clearly explained partial refund. Higher totals require explicit approval and confirmed top-up within the newly approved maximum; refusal follows the published remove-line/cancellation policy.
 4. The order proceeds only under the customer's selected substitution rule.
 
 ### Vendor: fulfil an order
@@ -172,7 +172,7 @@ Make every good neighbourhood shop as easy to choose online as a major delivery 
 - Structured escalation reasons: customer not responding, payment adjustment blocked, rider not assigned/late, package-count dispute, customer arrived early, customer refuses pickup, technical problem, unsafe/abusive interaction, or admin intervention. Every escalation returns a case reference, responsible queue, response target, current instruction, and resulting order state.
 - New-order notification escalation: immediate push and audible alert → reminder push after configured non-acknowledgement → SMS/provider fallback → auto-cancel at the server deadline. Vendors can test alerts, manage permitted devices, inspect failed delivery attempts, and configure staff escalation order.
 - Customer messaging with templates (e.g., “Please approve this substitute”); retain a support-visible message log.
-- Delivery mode configuration: vendor self-delivery, platform delivery (future), or pickup only.
+- Delivery mode configuration: approved vendor self-delivery, platform delivery, or pickup, independently enabled by location and zone.
 
 #### Vendor insights and payouts
 
@@ -266,7 +266,7 @@ Make every good neighbourhood shop as easy to choose online as a major delivery 
 - Only assigned operations/support roles may view live location. Denied or withdrawn permission produces an explicit capability-limited flow; battery/data expectations are visible.
 - Detect mock GPS, reused OTP/proof, implausible speed/location, wrong-location completion, repeated unreachable claims, multi-device/account sharing, compromised-device signals, excessive proof failures, and collusion indicators. Signals open a review; they do not alone trigger irreversible punishment.
 
-### 7.5 Pharmacy controls (MVP guardrails)
+### 7.5 Pharmacy controls (disabled future release)
 
 - Only verified, appropriately licensed pharmacies may list regulated products.
 - Separate prescription-upload workflow and human/pharmacist review state before the order can be fulfilled.
@@ -321,7 +321,7 @@ Make every good neighbourhood shop as easy to choose online as a major delivery 
 
 ### MVP — one city / 2–3 pin-code clusters
 
-- Customer web app or Android-first app: address, store discovery, preferred vendors, multi-store cart, grouped checkout, vendor-scoped pickup/delivery orders, UPI/cards, order tracking, support.
+- Four separate PWAs and four separate Android apps (customer, vendor, partner, admin). Customer capabilities on both clients: address, store discovery, preferred vendors, multi-store cart, grouped checkout, vendor-scoped pickup/delivery orders, UPI/cards, order tracking, support.
 - Vendor portal: onboarding, store hours, catalogue CRUD/import, order accept/pick/substitute/ready workflow, basic sales and settlement view.
 - Delivery partner app/portal: onboarding and document review, availability toggle, assignment offers, pickup/delivery status, OTP proof of delivery, exception flows, and basic earnings/payout history. Launch only if platform delivery is selected; otherwise keep the data model ready for Phase 2.
 - Admin console: vendor creation/review/publish, catalogue checks, order monitoring, refund tools, basic analytics and audit logs.
@@ -333,7 +333,7 @@ Make every good neighbourhood shop as easy to choose online as a major delivery 
 - Expand platform delivery partners, live tracking, batch assignment, and route optimisation after validating unit economics and safety workflows.
 - Vendor loyalty programmes, scheduled recurring baskets, shared family lists, and personalised discovery.
 - POS/inventory integrations, barcode scanning, bulk catalogue enrichment, and advanced vendor marketing.
-- Customer chat/call masking, referral programme, and richer support automation.
+- Masked calling, referral programme and richer support automation. Backend participant messaging and support conversations are included now.
 
 ### Phase 3
 
@@ -396,3 +396,9 @@ Sources reviewed: [Mercato overview](https://help.mercato.com/hc/en-us/articles/
 ### 16.1 Product acceptance gate
 
 The MVP is product-complete only when all 15 required end-to-end scenarios in `implementation.md` §13.2 pass and the production gates required by the selected launch model are signed. A successful happy-path demo alone is not acceptance.
+
+## Current staging contract and verification status
+
+[D-15](docs/decisions/D-15.md) is the synchronized current-workstream decision for eight clients, staging providers, TLS/BFF boundaries, pre-payment durable checkout, weight caps/top-ups, role invitations, guest-cart merge, internal publication testing and privacy controls. Earlier conflicting local-only or deferred-provider wording is historical, not an active implementation restriction. Public production remains gated.
+
+Scope labels are not completion claims. See the [phase conformance audit](docs/engineering/phase-conformance-audit.md) for reviewed steps, executable evidence and remaining gaps. Customer final prices and charge components remain visible; internal fee formulas/margins do not enter customer APIs. Moving maps, masked calling, POS sync, COD, pharmacy and consolidation remain deferred/gated.

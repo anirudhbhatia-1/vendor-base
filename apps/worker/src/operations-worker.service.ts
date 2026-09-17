@@ -1,3 +1,4 @@
+import { createDatabasePool } from '@neighbourhood-store/database';
 import {
   Injectable,
   type OnApplicationBootstrap,
@@ -9,25 +10,75 @@ import {
   GroupedCheckoutService,
   InventoryReservationService,
   LocalProtectedObjectStorage,
+  PartnerAvailabilityService,
   PartnerFieldOpsService,
   PartnerWaitPolicyService,
   LocalNotificationService,
+  LocalFakeMoneyProvider,
+  CompleteMoneyLifecycleService,
   ConfigurationAdminService,
+  DeliveryDispatchOrchestrator,
+  MoneyLifecycleService,
+  OrderMoneyOrchestrator,
   VendorFulfilmentService,
   VendorOnboardingService,
   dispatchOutboxBatch,
+  processInboxEvent,
 } from '@neighbourhood-store/database';
 import {
   createAuthenticatedActor,
   createRequestContext,
   createUuidV7,
+  formatTraceparent,
 } from '@neighbourhood-store/domain-types';
+import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
+import { closeQueuesWithin, reportQueueErrors, requireQueueReady } from './queue-readiness.js';
+import { trace } from '@opentelemetry/api';
 import { Pool } from 'pg';
 import { workerLogger } from './json-logger.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 
 const POLL_MS = 15_000;
+/**
+ * Emitted event types with no worker-side reaction today. Their domain effects
+ * are applied synchronously in the emitting transaction; the event exists for
+ * ordering and audit. Listing them explicitly keeps an unhandled *new* event
+ * type from being mistaken for a deliberate no-op.
+ */
+const ACKNOWLEDGED_WITHOUT_REACTION: ReadonlySet<string> = new Set([
+  'checkout.payment_failed',
+  // The queue canary. R0.5 asks for a bounded, cleaned-up round trip that proves
+  // jobs actually flow, because a broker PING proves only that the broker answers
+  // and a heartbeat proves only that a worker is alive -- neither shows that an
+  // event enqueued now gets consumed. This type carries the whole path
+  // (outbox row -> dispatch -> Valkey -> worker -> acknowledged) and reacts to
+  // nothing, so it is inert in every environment rather than test-only code
+  // living in a production branch.
+  'ops.queue_canary',
+  'checkout.payment_unknown',
+  'checkout.placed',
+  'checkout.webhook_authorized',
+  'partner.reinstated',
+  'vendor.reinstated',
+  'vendor.suspended',
+]);
+
+/** How long an operator has to answer a returned delivery. */
+const RETURNED_CASE_RESPONSE_MS = 4 * 60 * 60 * 1_000;
 const OFFLINE_PROOF_TTL_MS = 24 * 60 * 60 * 1_000;
+const QUEUE_NAME = 'operations';
+
+type OperationsJob =
+  | { readonly kind: 'tick' }
+  | {
+      readonly causation_id: string | null;
+      readonly correlation_id: string;
+      readonly event_id: string;
+      readonly event_type: string;
+      readonly kind: 'outbox';
+      readonly request_id: string;
+      readonly traceparent: string;
+    };
 
 /**
  * Runs the server-owned deadlines that must not depend on a browser being open.
@@ -37,6 +88,7 @@ const OFFLINE_PROOF_TTL_MS = 24 * 60 * 60 * 1_000;
  */
 @Injectable()
 export class OperationsWorkerService implements OnApplicationBootstrap, OnApplicationShutdown {
+  readonly #shutdownGraceMs: number;
   readonly #workerId = createUuidV7();
   readonly #pool: Pool;
   readonly #assignments: AssignmentCustodyService;
@@ -47,14 +99,31 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #partnerWait: PartnerWaitPolicyService;
   readonly #notifications: LocalNotificationService;
   readonly #configuration: ConfigurationAdminService;
+  readonly #availability: PartnerAvailabilityService;
   readonly #fulfilment: VendorFulfilmentService;
   readonly #onboarding: VendorOnboardingService;
-  #poller: NodeJS.Timeout | undefined;
+  readonly #dispatch: DeliveryDispatchOrchestrator;
+  readonly #money: MoneyLifecycleService;
+  readonly #completeMoney: CompleteMoneyLifecycleService;
+  readonly #orderMoney: OrderMoneyOrchestrator;
+  readonly #queue: Queue<OperationsJob>;
+  readonly #queueEvents: QueueEvents;
+  readonly #queueUrl: string;
+  readonly #queueWorker: Worker<OperationsJob>;
   #running = false;
+  /**
+   * Set before the queues are closed so an in-flight poll can stop between
+   * passes. Without it a shutdown waited for the whole poll — which blocks on
+   * `waitUntilFinished` for every published outbox event — and the supervisor
+   * force-killed the process part way through.
+   */
+  #stopping = false;
 
   constructor() {
-    const { databaseUrl } = loadRuntimeConfig();
-    this.#pool = new Pool({
+    const config = loadRuntimeConfig();
+    this.#shutdownGraceMs = config.shutdownGraceMs;
+    const { databaseUrl } = config;
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-operations-worker',
       connectionString: databaseUrl,
       max: 4,
@@ -62,11 +131,30 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#inventory = new InventoryReservationService({ connection_string: databaseUrl });
     this.#adminControl = new AdminControlPlaneService({ connection_string: databaseUrl });
     this.#assignments = new AssignmentCustodyService({ connection_string: databaseUrl });
-    this.#checkout = new GroupedCheckoutService({ connection_string: databaseUrl });
+    this.#checkout = new GroupedCheckoutService({
+      connection_string: databaseUrl,
+      provider: new LocalFakeMoneyProvider({
+        clearing_account_reference: config.providerClearingAccountReference,
+        webhook_key: config.paymentWebhookKey,
+      }),
+    });
     this.#partnerField = new PartnerFieldOpsService({ connection_string: databaseUrl });
     this.#partnerWait = new PartnerWaitPolicyService({ connection_string: databaseUrl });
     this.#notifications = new LocalNotificationService({ connection_string: databaseUrl });
     this.#configuration = new ConfigurationAdminService({ connection_string: databaseUrl });
+    this.#availability = new PartnerAvailabilityService({ connection_string: databaseUrl });
+    this.#money = new MoneyLifecycleService({ connection_string: databaseUrl });
+    this.#completeMoney = new CompleteMoneyLifecycleService({ connection_string: databaseUrl });
+    this.#orderMoney = new OrderMoneyOrchestrator({
+      complete_money: this.#completeMoney,
+      connection_string: databaseUrl,
+      money: this.#money,
+    });
+    this.#dispatch = new DeliveryDispatchOrchestrator({
+      assignments: this.#assignments,
+      availability: this.#availability,
+      connection_string: databaseUrl,
+    });
     this.#fulfilment = new VendorFulfilmentService({
       connection_string: databaseUrl,
       inventory: this.#inventory,
@@ -74,19 +162,75 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#onboarding = new VendorOnboardingService({
       connection_string: databaseUrl,
       storage: new LocalProtectedObjectStorage({
-        grant_key: ['local', 'synthetic', 'protected', 'object', 'grant', 'material'].join('-'),
-        root_directory: `${process.cwd()}/.local-data/objects`,
+        grant_key: config.objectStorageGrantKey,
+        root_directory: config.objectStorageRoot,
       }),
     });
+    const connection = { url: config.valkeyUrl, maxRetriesPerRequest: null } as const;
+    const queueOptions = { connection, prefix: config.queuePrefix } as const;
+    this.#queue = new Queue<OperationsJob>(QUEUE_NAME, {
+      ...queueOptions,
+      defaultJobOptions: {
+        attempts: 8,
+        backoff: { type: 'exponential', delay: 1_000 },
+        removeOnComplete: { count: 10_000 },
+        removeOnFail: { count: 10_000 },
+      },
+    });
+    this.#queueEvents = new QueueEvents(QUEUE_NAME, queueOptions);
+    this.#queueWorker = new Worker<OperationsJob>(
+      QUEUE_NAME,
+      async (job) => this.#handleQueueJob(job),
+      { ...queueOptions, concurrency: 4, maxStalledCount: 2 },
+    );
+    // One useful line instead of three unbounded streams of raw driver errors.
+    reportQueueErrors({
+      component: QUEUE_NAME,
+      emitters: [this.#queue, this.#queueEvents, this.#queueWorker],
+      logger: workerLogger,
+      queueUrl: config.valkeyUrl,
+    });
+    this.#queueUrl = config.valkeyUrl;
   }
 
-  onApplicationBootstrap(): void {
-    void this.#poll();
-    this.#poller = setInterval(() => void this.#poll(), POLL_MS);
+  async onApplicationBootstrap(): Promise<void> {
+    await requireQueueReady({
+      queueUrl: this.#queueUrl,
+      ready: [
+        this.#queue.waitUntilReady(),
+        this.#queueEvents.waitUntilReady(),
+        this.#queueWorker.waitUntilReady(),
+      ],
+    });
+    await this.#queue.upsertJobScheduler(
+      'operations-tick',
+      { every: POLL_MS },
+      { name: 'operations.tick', data: { kind: 'tick' } },
+    );
+    await this.#queue.add(
+      'operations.tick',
+      { kind: 'tick' },
+      {
+        jobId: `startup-${this.#workerId}`,
+      },
+    );
   }
 
   async onApplicationShutdown(): Promise<void> {
-    if (this.#poller) clearInterval(this.#poller);
+    // Let active BullMQ handlers finish while their database pools are still
+    // available. Closing everything concurrently can strand an active handler
+    // on a pool that has already been ended and prevents watch-mode shutdown.
+    this.#stopping = true;
+    await closeQueuesWithin({
+      close: async () => {
+        await this.#queueWorker.close();
+      },
+      graceMs: this.#shutdownGraceMs,
+      component: QUEUE_NAME,
+      logger: workerLogger,
+    });
+    await this.#queueEvents.close();
+    await this.#queue.close();
     await Promise.all([
       this.#pool.end(),
       this.#assignments.close(),
@@ -99,7 +243,138 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       this.#configuration.close(),
       this.#fulfilment.close(),
       this.#onboarding.close(),
+      this.#availability.close(),
+      this.#dispatch.close(),
+      this.#money.close(),
+      this.#completeMoney.close(),
+      this.#orderMoney.close(),
     ]);
+  }
+
+  async #handleQueueJob(job: Job<OperationsJob>): Promise<void> {
+    if (job.data.kind === 'tick') {
+      await this.#poll();
+      return;
+    }
+    trace.getActiveSpan()?.setAttributes({
+      'app.event_id': job.data.event_id,
+      'app.request_id': job.data.request_id,
+      'app.correlation_id': job.data.correlation_id,
+      ...(job.data.causation_id ? { 'app.causation_id': job.data.causation_id } : {}),
+    });
+    await this.#consumeOutboxEvent(job.data);
+  }
+
+  async #consumeOutboxEvent(
+    job: Extract<OperationsJob, { readonly kind: 'outbox' }>,
+  ): Promise<void> {
+    const context = createRequestContext({
+      actor: createAuthenticatedActor({
+        actor_id: this.#workerId,
+        actor_kind: 'system',
+        session_id: this.#workerId,
+      }),
+      causation_id: job.causation_id,
+      correlation_id: job.correlation_id,
+      request_id: job.request_id,
+      traceparent: job.traceparent,
+    });
+    await processInboxEvent(
+      this.#pool,
+      {
+        consumer_scope: 'worker.domain_event',
+        correlation_id: job.correlation_id,
+        event_id: job.event_id,
+        request_id: job.request_id,
+      },
+      async (_client, event) => {
+        workerLogger.event('outbox.event.processing', {
+          event_id: event.event_id,
+          event_type: event.event_type,
+        });
+        if (event.event_type === 'vendor_order.picked_up') {
+          await this.#fulfilment.settleInventoryOnPickup({
+            context,
+            vendor_order_id: event.aggregate_id,
+          });
+        } else if (event.event_type === 'order.placed') {
+          await this.#dispatch.dispatchPlacedOrder({
+            context,
+            event_id: event.event_id,
+            vendor_order_id: event.aggregate_id,
+          });
+        } else if (
+          event.event_type === 'vendor_order.accepted' ||
+          event.event_type === 'vendor_order.ended'
+        ) {
+          // Every shop in a checkout group shares one authorization, so the
+          // decision to capture or void can only be taken once they have all
+          // answered. This runs on each answer and returns WAITING until then.
+          const outcome = await this.#orderMoney.settleAuthorizationForOrder({
+            context,
+            vendor_order_id: event.aggregate_id,
+          });
+          workerLogger.event('checkout.authorization.settled', {
+            event_id: event.event_id,
+            event_type: event.event_type,
+            outcome,
+            vendor_order_id: event.aggregate_id,
+          });
+        } else if (event.event_type === 'vendor_order.delivered') {
+          const result = await this.#orderMoney.recordDeliveryEarnings({
+            context,
+            vendor_order_id: event.aggregate_id,
+          });
+          workerLogger.event('vendor_order.delivery.settled', {
+            earning_posted: result.earning_posted,
+            event_id: event.event_id,
+            settled: result.settled,
+            vendor_order_id: event.aggregate_id,
+          });
+        } else if (event.event_type === 'vendor_order.returned') {
+          // Goods that came back are not a completed sale. The settlement that
+          // divides the money is deliberately not run here: what the partner is
+          // owed for a return trip is a policy question nobody has answered
+          // yet, and guessing it would move real money on an invented rate.
+          //
+          // What must happen is that a person sees it. A returned order has
+          // already failed and the customer is owed an answer, so it opens a
+          // case rather than resting in a state nobody reads.
+          await this.#adminControl.createSupportCase({
+            category: 'DELIVERY_RETURNED',
+            context,
+            description:
+              'Delivery was returned to the vendor. The customer has not received this order and the money has not been divided.',
+            response_due_at: new Date(Date.now() + RETURNED_CASE_RESPONSE_MS),
+            severity: 'HIGH',
+            vendor_order_id: event.aggregate_id,
+          });
+          workerLogger.event('vendor_order.return.case_opened', {
+            event_id: event.event_id,
+            vendor_order_id: event.aggregate_id,
+          });
+        } else if (event.event_type === 'partner.suspended') {
+          // A suspended partner keeps whatever availability row they last
+          // wrote. Dispatch already re-checks eligibility, but clearing the
+          // row keeps the two views of the same partner consistent.
+          await this.#availability.forceOffline({
+            context,
+            partner_user_id: event.aggregate_id,
+            reason_code: 'PARTNER_SUSPENDED',
+          });
+        } else if (!ACKNOWLEDGED_WITHOUT_REACTION.has(event.event_type)) {
+          // Falling through used to acknowledge the event, so an emitted type
+          // nobody handled looked delivered. Unknown types now fail and retry
+          // into the dead-letter path instead of disappearing.
+          throw new Error(`No outbox handler is registered for ${event.event_type}`);
+        }
+        return null;
+      },
+    );
+    workerLogger.event('outbox.event.consumed', {
+      event_id: job.event_id,
+      event_type: job.event_type,
+    });
   }
 
   async #poll(): Promise<void> {
@@ -113,59 +388,145 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         session_id: this.#workerId,
       }),
     });
+    // Each domain service owns a small pool. Run maintenance claims in a
+    // bounded sequence so a worker bootstrap cannot exhaust a hosted
+    // database's connection cap before idle pool connections are released.
+    //
+    // Each pass is isolated: they all ran inside one try/catch with outbox
+    // dispatch last, so a single failing pass — an expiry sweep, say — skipped
+    // every pass after it and stalled outbox publishing entirely.
+    const pass = async <Result>(name: string, run: () => Promise<Result>, fallback: Result) => {
+      // Stopping between passes rather than mid-pass: each pass is a claim the
+      // next tick will simply make again, so skipping one costs nothing.
+      if (this.#stopping) return fallback;
+      try {
+        return await run();
+      } catch (error) {
+        workerLogger.error(
+          error instanceof Error ? error : new Error(`Operations pass ${name} failed`),
+        );
+        return fallback;
+      }
+    };
     try {
-      const [
-        reservations,
-        quotes,
-        accepts,
-        decisions,
-        offers,
-        documents,
-        offlineProofs,
-        controls,
-        waitTimers,
-        notificationSignals,
-        notifications,
-        configurations,
-        outbox,
-      ] = await Promise.all([
-        this.#inventory.expireDue({ context, now }),
-        this.#checkout.expireQuotes({ now }),
-        this.#fulfilment.timeoutOverdueAccepts({ context, now }),
-        this.#fulfilment.timeoutOverdueDecisions({ context, now }),
-        this.#assignments.expireOffers({
-          command_prefix: `SYNTH-WORKER-${now.toISOString().slice(0, 16).replaceAll(/[-:T]/g, '')}`,
-          context,
-          now,
-        }),
-        this.#onboarding.advanceDocumentDeadlines({ at: now, context }),
-        this.#partnerField.expireOfflineProofs({
-          context,
-          now,
-          older_than: new Date(now.getTime() - OFFLINE_PROOF_TTL_MS),
-        }),
-        this.#adminControl.expireOperationalControls({ context, now }),
-        this.#partnerWait.advanceDue({ context, now }),
-        this.#notifications.syncDomainSignals({ context, now }),
-        this.#notifications.deliverPending({ context, now }),
-        this.#configuration.activateDue({
-          actor_id: this.#workerId,
-          at: now,
-          request_id: context.request_id,
-        }),
-        dispatchOutboxBatch(this.#pool, {
-          batch_size: 100,
-          publish: async (event) => {
-            workerLogger.event('outbox.event.published', {
-              aggregate_id: event.aggregate_id,
-              aggregate_type: event.aggregate_type,
+      const reservations = await pass(
+        'inventory.expireDue',
+        () => this.#inventory.expireDue({ context, now }),
+        [],
+      );
+      const quotes = await pass(
+        'checkout.expireQuotes',
+        () => this.#checkout.expireQuotes({ now }),
+        0,
+      );
+      const accepts = await pass(
+        'fulfilment.timeoutOverdueAccepts',
+        () => this.#fulfilment.timeoutOverdueAccepts({ context, now }),
+        [],
+      );
+      const decisions = await pass(
+        'fulfilment.timeoutOverdueDecisions',
+        () => this.#fulfilment.timeoutOverdueDecisions({ context, now }),
+        [],
+      );
+      const offers = await pass(
+        'assignments.expireOffers',
+        () =>
+          this.#assignments.expireOffers({
+            command_prefix: `SYNTH-CMD-WORKER-${now.toISOString().slice(0, 16).replaceAll(/[-:T]/g, '')}`,
+            context,
+            now,
+          }),
+        0,
+      );
+      const documents = await pass(
+        'onboarding.advanceDocumentDeadlines',
+        () => this.#onboarding.advanceDocumentDeadlines({ at: now, context }),
+        0,
+      );
+      const offlineProofs = await pass(
+        'partnerField.expireOfflineProofs',
+        () =>
+          this.#partnerField.expireOfflineProofs({
+            context,
+            now,
+            older_than: new Date(now.getTime() - OFFLINE_PROOF_TTL_MS),
+          }),
+        [],
+      );
+      const controls = await pass(
+        'adminControl.expireOperationalControls',
+        () => this.#adminControl.expireOperationalControls({ context, now }),
+        { incidents: 0, trust: 0 },
+      );
+      const waitTimers = await pass(
+        'partnerWait.advanceDue',
+        () => this.#partnerWait.advanceDue({ context, now }),
+        0,
+      );
+      const notificationSignals = await pass(
+        'notifications.syncDomainSignals',
+        () => this.#notifications.syncDomainSignals({ context, now }),
+        0,
+      );
+      const notifications = await pass(
+        'notifications.deliverPending',
+        () => this.#notifications.deliverPending({ context, now }),
+        0,
+      );
+      const dispatch = await pass(
+        'dispatch.offerReadyAssignments',
+        () =>
+          this.#dispatch.offerReadyAssignments({
+            command_prefix: `SYNTH-CMD-WORKER-${now.toISOString().slice(0, 16).replaceAll(/[-:T]/g, '')}`,
+            context,
+            now,
+          }),
+        { offered: 0, returned: 0, waiting: 0 },
+      );
+      const configurations = await pass(
+        'configuration.activateDue',
+        () =>
+          this.#configuration.activateDue({
+            actor_id: this.#workerId,
+            at: now,
+            request_id: context.request_id,
+          }),
+        [],
+      );
+      // Dispatch runs regardless of the passes above; it is the path that
+      // moves committed domain events out of the database.
+      const outbox = await dispatchOutboxBatch(this.#pool, {
+        batch_size: 100,
+        publish: async (event) => {
+          workerLogger.event('outbox.event.published', {
+            aggregate_id: event.aggregate_id,
+            aggregate_type: event.aggregate_type,
+            event_id: event.event_id,
+            event_type: event.event_type,
+          });
+          const job = await this.#queue.add(
+            'outbox.event',
+            {
+              causation_id: event.causation_id,
+              correlation_id: event.correlation_id,
               event_id: event.event_id,
               event_type: event.event_type,
-            });
-          },
-          worker_id: this.#workerId,
-        }),
-      ]);
+              kind: 'outbox',
+              request_id: event.request_id,
+              traceparent: formatTraceparent(context.trace),
+            },
+            { jobId: event.event_id, attempts: event.max_attempts },
+          );
+          if ((await job.getState()) === 'failed') await job.retry();
+          // The job is durable once added. Waiting for it to be consumed keeps
+          // ordering tight while the worker is running, but during shutdown it
+          // would block for up to a minute on a consumer that is closing.
+          if (this.#stopping) return;
+          await job.waitUntilFinished(this.#queueEvents, 60_000);
+        },
+        worker_id: this.#workerId,
+      });
       const changed =
         reservations.length +
         quotes +
@@ -180,6 +541,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         notificationSignals +
         notifications +
         configurations.length +
+        dispatch.offered +
+        dispatch.returned +
         outbox.published;
       if (changed > 0) {
         workerLogger.event('operations.deadlines.processed', {
@@ -193,6 +556,9 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           notification_signals: notificationSignals,
           notifications,
           configurations: configurations.length,
+          dispatch_offered: dispatch.offered,
+          dispatch_returned: dispatch.returned,
+          dispatch_waiting: dispatch.waiting,
           offers,
           outbox: outbox.published,
           quotes,

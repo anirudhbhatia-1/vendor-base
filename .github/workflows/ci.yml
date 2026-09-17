@@ -68,15 +68,42 @@ jobs:
         continue-on-error: true
         run: pnpm test:unit
 
+      # The API and worker integration smokes talk to a real PostgreSQL and a real
+      # Valkey: readiness now reports broker state from an actual connection and
+      # consumer liveness from the durable heartbeat, neither of which can be
+      # answered without the stack. Starting it here rather than letting the smoke
+      # skip its own assertions -- a test that quietly skips the thing it is named
+      # after is how queue health came to be reported from table presence.
+      - id: integration_stack_up
+        name: Start the test stack for integration tests
+        continue-on-error: true
+        run: pnpm db:test:up
+
       - id: integration_tests
         name: Run integration tests
         continue-on-error: true
         run: pnpm test:integration
 
+      - id: integration_stack_down
+        name: Stop the test stack
+        if: always()
+        continue-on-error: true
+        run: pnpm db:test:down
+
+      - id: e2e_tests
+        name: Run browser end-to-end tests
+        continue-on-error: true
+        run: pnpm test:e2e:install && pnpm test:e2e
+
       - id: build
         name: Build and verify entry points
         continue-on-error: true
         run: pnpm build:verify
+
+      - id: online_test_build
+        name: Build the online-test PWA exports
+        if: always()
+        run: pnpm build:online-test:pwas
 
       - id: database
         name: Verify PostgreSQL and PostGIS migration lifecycle
@@ -108,7 +135,9 @@ jobs:
           CI_CONTROL_TESTS_OUTCOME: ${{ steps.control_tests.outcome }}
           CI_UNIT_TESTS_OUTCOME: ${{ steps.unit_tests.outcome }}
           CI_INTEGRATION_TESTS_OUTCOME: ${{ steps.integration_tests.outcome }}
+          CI_E2E_TESTS_OUTCOME: ${{ steps.e2e_tests.outcome }}
           CI_BUILD_OUTCOME: ${{ steps.build.outcome }}
+          CI_ONLINE_TEST_BUILD_OUTCOME: ${{ steps.online_test_build.outcome }}
           CI_DATABASE_OUTCOME: ${{ steps.database.outcome }}
           CI_DEPENDENCY_AUDIT_OUTCOME: ${{ steps.dependency_audit.outcome }}
           CI_SECRET_SCAN_OUTCOME: ${{ steps.secret_scan.outcome }}
@@ -136,7 +165,9 @@ jobs:
           CI_CONTROL_TESTS_OUTCOME: ${{ steps.control_tests.outcome }}
           CI_UNIT_TESTS_OUTCOME: ${{ steps.unit_tests.outcome }}
           CI_INTEGRATION_TESTS_OUTCOME: ${{ steps.integration_tests.outcome }}
+          CI_E2E_TESTS_OUTCOME: ${{ steps.e2e_tests.outcome }}
           CI_BUILD_OUTCOME: ${{ steps.build.outcome }}
+          CI_ONLINE_TEST_BUILD_OUTCOME: ${{ steps.online_test_build.outcome }}
           CI_DATABASE_OUTCOME: ${{ steps.database.outcome }}
           CI_DEPENDENCY_AUDIT_OUTCOME: ${{ steps.dependency_audit.outcome }}
           CI_SECRET_SCAN_OUTCOME: ${{ steps.secret_scan.outcome }}

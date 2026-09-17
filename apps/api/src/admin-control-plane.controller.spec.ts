@@ -17,6 +17,8 @@ test('every admin control-plane route is capability protected and globally scope
   const expected: Record<string, string> = {
     dashboard: 'admin.control.dashboard_read',
     orders: 'admin.control.dashboard_read',
+    deadLetters: 'admin.messaging.deadletter_read',
+    recoverDeadLetter: 'admin.messaging.deadletter_recover',
     createSupport: 'admin.support.case_manage',
     support: 'admin.support.case_manage',
     evidence: 'admin.support.case_manage',

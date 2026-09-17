@@ -8,6 +8,7 @@
     "scheme": "neighbourhood-customer",
     "android": {
       "package": "com.neighbourhoodstore.internal.customer"
-    }
+    },
+    "plugins": ["expo-router", "expo-secure-store", "expo-splash-screen"]
   }
 }

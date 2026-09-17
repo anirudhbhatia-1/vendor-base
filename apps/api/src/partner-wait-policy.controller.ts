@@ -1,46 +1,20 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
-  ForbiddenException,
   Get,
   HttpCode,
   Inject,
-  NotFoundException,
   Param,
   Post,
 } from '@nestjs/common';
-import {
-  PartnerWaitAuthorizationError,
-  PartnerWaitConflictError,
-  PartnerWaitInputError,
-  PartnerWaitNotFoundError,
-  PartnerWaitPolicyService,
-} from '@neighbourhood-store/database';
+import { PartnerWaitPolicyService } from '@neighbourhood-store/database';
 import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { PARTNER_WAIT_POLICY } from './tokens.js';
-
-function body(value: unknown) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function text(value: Record<string, unknown>, key: string) {
-  if (typeof value[key] !== 'string') throw new BadRequestException();
-  return value[key];
-}
-function translate(error: unknown): never {
-  if (error instanceof PartnerWaitInputError || error instanceof TypeError) {
-    throw new BadRequestException();
-  }
-  if (error instanceof PartnerWaitNotFoundError) throw new NotFoundException();
-  if (error instanceof PartnerWaitConflictError) throw new ConflictException(error.message);
-  if (error instanceof PartnerWaitAuthorizationError) throw new ForbiddenException();
-  throw error;
-}
-
+import { object, stringField } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const act = RequireAuthorization({
   capability: 'partner.assignment.act',
   conceal_resource: true,
@@ -60,7 +34,8 @@ export class PartnerWaitPolicyController {
         delivery_assignment_id: parseUuidV7(assignmentId),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -68,16 +43,17 @@ export class PartnerWaitPolicyController {
   @act
   @HttpCode(200)
   async start(@Param('delivery_assignment_id') assignmentId: string, @Body() raw: unknown) {
-    const input = body(raw);
+    const input = object(raw);
     try {
       return await this.service.start({
         context: currentRequestContext(),
         delivery_assignment_id: parseUuidV7(assignmentId),
-        command_reference: text(input, 'command_reference'),
-        reason_code: text(input, 'reason_code'),
+        command_reference: stringField(input, 'command_reference'),
+        reason_code: stringField(input, 'reason_code'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -91,7 +67,8 @@ export class PartnerWaitPolicyController {
         delivery_assignment_id: parseUuidV7(assignmentId),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -99,16 +76,17 @@ export class PartnerWaitPolicyController {
   @act
   @HttpCode(200)
   async leave(@Param('delivery_assignment_id') assignmentId: string, @Body() raw: unknown) {
-    const input = body(raw);
+    const input = object(raw);
     try {
       return await this.service.leave({
         context: currentRequestContext(),
         delivery_assignment_id: parseUuidV7(assignmentId),
-        command_reference: text(input, 'command_reference'),
-        reason_code: text(input, 'reason_code'),
+        command_reference: stringField(input, 'command_reference'),
+        reason_code: stringField(input, 'reason_code'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }

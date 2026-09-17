@@ -223,7 +223,7 @@ export async function dispatchReferenceEvents(pool: Pool, input: { readonly work
             },
             queue_scope: REFERENCE_QUEUE_SCOPE,
             request_id: event.request_id,
-            run_at: new Date(),
+            run_at: 'immediate',
           });
         },
       );

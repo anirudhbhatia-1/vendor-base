@@ -9,10 +9,8 @@ import {
   CatalogueImportInputError,
   CatalogueProductService,
 } from '../src/catalogue-products.js';
+import { check, rejects } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 function context(kind: 'admin' | 'vendor_staff' = 'vendor_staff') {
   return createRequestContext({
     actor: createAuthenticatedActor({
@@ -22,16 +20,6 @@ function context(kind: 'admin' | 'vendor_staff' = 'vendor_staff') {
     }),
   });
 }
-async function rejects(work: () => Promise<unknown>, kind: new () => Error, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof kind, `${message} (raised ${String(error)})`);
-    return;
-  }
-  throw new Error(message);
-}
-
 const header =
   'product_reference,title,category,unit_label,tax_basis,sku,variant_title,price_minor,quantity_basis,exact_available_quantity,low_stock_threshold,variable_weight,permitted_weight_variance_bps\n';
 
@@ -300,6 +288,29 @@ export async function verifyCatalogueProducts(connectionString: string): Promise
       'A CSV with the wrong header was staged',
     );
 
+    // 9b. The row cap is the only bound between an upload and parsing every row into
+    // memory before a single insert. The API's 7 MB body limit constrains bytes, not
+    // rows, and a narrow file reaches far more rows than the cap inside that budget.
+    // The cap existed and nothing exercised it.
+    const oversized =
+      header +
+      'SYNTH-PROD-BULK,SYNTH Bulk,FRUIT_VEGETABLE,SACK,EXEMPT,SYNTH-SKU-BULK,SYNTH Bulk Variant,100,COUNTED,1,0,false,\n'.repeat(
+        10_001,
+      );
+    await rejects(
+      () =>
+        catalogue.stageImport({
+          context: context(),
+          vendor_location_id: locationA,
+          source_filename: 'SYNTH-OVERSIZED.csv',
+          csv_content: oversized,
+          idempotency_key: 'SYNTH-IMPORT-OVERSIZED',
+          now,
+        }),
+      CatalogueImportInputError,
+      'A CSV beyond the row cap was staged',
+    );
+
     // 10. Substitution suggestions are location-contained and reversible.
     const listed = await catalogue.listProducts({
       context: context(),
@@ -358,6 +369,55 @@ export async function verifyCatalogueProducts(connectionString: string): Promise
         }),
       Error,
       'An unauthenticated caller read a vendor catalogue',
+    );
+    // Step 5.5 keeps price history "for later order snapshots": an order copies its own
+    // amount, and this table is the independent record of what the price was that day,
+    // which is what a disputed charge is settled against. Eight other history tables
+    // carry an append-only guard and this one carried none, so the corroborating record
+    // could be rewritten to match whatever was claimed.
+    //
+    // Closing the open row is how a new price opens, so the guard permits exactly that
+    // and refuses everything else.
+    const openPrice = await pool.query<{ catalogue_price_id: string }>(
+      `SELECT catalogue_price_id FROM marketplace.catalogue_prices
+        WHERE effective_until IS NULL LIMIT 1`,
+    );
+    const priceId = openPrice.rows[0]?.catalogue_price_id;
+    check(Boolean(priceId), 'No open price row was available to test history protection');
+    const refusesPriceWrite = async (sql: string) => {
+      try {
+        await pool.query(sql, [priceId]);
+        return false;
+      } catch (error: unknown) {
+        return (
+          typeof error === 'object' && error !== null && 'code' in error && error.code === '55000'
+        );
+      }
+    };
+    // The amount clause only applies on the one permitted transition, so this has to
+    // close the row *and* change the amount in one statement. Setting `price_minor`
+    // alone leaves `effective_until` null, and the guard refuses that on the status
+    // clause without ever reaching the amount -- so removing the amount check would
+    // leave such a test green.
+    check(
+      await refusesPriceWrite(
+        `UPDATE marketplace.catalogue_prices
+            SET effective_until = clock_timestamp(), price_minor = 1
+          WHERE catalogue_price_id = $1`,
+      ),
+      'A historical price amount could be rewritten while closing the row',
+    );
+    check(
+      await refusesPriceWrite(
+        `UPDATE marketplace.catalogue_prices SET price_minor = 1 WHERE catalogue_price_id = $1`,
+      ),
+      'A historical price amount could be rewritten in place',
+    );
+    check(
+      await refusesPriceWrite(
+        `DELETE FROM marketplace.catalogue_prices WHERE catalogue_price_id = $1`,
+      ),
+      'A historical price could be deleted',
     );
   } finally {
     await catalogue.close();

@@ -7,25 +7,13 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import { PartnerWaitConflictError, PartnerWaitPolicyService } from '../src/partner-wait-policy.js';
+import { check, rejects } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 function context(kind: ActorKind, id: UuidV7) {
   return createRequestContext({
     actor: createAuthenticatedActor({ actor_id: id, actor_kind: kind, session_id: createUuidV7() }),
   });
 }
-async function rejects(work: () => Promise<unknown>, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof PartnerWaitConflictError, `${message}: ${String(error)}`);
-    return;
-  }
-  throw new Error(message);
-}
-
 export async function verifyPartnerWaitPolicy(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, max: 4 });
   const service = new PartnerWaitPolicyService({ connection_string: connectionString });
@@ -79,6 +67,7 @@ export async function verifyPartnerWaitPolicy(connectionString: string): Promise
           reason_code: 'WAIT_POLICY_LEAVE',
           now: new Date(startedAt.getTime() + 599_000),
         }),
+      PartnerWaitConflictError,
       'Policy allowed early leave',
     );
     const first = await service.refresh({

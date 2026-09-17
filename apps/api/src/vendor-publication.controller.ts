@@ -1,33 +1,20 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
-  ForbiddenException,
   Get,
   HttpCode,
   Inject,
-  NotFoundException,
   Param,
   Post,
   Query,
-  UnprocessableEntityException,
 } from '@nestjs/common';
-import {
-  VendorPublicationAuthorizationError,
-  VendorPublicationConflictError,
-  VendorPublicationIncompleteError,
-  VendorPublicationInputError,
-  VendorPublicationNotFoundError,
-  VendorPublicationService,
-  VendorPublicationVersionError,
-  type PublicationState,
-} from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { VendorPublicationService, type PublicationState } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { VENDOR_PUBLICATION } from './tokens.js';
-
+import { expectedVersion, object, stringField, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const STATES = new Set<PublicationState>([
   'APPROVED',
   'CHANGES_REQUIRED',
@@ -37,41 +24,6 @@ const STATES = new Set<PublicationState>([
   'PUBLISHED',
   'UNPUBLISHED',
 ]);
-function body(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function stringField(value: Record<string, unknown>, key: string): string {
-  if (typeof value[key] !== 'string') throw new BadRequestException();
-  return value[key];
-}
-function version(value: Record<string, unknown>): number {
-  const found = value.expected_version;
-  if (!Number.isSafeInteger(found) || (found as number) < 1) throw new BadRequestException();
-  return found as number;
-}
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function translate(error: unknown): never {
-  if (error instanceof VendorPublicationInputError || error instanceof TypeError)
-    throw new BadRequestException();
-  if (error instanceof VendorPublicationNotFoundError) throw new NotFoundException();
-  if (error instanceof VendorPublicationVersionError)
-    throw new ConflictException({ error_code: error.code });
-  if (error instanceof VendorPublicationConflictError) throw new ConflictException();
-  if (error instanceof VendorPublicationAuthorizationError) throw new ForbiddenException();
-  if (error instanceof VendorPublicationIncompleteError)
-    throw new UnprocessableEntityException({
-      error_code: error.code,
-      missing_checks: error.missing_checks,
-    });
-  throw error;
-}
 const managePublication = RequireAuthorization({
   admin_scope: { kind: 'GLOBAL' },
   capability: 'admin.vendor_publication.manage',
@@ -90,7 +42,7 @@ export class VendorPublicationController {
   @Post()
   @managePublication
   async create(@Body() raw: unknown) {
-    const value = body(raw);
+    const value = object(raw);
     try {
       return {
         publication_case_id: await this.publication.create({
@@ -99,7 +51,8 @@ export class VendorPublicationController {
         }),
       };
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
   @Get()
@@ -115,7 +68,8 @@ export class VendorPublicationController {
         }),
       };
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
   @Get(':publication_case_id')
@@ -127,22 +81,24 @@ export class VendorPublicationController {
         publication_case_id: uuid(caseId),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
   @Post(':publication_case_id/readiness')
   @managePublication
   @HttpCode(200)
   async evaluate(@Param('publication_case_id') caseId: string, @Body() raw: unknown) {
-    const value = body(raw);
+    const value = object(raw);
     try {
       return await this.publication.evaluate({
         context: currentRequestContext(),
-        expected_version: version(value),
+        expected_version: expectedVersion(value),
         publication_case_id: uuid(caseId),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
   @Post(':publication_case_id/submit')
@@ -155,7 +111,7 @@ export class VendorPublicationController {
   @reviewPublication
   @HttpCode(200)
   async decide(@Param('publication_case_id') caseId: string, @Body() raw: unknown) {
-    const value = body(raw);
+    const value = object(raw);
     const decision = stringField(value, 'decision');
     if (decision !== 'APPROVED' && decision !== 'CHANGES_REQUIRED') throw new BadRequestException();
     try {
@@ -164,14 +120,15 @@ export class VendorPublicationController {
           context: currentRequestContext(),
           decision,
           evidence_reference: stringField(value, 'evidence_reference'),
-          expected_version: version(value),
+          expected_version: expectedVersion(value),
           note: stringField(value, 'note'),
           publication_case_id: uuid(caseId),
           reason_code: stringField(value, 'reason_code'),
         }),
       };
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
   @Post(':publication_case_id/publish')
@@ -207,7 +164,8 @@ export class VendorPublicationController {
         publication_case_id: uuid(caseId),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -216,19 +174,20 @@ export class VendorPublicationController {
     caseId: string,
     raw: unknown,
   ) {
-    const value = body(raw);
+    const value = object(raw);
     try {
       return {
         version: await this.publication[method]({
           context: currentRequestContext(),
-          expected_version: version(value),
+          expected_version: expectedVersion(value),
           note: stringField(value, 'note'),
           publication_case_id: uuid(caseId),
           reason_code: stringField(value, 'reason_code'),
         }),
       };
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }

@@ -18,6 +18,7 @@ import {
 import { firstValueFrom, map, of } from 'rxjs';
 import { AuthenticatedActorInterceptor } from './authenticated-actor.interceptor.js';
 import { AuthorizationEnforcementService } from './authorization-enforcement.service.js';
+import { SupabaseAuthService } from './supabase-auth.service.js';
 import {
   AUTHENTICATED_SESSION,
   AUTHORIZATION_REQUIREMENT,
@@ -99,7 +100,16 @@ function buildGuard(input: {
       );
     },
   } as unknown as IdentityAccessService;
-  return new AuthorizationGuard(reflector, sessions, new AuthorizationEnforcementService(access));
+  const supabaseAuth = new SupabaseAuthService({
+    supabase_url: undefined,
+    database_url: undefined,
+  });
+  return new AuthorizationGuard(
+    reflector,
+    sessions,
+    new AuthorizationEnforcementService(access),
+    supabaseAuth,
+  );
 }
 
 async function activate(
@@ -119,7 +129,7 @@ test('leaves routes without authorization metadata unchanged', async () => {
 test('declares every guard dependency explicitly for the tsx development runtime', () => {
   const dependencies = Reflect.getMetadata('self:paramtypes', AuthorizationGuard) as
     Array<{ index: number; param: unknown }> | undefined;
-  assert.deepEqual(dependencies?.map(({ index }) => index).sort(), [0, 1, 2]);
+  assert.deepEqual(dependencies?.map(({ index }) => index).sort(), [0, 1, 2, 3]);
 });
 
 test('rejects a protected route without an opaque access credential', async () => {

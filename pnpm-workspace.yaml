@@ -6,6 +6,20 @@ packages:
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
+  protobufjs: false
+  # Pulled in by wrangler for `preview:cloudflare` only. The shipped path is a
+  # Cloudflare Pages static export (`output: 'export'`), which never runs the
+  # workers runtime, so its native install step is not needed to build, test or
+  # deploy anything here. Approving it would mean downloading a platform binary
+  # on every install for a local preview of a rendering mode this repo does not
+  # deploy.
+  workerd: false
+
+# `engines` in package.json pins one exact Node.js and pnpm version. Without this,
+# pnpm prints a scrolled-past WARN on a mismatch and installs anyway, which is a pin
+# that does not pin. Note this belongs here and not in .npmrc: this pnpm reads its
+# settings from the workspace file, and `engine-strict` in .npmrc is silently ignored.
+engineStrict: true
 
 auditConfig:
   ignoreGhsas:

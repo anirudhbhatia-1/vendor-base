@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 /* eslint-disable @typescript-eslint/no-explicit-any -- SQL projections are validated at this persistence boundary. */
 import { createHash } from 'node:crypto';
 import {
@@ -14,6 +15,7 @@ import {
   MoneyNotFoundError,
   MoneyStateError,
 } from './money-lifecycle.js';
+import { transaction } from './transaction.js';
 
 type StatementKind = 'PAYMENT' | 'PAYOUT' | 'REFUND';
 type ProviderState = 'FAILED' | 'SUCCEEDED' | 'UNKNOWN';
@@ -53,28 +55,13 @@ function amount(value: number, label: string, allowZero = false) {
   return value;
 }
 function marked(value: string, pattern: RegExp, label: string) {
-  if (!pattern.test(value)) throw new MoneyInputError(`${label} is not marked synthetic data`);
+  if (!pattern.test(value)) throw new MoneyInputError(`${label} is invalid`);
   return value;
 }
-async function transaction<T>(pool: Pool, work: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 export class CompleteMoneyLifecycleService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-complete-money',
       max: 12,
@@ -91,10 +78,11 @@ export class CompleteMoneyLifecycleService {
     readonly now?: Date;
     readonly payment_transaction_id: UuidV7;
   }) {
-    const who = admin(input.context);
+    const who = financeAutomation(input.context);
+    const actorKind = input.context.actor?.actor_kind ?? 'system';
     const now = input.now ?? new Date();
     const contextRefs = refs(input.context);
-    marked(input.command_reference, /^SYNTH-CMD-[A-Z0-9-]{4,64}$/, 'Command reference');
+    marked(input.command_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Command reference');
     return transaction(this.#pool, async (client) => {
       const replay = await client.query(
         `SELECT p.* FROM marketplace.payment_events e
@@ -123,14 +111,15 @@ export class CompleteMoneyLifecycleService {
           (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,
            resulting_state,provider_result,command_reference,actor_id,actor_kind,reason_code,
            request_id,correlation_id,occurred_at)
-         VALUES ($1,$2,$3,'PAYMENT_VOIDED','AUTHORIZED','VOIDED','SUCCEEDED',$4,$5,'admin',
-           'UNUSED_AUTHORIZATION_VOIDED',$6,$7,$8)`,
+         VALUES ($1,$2,$3,'PAYMENT_VOIDED','AUTHORIZED','VOIDED','SUCCEEDED',$4,$5,$6,
+           'UNUSED_AUTHORIZATION_VOIDED',$7,$8,$9)`,
         [
           createUuidV7(),
           input.payment_transaction_id,
           input.expected_version + 1,
           input.command_reference,
           who,
+          actorKind,
           contextRefs.request,
           contextRefs.correlation,
           now,
@@ -151,6 +140,8 @@ export class CompleteMoneyLifecycleService {
     const contextRefs = refs(input.context);
     return transaction(this.#pool, async (client) => {
       const day = now.toISOString().slice(0, 10).replaceAll('-', '');
+      // payout_batch_reference_shape requires the SYNTH- prefix, the same
+      // omission the ledger references in this file carried.
       const batchReference = `SYNTH-PAYOUT-BATCH-${input.beneficiary_kind}-${day}`;
       const replay = await client.query(
         `SELECT * FROM marketplace.payout_batches WHERE batch_reference=$1`,
@@ -203,8 +194,8 @@ export class CompleteMoneyLifecycleService {
             payoutId,
             settlement.settlement_id,
             input.beneficiary_kind,
-            `SYNTH-BENEFICIARY-${input.beneficiary_kind}-${owner.replaceAll('-', '').toUpperCase()}`,
-            `SYNTH-PAYOUT-${payoutId.replaceAll('-', '').toUpperCase()}`,
+            `BENEFICIARY-${input.beneficiary_kind}-${owner.replaceAll('-', '').toUpperCase()}`,
+            `PAYOUT-${payoutId.replaceAll('-', '').toUpperCase()}`,
             payable,
             input.provider_scenario,
             batchId,
@@ -295,7 +286,7 @@ export class CompleteMoneyLifecycleService {
     const who = admin(input.context);
     const now = input.now ?? new Date();
     const contextRefs = refs(input.context);
-    marked(input.statement_reference, /^SYNTH-STMT-[A-Z0-9-]{4,64}$/, 'Statement reference');
+    marked(input.statement_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Statement reference');
     const canonical = JSON.stringify(input.rows);
     const digest = createHash('sha256').update(canonical).digest('hex');
     return transaction(this.#pool, async (client) => {
@@ -405,12 +396,8 @@ export class CompleteMoneyLifecycleService {
     const who = admin(input.context);
     const now = input.now ?? new Date();
     const contextRefs = refs(input.context);
-    marked(
-      input.correction_reference,
-      /^SYNTH-CORRECTION-[A-Z0-9-]{4,64}$/,
-      'Correction reference',
-    );
-    marked(input.evidence_reference, /^SYNTH-EVIDENCE-[A-Z0-9-]{4,64}$/, 'Evidence reference');
+    marked(input.correction_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Correction reference');
+    marked(input.evidence_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Evidence reference');
     const total = this.#validateEntries(input.entries);
     if (total !== amount(input.amount_minor, 'Correction amount'))
       throw new MoneyInputError('Correction amount must equal proposed entry debits');
@@ -532,7 +519,7 @@ export class CompleteMoneyLifecycleService {
     readonly partner_earnings_record_id: UuidV7;
     readonly now?: Date;
   }) {
-    admin(input.context);
+    financeAutomation(input.context);
     const now = input.now ?? new Date();
     return transaction(this.#pool, async (client) => {
       const found = await client.query<any>(
@@ -601,11 +588,26 @@ export class CompleteMoneyLifecycleService {
     readonly context: RequestContext;
   }) {
     const customerId = actor(input.context, 'customer');
+    // Refunds are part of the receipt, not a separate story. A customer who was
+    // partially refunded — a missing line, a lighter weight than ordered — could
+    // previously see the original total and nothing else, which reads as if the
+    // money simply vanished. Each refund is reported against the order it
+    // belongs to, with what it covered, so the arithmetic is visible.
     const result = await this.#pool.query<any>(
       `SELECT cg.checkout_group_id,cg.checkout_reference,cg.total_minor,cg.currency,cg.lifecycle_state,
-        json_agg(json_build_object('order_reference',o.order_reference,'vendor_location_id',o.vendor_location_id,
-          'total_minor',o.total_minor,'state',o.lifecycle_state) ORDER BY o.order_reference) orders
+        json_agg(DISTINCT jsonb_build_object('order_reference',o.order_reference,'vendor_location_id',o.vendor_location_id,
+          'total_minor',o.total_minor,'state',o.lifecycle_state)) orders,
+        COALESCE(json_agg(DISTINCT jsonb_build_object('refund_id',r.refund_id,'order_reference',r.source_order_reference,
+          'refund_state',r.refund_state,'trigger_code',r.trigger_code,'refund_total_minor',r.refund_total_minor,
+          'item_minor',r.item_minor,'tax_minor',r.tax_minor,'delivery_minor',r.delivery_minor,
+          'tip_minor',r.tip_minor)) FILTER (WHERE r.refund_id IS NOT NULL),'[]') refunds,
+        COALESCE((SELECT sum(refund.refund_total_minor) FROM marketplace.refunds refund
+                   WHERE refund.source_order_reference IN (
+                     SELECT vendor_order.order_reference FROM marketplace.vendor_orders vendor_order
+                      WHERE vendor_order.checkout_group_id = cg.checkout_group_id)
+                     AND refund.refund_state NOT IN ('PROPOSED','REJECTED')),0) refunded_total_minor
        FROM marketplace.checkout_groups cg JOIN marketplace.vendor_orders o USING (checkout_group_id)
+       LEFT JOIN marketplace.refunds r ON r.source_order_reference = o.order_reference
        WHERE cg.checkout_group_id=$1 AND cg.customer_user_id=$2 GROUP BY cg.checkout_group_id`,
       [input.checkout_group_id, customerId],
     );
@@ -626,26 +628,111 @@ export class CompleteMoneyLifecycleService {
       [userId, input.vendor_location_id],
     );
     if (!membership.rows[0]) throw new MoneyNotFoundError('Statement not found');
-    const settlements = await this.#pool.query(
-      `SELECT s.*,COALESCE(json_agg(sl ORDER BY sl.settlement_line_id)
-        FILTER (WHERE sl.settlement_line_id IS NOT NULL),'[]') lines
-       FROM marketplace.settlements s LEFT JOIN marketplace.settlement_lines sl USING (settlement_id)
-       WHERE s.vendor_location_id=$1 GROUP BY s.settlement_id ORDER BY s.created_at DESC`,
+    // The shape `VendorStatement` in the typed contracts declares, and the
+    // vendor console renders. This returned raw `settlements.*` rows -- bigint
+    // strings under the table's own column names -- so the payouts page
+    // crashed on `lifecycle_state.toLowerCase()` the first time a store had a
+    // settlement to show. The ladder had asserted only that the rows belonged
+    // to the right location, never that they had the fields the contract says.
+    //
+    // Gross is what the goods sold for after refunds; the platform's share is
+    // the commission on that; net is what the vendor is owed. The three add up
+    // by construction of the settlement, and that is asserted, not assumed.
+    const settlements = await this.#pool.query<{
+      settlement_id: string;
+      source_order_reference: string;
+      settlement_state: string;
+      eligible_at: Date;
+      vendor_payable_minor: string;
+      platform_remainder_minor: string;
+    }>(
+      `SELECT settlement_id, source_order_reference, settlement_state, eligible_at,
+              vendor_payable_minor::text, platform_remainder_minor::text
+         FROM marketplace.settlements
+        WHERE vendor_location_id=$1
+        ORDER BY created_at DESC`,
       [input.vendor_location_id],
     );
-    return { settlements: settlements.rows };
+    const entries = settlements.rows.map((row) => {
+      const net = Number(row.vendor_payable_minor);
+      const fee = Number(row.platform_remainder_minor);
+      return Object.freeze({
+        settlement_id: row.settlement_id,
+        reference: row.source_order_reference,
+        eligible_at: row.eligible_at.toISOString(),
+        lifecycle_state: row.settlement_state,
+        gross_minor: net + fee,
+        platform_fee_minor: fee,
+        net_minor: net,
+      });
+    });
+    const sum = (states: readonly string[]) =>
+      entries
+        .filter((entry) => states.includes(entry.lifecycle_state))
+        .reduce((total, entry) => total + entry.net_minor, 0);
+    return Object.freeze({
+      vendor_location_id: input.vendor_location_id,
+      pending_minor: sum(['PENDING', 'HELD', 'FAILED_REVIEW']),
+      eligible_minor: sum(['ELIGIBLE', 'SCHEDULED', 'SUBMITTED']),
+      settled_minor: sum(['PAID']),
+      settlements: Object.freeze(entries),
+    });
   }
 
+  /**
+   * The shape `PartnerStatement` declares, and the earnings screen renders.
+   *
+   * Same defect as the vendor statement: raw rows, so the screen crashed on
+   * the first earning. The old query also joined every settlement of the
+   * partner to every earning of theirs, so a rider with two deliveries saw
+   * each earning twice; the payout is now found through the order the earning
+   * belongs to.
+   */
   async partnerStatement(input: { readonly context: RequestContext }) {
     const partnerId = actor(input.context, 'delivery_partner');
-    const result = await this.#pool.query(
-      `SELECT e.*,p.payout_state,p.paid_at FROM marketplace.partner_earnings_records e
-        LEFT JOIN marketplace.settlements s ON s.partner_user_id=e.partner_user_id
-        LEFT JOIN marketplace.payouts p ON p.settlement_id=s.settlement_id AND p.beneficiary_kind='PARTNER'
-       WHERE e.partner_user_id=$1 ORDER BY e.created_at DESC`,
+    const result = await this.#pool.query<{
+      partner_earnings_record_id: string;
+      source_order_reference: string;
+      net_minor: string;
+      created_at: Date;
+      payout_state: string | null;
+    }>(
+      `SELECT e.partner_earnings_record_id, a.source_order_reference, e.net_minor::text,
+              e.created_at, payout.payout_state
+         FROM marketplace.partner_earnings_records e
+         JOIN marketplace.delivery_assignments a USING (delivery_assignment_id)
+         LEFT JOIN marketplace.settlements s
+           ON s.source_order_reference = a.source_order_reference
+         LEFT JOIN LATERAL (
+           SELECT p.payout_state FROM marketplace.payouts p
+            WHERE p.settlement_id = s.settlement_id AND p.beneficiary_kind = 'PARTNER'
+            ORDER BY p.created_at DESC LIMIT 1
+         ) payout ON true
+        WHERE e.partner_user_id=$1
+        ORDER BY e.created_at DESC`,
       [partnerId],
     );
-    return { earnings: result.rows };
+    const earnings = result.rows.map((row) =>
+      Object.freeze({
+        partner_earnings_record_id: row.partner_earnings_record_id,
+        reference: row.source_order_reference,
+        // What has happened to the money, in the payout's own words; before a
+        // payout exists the amount is earned and nothing more.
+        lifecycle_state: row.payout_state ?? 'EARNED',
+        total_minor: Number(row.net_minor),
+        posted_at: row.created_at.toISOString(),
+      }),
+    );
+    const total = earnings.reduce((sum, entry) => sum + entry.total_minor, 0);
+    const paid = earnings
+      .filter((entry) => entry.lifecycle_state === 'PAID')
+      .reduce((sum, entry) => sum + entry.total_minor, 0);
+    return Object.freeze({
+      pending_minor: total - paid,
+      paid_minor: paid,
+      total_earned_minor: total,
+      earnings: Object.freeze(earnings),
+    });
   }
 
   async financeQueue(input: { readonly context: RequestContext }) {

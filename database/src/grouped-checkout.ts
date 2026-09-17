@@ -1,5 +1,5 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- PostgreSQL projections are runtime-shaped at this persistence boundary. */
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createDatabasePool } from './database-pool.js';
+import { createHash } from 'node:crypto';
 import {
   createUuidV7,
   parseRequestId,
@@ -9,11 +9,22 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import { calculateCheckoutPricing } from './checkout-pricing.js';
+import { resolveFinancialPolicy } from './financial-policy.js';
 import {
   LocalFakeMoneyProvider,
   type FakeProviderScenario,
   type MoneyProviderAdapter,
 } from './money-policy.js';
+import { transaction as tx } from './transaction.js';
+import { DEFAULT_ACCEPT_DEADLINE_SECONDS } from './vendor-fulfilment.js';
+
+/**
+ * Prepaid methods the platform accepts.
+ *
+ * Cash on delivery is a gated capability (GAT-01): it is absent from this union
+ * and from the database constraint, not merely hidden in a UI.
+ */
+export type PaymentMethod = 'UPI' | 'CARD' | 'WALLET';
 
 export class CheckoutInputError extends Error {}
 export class CheckoutNotFoundError extends Error {}
@@ -42,6 +53,92 @@ type GroupRow = {
   route_metres: string;
   lines: QuoteLineRow[];
 };
+type InventoryItemRow = {
+  readonly exact_available_quantity: string | number | null;
+  readonly quantity_basis: 'COUNTED' | 'VENDOR_CONFIRMS';
+  readonly version: number;
+};
+type CheckoutQuoteRow = Record<string, unknown> & {
+  readonly cart_id: UuidV7;
+  readonly checkout_quote_id: UuidV7;
+  readonly customer_user_id: UuidV7;
+  readonly expires_at: Date;
+  readonly policy_version_reference: string;
+  readonly total_minor: string | number;
+};
+type WebhookPaymentRow = CheckoutQuoteRow & {
+  readonly checkout_group_id: UuidV7;
+  readonly checkout_state: string;
+  readonly payment_transaction_id: UuidV7;
+  readonly version: number;
+};
+type FinalizeGroupRow = Record<string, unknown> & {
+  readonly checkout_quote_group_id: string;
+  readonly delivery_minor: string | number;
+  readonly fulfilment_method: string;
+  readonly item_minor: string | number;
+  readonly tip_minor: string | number;
+  readonly total_minor: string | number;
+  readonly vendor_location_id: string;
+};
+type FinalizeLineRow = Record<string, unknown> & {
+  readonly catalogue_variant_id: string;
+  readonly exact_available_quantity: string | number | null;
+  readonly inventory_item_id: string;
+  readonly inventory_reservation_id: string;
+  readonly item_version: number;
+  readonly line_total_minor: string | number;
+  readonly product_title_snapshot: string;
+  readonly quantity: string | number;
+  readonly reservation_version: number;
+  readonly unit_price_minor: string | number;
+  readonly variant_title_snapshot: string;
+};
+type CheckoutEventRow = {
+  readonly checkout_event_id: string;
+  readonly correlation_id: string;
+  readonly event_type: string;
+  readonly occurred_at: Date;
+  readonly request_id: string;
+};
+type QuoteGroupProjection = Record<string, unknown> & {
+  readonly delivery_minor: string | number;
+  readonly fulfilment_method: string;
+  readonly item_minor: string | number;
+  readonly location_name: string;
+  readonly tip_minor: string | number;
+  readonly total_minor: string | number;
+};
+type BlockedGroupProjection = {
+  readonly cart_vendor_group_id: string;
+  readonly reason_code: string;
+  readonly vendor_location_id: string;
+};
+type CheckoutGroupProjection = Record<string, unknown> & {
+  readonly checkout_group_id: string;
+  readonly checkout_quote_id: string;
+  readonly lifecycle_state: string;
+  readonly payment_transaction_id: string;
+  readonly total_minor: string | number;
+  readonly version: number;
+};
+type VendorOrderProjection = Record<string, unknown> & {
+  readonly accept_by: Date | null;
+  readonly checkout_group_id: string;
+  readonly lifecycle_state: string;
+  readonly location_name: string;
+  readonly order_reference: string;
+  readonly total_minor: string | number;
+  readonly vendor_location_id: string;
+  readonly vendor_order_id: string;
+  readonly version: number;
+};
+type ReservationReleaseRow = {
+  readonly counted_stock_applied: boolean;
+  readonly inventory_item_id: string;
+  readonly quantity: string | number;
+  readonly reservation_id: string;
+};
 
 function customer(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'customer')
@@ -54,20 +151,6 @@ function ids(context: RequestContext) {
     correlation: parseUuidV7(context.correlation_id),
   };
 }
-async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 function reference(prefix: 'CHECKOUT' | 'ORDER' | 'PAY' | 'CMD', id: string) {
   return `SYNTH-${prefix}-${id.replaceAll('-', '').toUpperCase()}`;
 }
@@ -75,19 +158,21 @@ function reference(prefix: 'CHECKOUT' | 'ORDER' | 'PAY' | 'CMD', id: string) {
 export class GroupedCheckoutService {
   readonly #pool: Pool;
   readonly #provider: MoneyProviderAdapter;
-  readonly #webhookKey: string;
   constructor(input: {
     readonly connection_string: string;
     readonly provider?: MoneyProviderAdapter;
     readonly webhook_key?: string;
   }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-grouped-checkout',
       max: 12,
     });
-    this.#provider = input.provider ?? new LocalFakeMoneyProvider();
-    this.#webhookKey = input.webhook_key ?? 'SYNTH-LOCAL-WEBHOOK-KEY';
+    this.#provider =
+      input.provider ??
+      new LocalFakeMoneyProvider({
+        ...(input.webhook_key === undefined ? {} : { webhook_key: input.webhook_key }),
+      });
   }
   async close() {
     await this.#pool.end();
@@ -158,6 +243,9 @@ export class GroupedCheckoutService {
       });
       const valid = classified.filter((entry) => entry.reason === null).map((entry) => entry.group);
       if (!valid.length) throw new CheckoutConflictError('Every cart group is blocked');
+      // The quote is priced by whichever policy version is in force right now,
+      // and stamps that version so nothing can re-price it later under another.
+      const financialPolicy = await resolveFinancialPolicy(client, { at: now });
       const pricing = calculateCheckoutPricing(
         valid.map((group) => ({
           vendor_location_id: group.vendor_location_id,
@@ -168,6 +256,7 @@ export class GroupedCheckoutService {
           route_metres: Number(group.route_metres),
           tip_minor: Number(group.tip_minor),
         })),
+        financialPolicy,
       );
       const digest = createHash('sha256')
         .update(
@@ -239,7 +328,7 @@ export class GroupedCheckoutService {
           ],
         );
         for (const [lineIndex, line] of group.lines.entries()) {
-          const locked = await client.query<any>(
+          const locked = await client.query<InventoryItemRow>(
             `SELECT * FROM marketplace.inventory_items WHERE inventory_item_id=$1 FOR UPDATE`,
             [line.inventory_item_id],
           );
@@ -320,7 +409,9 @@ export class GroupedCheckoutService {
   async place(input: {
     readonly context: RequestContext;
     readonly checkout_quote_id: UuidV7;
-    readonly provider_scenario: FakeProviderScenario;
+    readonly provider_scenario?: FakeProviderScenario;
+    /** The prepaid method the customer chose. COD is gated and not accepted. */
+    readonly payment_method?: PaymentMethod;
     readonly idempotency_key?: string;
     readonly now?: Date;
   }) {
@@ -335,7 +426,7 @@ export class GroupedCheckoutService {
       );
       if (existing.rows[0])
         return this.#projectCheckout(client, existing.rows[0].checkout_group_id);
-      const quote = await client.query<any>(
+      const quote = await client.query<CheckoutQuoteRow>(
         `SELECT * FROM marketplace.checkout_quotes WHERE checkout_quote_id=$1 AND customer_user_id=$2 AND lifecycle_state='ACTIVE' FOR UPDATE`,
         [input.checkout_quote_id, userId],
       );
@@ -371,7 +462,7 @@ export class GroupedCheckoutService {
         outcome = this.#provider.authorize({
           amount_minor: Number(q.total_minor),
           operation_reference: operation,
-          scenario: input.provider_scenario,
+          scenario: input.provider_scenario ?? 'SUCCESS',
         });
       } catch {
         outcome = 'UNKNOWN';
@@ -384,14 +475,15 @@ export class GroupedCheckoutService {
             ? 'FAILED'
             : 'UNKNOWN_REQUIRES_RECONCILIATION';
       await client.query(
-        `INSERT INTO marketplace.payment_transactions (payment_transaction_id,source_checkout_reference,provider_operation_reference,payment_state,amount_minor,provider_scenario,request_id,correlation_id,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)`,
+        `INSERT INTO marketplace.payment_transactions (payment_transaction_id,source_checkout_reference,provider_operation_reference,payment_state,amount_minor,provider_scenario,payment_method,request_id,correlation_id,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)`,
         [
           paymentId,
           checkoutRef,
           operation,
           paymentState,
           q.total_minor,
-          input.provider_scenario,
+          input.provider_scenario ?? 'SUCCESS',
+          input.payment_method ?? null,
           contextIds.request,
           contextIds.correlation,
           now,
@@ -488,7 +580,7 @@ export class GroupedCheckoutService {
     readonly now?: Date;
   }) {
     const now = input.now ?? new Date();
-    if (!/^SYNTH-EVENT-[A-Z0-9-]{4,96}$/.test(input.provider_event_id))
+    if (!/^[A-Z0-9][A-Z0-9._:/-]{3,127}$/.test(input.provider_event_id))
       throw new CheckoutInputError('Invalid provider event');
     const occurredAt = new Date(input.occurred_at);
     if (
@@ -502,12 +594,7 @@ export class GroupedCheckoutService {
       outcome: input.outcome,
       occurred_at: input.occurred_at,
     });
-    const expected = createHmac('sha256', this.#webhookKey).update(body).digest('hex');
-    const supplied = Buffer.from(input.signature, 'hex');
-    if (
-      supplied.length !== expected.length / 2 ||
-      !timingSafeEqual(supplied, Buffer.from(expected, 'hex'))
-    )
+    if (!this.#provider.verifyWebhook({ payload: body, signature: input.signature }))
       throw new CheckoutInputError('Invalid webhook signature');
     return tx(this.#pool, async (client) => {
       const duplicate = await client.query(
@@ -515,7 +602,7 @@ export class GroupedCheckoutService {
         [input.provider_event_id],
       );
       if (duplicate.rows[0]) return { replayed: true };
-      const found = await client.query<any>(
+      const found = await client.query<WebhookPaymentRow>(
         `SELECT p.*,c.checkout_group_id,c.checkout_quote_id,c.customer_user_id,c.lifecycle_state AS checkout_state,
                 q.cart_id,q.policy_version_reference,q.total_minor AS quote_total
            FROM marketplace.payment_transactions p
@@ -659,27 +746,39 @@ export class GroupedCheckoutService {
       readonly context: RequestContext;
       readonly now: Date;
       readonly payment_id: string;
-      readonly quote: any;
+      readonly quote: Pick<
+        CheckoutQuoteRow,
+        'cart_id' | 'checkout_quote_id' | 'customer_user_id' | 'policy_version_reference'
+      >;
     },
   ) {
-    const groups = await client.query<any>(
+    const groups = await client.query<FinalizeGroupRow>(
       `SELECT qg.*,cg.fulfilment_method
          FROM marketplace.checkout_quote_groups qg
          JOIN marketplace.cart_vendor_groups cg USING (cart_vendor_group_id)
         WHERE checkout_quote_id=$1 ORDER BY vendor_location_id`,
       [input.quote.checkout_quote_id],
     );
+    // The shop's response deadline starts now, with the placement itself.
+    // Nothing set it before: the fulfilment service had a method to issue
+    // deadlines that only the verifier called, so every real order sat PLACED
+    // with no countdown and the worker's expiry sweep never found a row.
+    const acceptBy = new Date(input.now.getTime() + DEFAULT_ACCEPT_DEADLINE_SECONDS * 1000);
     for (const group of groups.rows) {
       const orderId = createUuidV7();
       const orderRef = reference('ORDER', orderId);
       await client.query(
-        `INSERT INTO marketplace.vendor_orders (vendor_order_id,order_reference,checkout_group_id,vendor_location_id,total_minor,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$6)`,
+        `INSERT INTO marketplace.vendor_orders
+           (vendor_order_id,order_reference,checkout_group_id,vendor_location_id,total_minor,
+            accept_by,created_at,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$7)`,
         [
           orderId,
           orderRef,
           input.checkout_id,
           group.vendor_location_id,
           group.total_minor,
+          acceptBy,
           input.now,
         ],
       );
@@ -689,9 +788,15 @@ export class GroupedCheckoutService {
         context: input.context,
         event_type: 'order.placed',
         now: input.now,
+        payload: {
+          fulfilment_method: group.fulfilment_method,
+          order_reference: orderRef,
+          vendor_location_id: group.vendor_location_id,
+          vendor_order_id: orderId,
+        },
         state: 'PLACED',
       });
-      const lines = await client.query<any>(
+      const lines = await client.query<FinalizeLineRow>(
         `SELECT ql.*,r.inventory_item_id,r.version AS reservation_version,i.version AS item_version,i.exact_available_quantity
            FROM marketplace.checkout_quote_lines ql
            JOIN marketplace.inventory_reservations r ON r.reservation_id=ql.inventory_reservation_id
@@ -778,7 +883,7 @@ export class GroupedCheckoutService {
     );
     if (!owner.rows[0]) throw new CheckoutNotFoundError();
     const limit = Math.min(50, Math.max(1, input.limit ?? 20));
-    const events = await this.#pool.query<any>(
+    const events = await this.#pool.query<CheckoutEventRow>(
       `SELECT checkout_event_id,event_type,request_id,correlation_id,occurred_at
          FROM marketplace.checkout_events
         WHERE checkout_group_id=$1 AND ($2::uuid IS NULL OR checkout_event_id<$2)
@@ -800,25 +905,36 @@ export class GroupedCheckoutService {
     return this.#projectCheckout(this.#pool, id);
   }
   async #projectQuote(client: Pick<PoolClient, 'query'>, id: string) {
-    const q = await client.query<any>(
+    const q = await client.query<CheckoutQuoteRow>(
       `SELECT * FROM marketplace.checkout_quotes WHERE checkout_quote_id=$1`,
       [id],
     );
-    const groups = await client.query<any>(
-      `SELECT * FROM marketplace.checkout_quote_groups WHERE checkout_quote_id=$1 ORDER BY vendor_location_id`,
+    const groups = await client.query<QuoteGroupProjection>(
+      `SELECT quote_group.*, cart_group.fulfilment_method, location.location_name
+         FROM marketplace.checkout_quote_groups quote_group
+         JOIN marketplace.cart_vendor_groups cart_group USING (cart_vendor_group_id)
+         JOIN marketplace.vendor_locations location
+           ON location.vendor_location_id = quote_group.vendor_location_id
+        WHERE quote_group.checkout_quote_id=$1
+        ORDER BY location.location_name, quote_group.vendor_location_id`,
       [id],
     );
-    const blocked = await client.query<any>(
+    const blocked = await client.query<BlockedGroupProjection>(
       `SELECT cart_vendor_group_id,vendor_location_id,reason_code
          FROM marketplace.checkout_quote_blocked_groups
         WHERE checkout_quote_id=$1 ORDER BY vendor_location_id`,
       [id],
     );
+    const quote = q.rows[0];
+    if (!quote) throw new CheckoutNotFoundError();
     return {
-      ...q.rows[0],
-      total_minor: Number(q.rows[0].total_minor),
+      ...quote,
+      cart_id: parseUuidV7(quote.cart_id),
+      checkout_quote_id: parseUuidV7(quote.checkout_quote_id),
+      customer_user_id: parseUuidV7(quote.customer_user_id),
+      total_minor: Number(quote.total_minor),
       authorization_buffer_minor: 0,
-      groups: groups.rows.map((g: any) => ({
+      groups: groups.rows.map((g) => ({
         ...g,
         item_minor: Number(g.item_minor),
         delivery_minor: Number(g.delivery_minor),
@@ -834,26 +950,42 @@ export class GroupedCheckoutService {
     };
   }
   async #projectCheckout(client: Pick<PoolClient, 'query'>, id: string) {
-    const c = await client.query<any>(
+    const c = await client.query<CheckoutGroupProjection>(
       `SELECT * FROM marketplace.checkout_groups WHERE checkout_group_id=$1`,
       [id],
     );
-    const orders = await client.query<any>(
-      `SELECT * FROM marketplace.vendor_orders WHERE checkout_group_id=$1 ORDER BY vendor_location_id`,
+    const orders = await client.query<VendorOrderProjection>(
+      `SELECT vendor_order.*, location.location_name
+         FROM marketplace.vendor_orders vendor_order
+         JOIN marketplace.vendor_locations location
+           ON location.vendor_location_id = vendor_order.vendor_location_id
+        WHERE vendor_order.checkout_group_id=$1
+        ORDER BY location.location_name, vendor_order.vendor_location_id`,
       [id],
     );
-    const states = orders.rows.map((order: any) => order.lifecycle_state as string);
+    const checkout = c.rows[0];
+    if (!checkout) throw new CheckoutNotFoundError();
+    const states = orders.rows.map((order) => order.lifecycle_state);
     const derivedState =
       states.length > 0 && states.every((state: string) => state === 'CANCELLED')
         ? 'CANCELLED'
         : states.some((state: string) => state === 'CANCELLED')
           ? 'PARTIALLY_CANCELLED'
-          : c.rows[0].lifecycle_state;
+          : checkout.lifecycle_state;
     return {
-      ...c.rows[0],
+      ...checkout,
+      checkout_group_id: parseUuidV7(checkout.checkout_group_id),
+      checkout_quote_id: parseUuidV7(checkout.checkout_quote_id),
       derived_lifecycle_state: derivedState,
-      total_minor: Number(c.rows[0].total_minor),
-      orders: orders.rows.map((o: any) => ({ ...o, total_minor: Number(o.total_minor) })),
+      payment_transaction_id: parseUuidV7(checkout.payment_transaction_id),
+      total_minor: Number(checkout.total_minor),
+      orders: orders.rows.map((order) => ({
+        ...order,
+        checkout_group_id: parseUuidV7(order.checkout_group_id),
+        total_minor: Number(order.total_minor),
+        vendor_location_id: parseUuidV7(order.vendor_location_id),
+        vendor_order_id: parseUuidV7(order.vendor_order_id),
+      })),
     };
   }
   async #createAggregate(
@@ -864,6 +996,7 @@ export class GroupedCheckoutService {
       readonly context: RequestContext;
       readonly event_type: string;
       readonly now: Date;
+      readonly payload?: Readonly<Record<string, unknown>>;
       readonly state: string;
     },
   ) {
@@ -905,7 +1038,11 @@ export class GroupedCheckoutService {
         input.aggregate_type,
         input.aggregate_id,
         input.event_type,
-        JSON.stringify({ aggregate_id: input.aggregate_id, state: input.state }),
+        JSON.stringify({
+          aggregate_id: input.aggregate_id,
+          state: input.state,
+          ...input.payload,
+        }),
         contextIds.request,
         contextIds.correlation,
         input.context.causation_id,
@@ -1051,7 +1188,7 @@ export class GroupedCheckoutService {
     );
   }
   async #releaseQuote(client: PoolClient, id: UuidV7, now: Date) {
-    const rows = await client.query<any>(
+    const rows = await client.query<ReservationReleaseRow>(
       `SELECT r.* FROM marketplace.checkout_quote_lines l JOIN marketplace.inventory_reservations r ON r.reservation_id=l.inventory_reservation_id JOIN marketplace.checkout_quote_groups g ON g.checkout_quote_group_id=l.checkout_quote_group_id WHERE g.checkout_quote_id=$1 AND r.reservation_state='SOFT_HELD' FOR UPDATE OF r`,
       [id],
     );

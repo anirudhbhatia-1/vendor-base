@@ -61,6 +61,18 @@ const COMMAND_SCOPE_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z0-9_]+)+$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~:-]{8,200}$/;
 const NORMAL_RETENTION_MS = 25 * 60 * 60 * 1000;
 const UNCERTAIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * How long to wait before an abandoned command is due for reconciliation.
+ *
+ * Retention and reconciliation timing are different questions and were the same
+ * number. A lease expires when the process running a command died mid-flight, so its
+ * outcome is genuinely unknown -- exactly the case D-15 says must enter reconciliation
+ * rather than be retried. Setting the due date to the seven-day retention window meant
+ * a crashed payment authorization would not be looked at for a week. The record is
+ * still kept for seven days; it simply becomes due promptly, leaving the provider a
+ * moment to settle first.
+ */
+const UNCERTAIN_RECONCILIATION_DELAY_MS = 60 * 1000;
 const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_WAIT_MS = 5_000;
 const DEFAULT_POLL_MS = 20;
@@ -169,7 +181,7 @@ async function markExpiredLeaseUncertain(
   client: PoolClient,
   row: IdempotencyRecordRow,
 ): Promise<IdempotencyRecordRow> {
-  const reconciliationDueAt = new Date(Date.now() + UNCERTAIN_RETENTION_MS);
+  const reconciliationDueAt = new Date(Date.now() + UNCERTAIN_RECONCILIATION_DELAY_MS);
   const responseBody: JsonObject = {
     status: 'outcome_unknown',
     request_id: row.request_id,

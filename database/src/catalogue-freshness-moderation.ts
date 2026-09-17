@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -5,7 +6,8 @@ import {
   type RequestContext,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
-import { Pool, type PoolClient } from 'pg';
+import { Pool } from 'pg';
+import { transaction } from './transaction.js';
 
 export type AvailabilityFreshness = 'FRESH' | 'STALE' | 'EXPIRED';
 export type CatalogueModerationState = 'PENDING' | 'CLEARED' | 'CORRECTION_REQUIRED' | 'RESTRICTED';
@@ -32,7 +34,22 @@ export interface CatalogueModerationCase {
 
 export class CatalogueModerationInputError extends Error {}
 export class CatalogueModerationNotFoundError extends Error {}
-export class CatalogueModerationConflictError extends Error {}
+/**
+ * Carries which kind of conflict it is: a stale version is fixed by reloading,
+ * and every other refusal here is not. One bare 409 covered both, and clients
+ * render that as "Refresh and try again".
+ */
+export class CatalogueModerationConflictError extends Error {
+  readonly code: 'ORDER_STATE_CONFLICT' | 'VERSION_CONFLICT';
+
+  constructor(
+    message: string,
+    code: 'ORDER_STATE_CONFLICT' | 'VERSION_CONFLICT' = 'ORDER_STATE_CONFLICT',
+  ) {
+    super(message);
+    this.code = code;
+  }
+}
 export class CatalogueModerationAuthorizationError extends Error {}
 
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
@@ -86,24 +103,6 @@ function moderationRecord(row: ModerationRow): CatalogueModerationCase {
     version: row.version,
   });
 }
-async function transaction<T>(
-  pool: Pool,
-  operation: (client: PoolClient) => Promise<T>,
-): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 interface CustomerRow {
   availability_state: 'AVAILABLE' | 'LOW_STOCK' | 'VENDOR_CONFIRMS';
   display_name: string;
@@ -126,7 +125,7 @@ interface ModerationRow {
 export class CatalogueFreshnessModerationService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-catalogue-freshness-moderation',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
@@ -272,7 +271,10 @@ export class CatalogueFreshnessModerationService {
       if (current.moderation_state !== 'PENDING')
         throw new CatalogueModerationConflictError('Only pending cases can be decided');
       if (current.version !== input.expected_version)
-        throw new CatalogueModerationConflictError('Moderation case version is stale');
+        throw new CatalogueModerationConflictError(
+          'Moderation case version is stale',
+          'VERSION_CONFLICT',
+        );
       const ids = {
         request: parseRequestId(input.context.request_id),
         correlation: parseUuidV7(input.context.correlation_id),

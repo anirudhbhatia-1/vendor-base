@@ -3,7 +3,6 @@ import {
   Body,
   ConflictException,
   Controller,
-  ForbiddenException,
   Get,
   HttpCode,
   Inject,
@@ -12,68 +11,25 @@ import {
   Post,
 } from '@nestjs/common';
 import {
-  AssignmentAuthorizationError,
   AssignmentConflictError,
   AssignmentCustodyService,
   AssignmentInputError,
   AssignmentNotFoundError,
-  AssignmentVersionError,
 } from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ASSIGNMENT_CUSTODY } from './tokens.js';
-
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function stringField(value: Record<string, unknown>, key: string): string {
-  if (typeof value[key] !== 'string') throw new BadRequestException();
-  return value[key];
-}
-function booleanField(value: Record<string, unknown>, key: string): boolean {
-  if (typeof value[key] !== 'boolean') throw new BadRequestException();
-  return value[key];
-}
-function integerField(value: Record<string, unknown>, key: string, minimum = 1): number {
-  const found = value[key];
-  if (!Number.isSafeInteger(found) || (found as number) < minimum) throw new BadRequestException();
-  return found as number;
-}
-function stringsField(value: Record<string, unknown>, key: string): readonly string[] {
-  const found = value[key];
-  if (!Array.isArray(found) || found.some((entry) => typeof entry !== 'string')) {
-    throw new BadRequestException();
-  }
-  return found as string[];
-}
-function dateField(value: Record<string, unknown>, key: string): Date {
-  const found = stringField(value, key);
-  const parsed = new Date(found);
-  if (!Number.isFinite(parsed.getTime())) throw new BadRequestException();
-  return parsed;
-}
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function translate(error: unknown): never {
-  if (error instanceof AssignmentInputError || error instanceof TypeError) {
-    throw new BadRequestException();
-  }
-  if (error instanceof AssignmentNotFoundError) throw new NotFoundException();
-  if (error instanceof AssignmentVersionError) {
-    throw new ConflictException({ error_code: error.code });
-  }
-  if (error instanceof AssignmentConflictError) throw new ConflictException();
-  if (error instanceof AssignmentAuthorizationError) throw new ForbiddenException();
-  throw error;
-}
-
+import {
+  booleanField,
+  dateField,
+  integerField,
+  object,
+  stringField,
+  stringsField,
+  uuid,
+} from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const offeredAssignment = RequireAuthorization({
   capability: 'partner.eligibility.read',
   conceal_resource: true,
@@ -99,7 +55,7 @@ function transition(value: Record<string, unknown>, assignmentId: string) {
     command_reference: stringField(value, 'command_reference'),
     context: currentRequestContext(),
     delivery_assignment_id: uuid(assignmentId),
-    expected_version: integerField(value, 'expected_version'),
+    expected_version: integerField(value, 'expected_version', 1),
     reason_code: stringField(value, 'reason_code'),
   };
 }
@@ -108,6 +64,24 @@ function transition(value: Record<string, unknown>, assignmentId: string) {
 export class PartnerAssignmentController {
   constructor(@Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService) {}
 
+  @Get('offers')
+  @offeredAssignment
+  async listOffers() {
+    const actor = currentRequestContext().actor;
+    if (!actor || actor.actor_kind !== 'delivery_partner') {
+      return { offers: [] };
+    }
+    try {
+      const offers = await this.assignments.listOffersForPartner({
+        partner_user_id: actor.actor_id,
+      });
+      return { offers };
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
   @Post('offers/:delivery_assignment_id/accept')
   @offeredAssignment
   @HttpCode(200)
@@ -115,7 +89,42 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.accept(transition(object(raw), id));
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  /**
+   * The partner's own delivery rating.
+   *
+   * An aggregate over a window, never a list: a rating traceable to one
+   * delivery is traceable to one customer at one door. Built in 0060 with no
+   * way for the person it is about to see it.
+   */
+  @Get('ratings')
+  @offeredAssignment
+  async ratings() {
+    const actor = currentRequestContext().actor;
+    if (!actor || actor.actor_kind !== 'delivery_partner') {
+      return { rating_average: null, rating_count: 0 };
+    }
+    return this.assignments.partnerRatingSummary({ partner_user_id: actor.actor_id });
+  }
+
+  @Get('assignments')
+  @offeredAssignment
+  async listAssignments() {
+    const actor = currentRequestContext().actor;
+    if (!actor || actor.actor_kind !== 'delivery_partner') return { assignments: [] };
+    try {
+      return {
+        assignments: await this.assignments.listActiveForPartner({
+          partner_user_id: actor.actor_id,
+        }),
+      };
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -130,7 +139,8 @@ export class PartnerAssignmentController {
         resulting_state: 'DECLINED',
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -143,7 +153,8 @@ export class PartnerAssignmentController {
         delivery_assignment_id: uuid(id),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -154,7 +165,8 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.arriveAtVendor(transition(object(raw), id));
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -166,12 +178,13 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.confirmPickup({
         ...transition(value, id),
-        package_count: integerField(value, 'package_count'),
+        package_count: integerField(value, 'package_count', 1),
         proof_reference: stringField(value, 'proof_reference'),
         vendor_confirmed: booleanField(value, 'vendor_confirmed'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -182,7 +195,8 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.beginRoute(transition(object(raw), id));
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -193,7 +207,8 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.arriveAtCustomer(transition(object(raw), id));
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -205,10 +220,12 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.deliver({
         ...transition(value, id),
+        otp: stringField(value, 'otp'),
         proof_reference: stringField(value, 'proof_reference'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -219,7 +236,8 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.failDelivery(transition(object(raw), id));
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -230,7 +248,8 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.requireReturn(transition(object(raw), id));
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -241,7 +260,8 @@ export class PartnerAssignmentController {
     try {
       return await this.assignments.beginReturn(transition(object(raw), id));
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -256,7 +276,8 @@ export class PartnerAssignmentController {
         proof_reference: stringField(value, 'proof_reference'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }
@@ -276,13 +297,14 @@ export class AdminAssignmentController {
         command_reference: stringField(value, 'command_reference'),
         context: currentRequestContext(),
         handling_flags: stringsField(value, 'handling_flags'),
-        package_count: integerField(value, 'package_count'),
+        package_count: integerField(value, 'package_count', 1),
         reason_code: stringField(value, 'reason_code'),
         source_order_reference: stringField(value, 'source_order_reference'),
         vendor_location_id: uuid(stringField(value, 'vendor_location_id')),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -298,7 +320,8 @@ export class AdminAssignmentController {
         partner_user_id: uuid(stringField(value, 'partner_user_id')),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -313,7 +336,8 @@ export class AdminAssignmentController {
         destination_reference: stringField(value, 'destination_reference'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -332,7 +356,55 @@ export class AdminAssignmentController {
         resulting_state: resulting as 'CANCELLED' | 'FAILED_PICKUP' | 'REASSIGNED',
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+}
+
+const customerRatesDelivery = RequireAuthorization({
+  capability: 'customer.order.rate',
+  conceal_resource: true,
+});
+
+/**
+ * The customer's rating of the delivery itself.
+ *
+ * Deliberately its own route rather than another field on the order rating:
+ * the shop and the rider performed two different services, and one score across
+ * both means a shop that packed a perfect order carries a late rider on its
+ * record, with neither able to act on the signal.
+ */
+@Controller('customer/deliveries')
+export class CustomerDeliveryRatingController {
+  constructor(@Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService) {}
+
+  @Post(':delivery_assignment_id/rating')
+  @customerRatesDelivery
+  async rate(
+    @Param('delivery_assignment_id') assignmentId: string,
+    @Body() raw: unknown,
+  ): Promise<{ readonly rated: true }> {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new BadRequestException();
+    const body = raw as Record<string, unknown>;
+    if (typeof body.stars !== 'number') throw new BadRequestException();
+    if (body.review_note !== undefined && typeof body.review_note !== 'string') {
+      throw new BadRequestException();
+    }
+    try {
+      await this.assignments.submitDeliveryRating({
+        context: currentRequestContext(),
+        delivery_assignment_id: parseUuidV7(assignmentId),
+        stars: body.stars,
+        ...(typeof body.review_note === 'string' ? { review_note: body.review_note } : {}),
+      });
+      return { rated: true };
+    } catch (error) {
+      if (error instanceof AssignmentInputError) throw new BadRequestException(error.message);
+      if (error instanceof AssignmentNotFoundError) throw new NotFoundException();
+      if (error instanceof AssignmentConflictError)
+        throw new ConflictException({ error_code: 'ORDER_STATE_CONFLICT' });
+      throw error;
     }
   }
 }

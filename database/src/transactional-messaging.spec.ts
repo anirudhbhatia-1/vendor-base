@@ -15,4 +15,24 @@ describe('outbox retry backoff', () => {
     assert.throws(() => outboxBackoffMs(1, 2_000, 1_000), /cannot exceed/);
     assert.throws(() => outboxBackoffMs(26), /Attempt count/);
   });
+
+  it('never exceeds the maximum even after many doublings', () => {
+    const max = 30_000;
+    for (let attempt = 1; attempt <= 25; attempt++) {
+      assert.ok(outboxBackoffMs(attempt, 1_000, max) <= max, `attempt ${attempt} exceeded maximum`);
+    }
+  });
+
+  it('grows monotonically up to the cap', () => {
+    let prev = 0;
+    for (let attempt = 1; attempt <= 25; attempt++) {
+      const ms = outboxBackoffMs(attempt, 100, 60_000);
+      assert.ok(ms >= prev, `backoff should not decrease at attempt ${attempt}`);
+      prev = ms;
+    }
+  });
+
+  it('reaches the dead-letter threshold on attempt 26', () => {
+    assert.throws(() => outboxBackoffMs(26), RangeError);
+  });
 });

@@ -24,6 +24,36 @@ import {
  */
 export const marketplaceSchema = pgSchema('marketplace');
 
+export const customerPrivacyRequests = marketplaceSchema.table(
+  'customer_privacy_requests',
+  {
+    customerPrivacyRequestId: uuid('customer_privacy_request_id').primaryKey(),
+    userId: uuid('user_id').notNull(),
+    requestKind: text('request_kind').notNull(),
+    lifecycleState: text('lifecycle_state').notNull().default('REQUESTED'),
+    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    exportExpiresAt: timestamp('export_expires_at', { withTimezone: true }),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('one_open_customer_privacy_request')
+      .on(table.userId, table.requestKind)
+      .where(sql`${table.lifecycleState} IN ('REQUESTED','PROCESSING','READY')`),
+    check(
+      'customer_privacy_requests_request_kind_check',
+      sql`${table.requestKind} IN ('DATA_EXPORT','ACCOUNT_DELETION')`,
+    ),
+    check(
+      'customer_privacy_requests_lifecycle_state_check',
+      sql`${table.lifecycleState} IN ('REQUESTED','PROCESSING','READY','COMPLETED','CANCELLED','FAILED')`,
+    ),
+  ],
+);
+
 export const idempotencyRecords = marketplaceSchema.table(
   'idempotency_records',
   {
@@ -183,6 +213,32 @@ export const outboxRecoveries = marketplaceSchema.table(
     recoveredAt: timestamp('recovered_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('outbox_recoveries_event').on(table.eventId, table.recoveredAt)],
+);
+
+/**
+ * Durable worker liveness (migration 0071).
+ *
+ * Upserted in place by worker id, deliberately without `retentionClass`: this is
+ * operational liveness, not user data, and the retention sweep covers only tables
+ * that declare the column.
+ */
+export const workerHeartbeats = marketplaceSchema.table(
+  'worker_heartbeats',
+  {
+    workerId: uuid('worker_id').primaryKey(),
+    component: text('component').notNull(),
+    queues: text('queues').array().notNull(),
+    environment: text('environment').notNull(),
+    version: text('version').notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull(),
+    stoppedAt: timestamp('stopped_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('worker_heartbeats_live')
+      .on(table.lastSeenAt.desc())
+      .where(sql`${table.stoppedAt} IS NULL`),
+  ],
 );
 
 export const scheduledJobs = marketplaceSchema.table(
@@ -476,12 +532,14 @@ export const sessions = marketplaceSchema.table(
     tokenFamilyId: uuid('token_family_id').notNull(),
     userId: uuid('user_id').notNull(),
     deviceRegistrationId: uuid('device_registration_id').notNull(),
-    otpChallengeId: uuid('otp_challenge_id').notNull(),
+    otpChallengeId: uuid('otp_challenge_id'),
+    externalSupabaseSessionId: uuid('external_supabase_session_id'),
+    originKind: text('origin_kind').default('OTP').notNull(),
     state: text('state').default('ACTIVE').notNull(),
     version: integer('version').default(1).notNull(),
-    accessTokenHash: text('access_token_hash').notNull(),
-    accessExpiresAt: timestamp('access_expires_at', { withTimezone: true }).notNull(),
-    refreshExpiresAt: timestamp('refresh_expires_at', { withTimezone: true }).notNull(),
+    accessTokenHash: text('access_token_hash'),
+    accessExpiresAt: timestamp('access_expires_at', { withTimezone: true }),
+    refreshExpiresAt: timestamp('refresh_expires_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     revokeReason: text('revoke_reason'),
     dataClassification: text('data_classification').default('HIGHLY_RESTRICTED').notNull(),
@@ -493,6 +551,9 @@ export const sessions = marketplaceSchema.table(
   (table) => [
     uniqueIndex('sessions_otp_challenge_id_key').on(table.otpChallengeId),
     uniqueIndex('sessions_access_token_hash_key').on(table.accessTokenHash),
+    uniqueIndex('sessions_external_supabase_session_unique')
+      .on(table.externalSupabaseSessionId)
+      .where(sql`${table.externalSupabaseSessionId} IS NOT NULL`),
     index('sessions_user_state').on(table.userId, table.state, table.updatedAt, table.sessionId),
     index('sessions_device_state').on(table.deviceRegistrationId, table.state, table.updatedAt),
   ],
@@ -829,6 +890,9 @@ const geographyPoint = customType<{ data: string }>({
 });
 const geographyMultiPolygon = customType<{ data: string }>({
   dataType: () => 'geography(MultiPolygon, 4326)',
+});
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType: () => 'bytea',
 });
 
 export const vendors = marketplaceSchema.table(
@@ -1444,3 +1508,130 @@ export const returnTasks = marketplaceSchema.table('return_tasks', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+export const passwordCredentials = marketplaceSchema.table('password_credentials', {
+  userId: uuid('user_id').primaryKey(),
+  algorithm: text('algorithm').notNull(),
+  parameters: jsonb('parameters').notNull(),
+  hash: bytea('hash').notNull(),
+  salt: bytea('salt').notNull(),
+  version: integer('version').default(1).notNull(),
+  setByUserId: uuid('set_by_user_id').notNull(),
+  requestId: uuid('request_id').notNull(),
+  correlationId: uuid('correlation_id').notNull(),
+  dataClassification: text('data_classification').default('HIGHLY_RESTRICTED').notNull(),
+  retentionClass: text('retention_class').default('ACCESS_CONTROL').notNull(),
+  retentionReviewAt: timestamp('retention_review_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const passwordVerificationAttempts = marketplaceSchema.table(
+  'password_verification_attempts',
+  {
+    attemptId: uuid('attempt_id').primaryKey(),
+    phoneLookupHash: text('phone_lookup_hash').notNull(),
+    outcome: text('outcome').notNull(),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    attemptedAt: timestamp('attempted_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('password_verification_attempts_rate').on(table.phoneLookupHash, table.attemptedAt),
+  ],
+);
+
+export const supabaseIdentities = marketplaceSchema.table(
+  'supabase_identities',
+  {
+    supabaseUserId: uuid('supabase_user_id').primaryKey(),
+    userId: uuid('user_id').notNull(),
+    email: text('email').notNull(),
+    dataClassification: text('data_classification').default('HIGHLY_RESTRICTED').notNull(),
+    retentionClass: text('retention_class').default('VERIFIED_IDENTITY').notNull(),
+    retentionReviewAt: timestamp('retention_review_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('supabase_identities_user_unique').on(table.userId),
+    index('supabase_identities_email').on(table.email),
+  ],
+);
+
+export const adminProvisioningCommands = marketplaceSchema.table(
+  'admin_provisioning_commands',
+  {
+    commandId: uuid('command_id').primaryKey(),
+    actorUserId: uuid('actor_user_id').notNull(),
+    commandScope: text('command_scope').notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    resourceKind: text('resource_kind').notNull(),
+    email: text('email').notNull(),
+    state: text('state').default('PENDING').notNull(),
+    supabaseUserId: uuid('supabase_user_id'),
+    resultBody: jsonb('result_body'),
+    errorCode: text('error_code'),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('admin_provisioning_command_unique').on(
+      table.actorUserId,
+      table.commandScope,
+      table.idempotencyKey,
+    ),
+    uniqueIndex('admin_provisioning_supabase_user_unique')
+      .on(table.supabaseUserId)
+      .where(sql`${table.supabaseUserId} IS NOT NULL`),
+    index('admin_provisioning_reconciliation')
+      .on(table.updatedAt, table.commandId)
+      .where(sql`${table.state} = 'RECONCILIATION_REQUIRED'`),
+  ],
+);
+
+export const passwordCredentialEvents = marketplaceSchema.table(
+  'password_credential_events',
+  {
+    eventId: uuid('event_id').primaryKey(),
+    userId: uuid('user_id').notNull(),
+    eventType: text('event_type').notNull(),
+    resultingVersion: integer('resulting_version').notNull(),
+    actorUserId: uuid('actor_user_id').notNull(),
+    reasonCode: text('reason_code').notNull(),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('password_credential_events_version').on(table.userId, table.resultingVersion),
+    index('password_credential_events_history').on(table.userId, table.occurredAt),
+  ],
+);
+
+/**
+ * A rating for the delivery, kept apart from the shop's own rating (0060).
+ *
+ * The two are separate services with separate liable parties, and one score
+ * across both punishes a good shop for a late rider.
+ */
+export const deliveryAssignmentRatings = marketplaceSchema.table(
+  'delivery_assignment_ratings',
+  {
+    deliveryAssignmentId: uuid('delivery_assignment_id').primaryKey(),
+    customerUserId: uuid('customer_user_id').notNull(),
+    partnerUserId: uuid('partner_user_id').notNull(),
+    stars: smallint('stars').notNull(),
+    reviewNote: text('review_note'),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    check('delivery_rating_stars', sql`${table.stars} BETWEEN 1 AND 5`),
+    index('delivery_assignment_ratings_by_partner').on(table.partnerUserId, table.createdAt),
+  ],
+);

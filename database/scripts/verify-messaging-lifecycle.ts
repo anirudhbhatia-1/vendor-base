@@ -216,7 +216,11 @@ export async function verifyTransactionalMessaging(connectionString: string): Pr
       deadLetters[0]?.event_id !== retryEvent.eventId ||
       deadLetters[0].last_error_code !== 'SYNTHETIC_PROVIDER_DOWN'
     ) {
-      throw new Error('Retry exhaustion did not expose a bounded safe dead letter');
+      // Seen to fail once in three full ladder runs on 16 September 2026 and
+      // pass ten times in a row alone; the message says which leg it was.
+      throw new Error(
+        `Retry exhaustion did not expose a bounded safe dead letter (dead_lettered=${secondFailure.dead_lettered}, scheduled_for_retry=${secondFailure.scheduled_for_retry}, dead_letters=${deadLetters.length}, first=${deadLetters[0]?.event_id ?? 'none'} expected=${retryEvent.eventId}, code=${deadLetters[0]?.last_error_code ?? 'none'})`,
+      );
     }
     await recoverDeadLetterEvent(pool, {
       actor_id: recoveryActorId,
@@ -287,9 +291,26 @@ export async function verifyTransactionalMessaging(connectionString: string): Pr
               event_id: event.event_id,
               request_id: createRequestId(),
             },
-            async () => {
+            // Identical to its rival, deliberately.
+            //
+            // This handler used to skip the insert and return a marker instead,
+            // which made the assertion below depend on *which* of two racing
+            // processors won. Deduplication holds either way -- exactly one runs
+            // -- but only one of them wrote an effect, so when the other won the
+            // effect count was zero and the suite reported a broken inbox. That
+            // is the property under test being decided by a coin flip: measured
+            // at 6/8 passes before this change.
+            //
+            // Two identical handlers make the assertion mean what it says: one
+            // effect exists because exactly one processor ran, whichever it was.
+            async (client) => {
               handlerExecutions += 1;
-              return 'duplicate-handler-ran';
+              await client.query(
+                `INSERT INTO marketplace_test.inbox_effects (event_id, effect_count)
+                 VALUES ($1, 1)`,
+                [event.event_id],
+              );
+              return 'applied';
             },
           ),
         ]);
@@ -336,13 +357,19 @@ export async function verifyTransactionalMessaging(connectionString: string): Pr
     }
     if (!immutableRejected) throw new Error('Outbox event content accepted mutation');
 
+    // Checking the code, not merely that something threw. A bare catch accepted any
+    // failure, and this path was in fact raising `42703 record "new" has no field
+    // "consumer_scope"` -- the shared guard resolving an inbox-only column while firing
+    // on the outbox. The write was still refused, so the test stayed green while the
+    // documented `55000` contract was broken. Migration 0066 fixed the guard.
     let deletionRejected = false;
     try {
       await pool.query(`DELETE FROM marketplace.outbox_events WHERE event_id = $1`, [
         batchEvents[0]?.eventId,
       ]);
-    } catch {
-      deletionRejected = true;
+    } catch (error: unknown) {
+      deletionRejected =
+        typeof error === 'object' && error !== null && 'code' in error && error.code === '55000';
     }
     const durableEvent = await pool.query<{ exists: boolean }>(
       `SELECT EXISTS (
@@ -352,6 +379,96 @@ export async function verifyTransactionalMessaging(connectionString: string): Pr
     );
     if (!deletionRejected || !durableEvent.rows[0]?.exists) {
       throw new Error('Durable outbox history accepted deletion');
+    }
+
+    // The inbox guard had no assertion at all, while the outbox had two. It permits
+    // exactly one transition -- PROCESSING to PROCESSED with every identity field
+    // unchanged -- and that narrowness is the whole protection: an update free to
+    // rewrite `event_id` or `consumer_scope` would let a consumer mark one event
+    // processed by pointing a receipt at another, which defeats deduplication rather
+    // than merely corrupting an audit row.
+    const inboxReceipt = await pool.query<{ consumer_scope: string; event_id: string }>(
+      `SELECT consumer_scope, event_id FROM marketplace.inbox_receipts
+        WHERE event_id = $1 LIMIT 1`,
+      [inboxEvent.eventId],
+    );
+    const receipt = inboxReceipt.rows[0];
+    if (!receipt) throw new Error('Inbox receipt was not recorded for the processed event');
+
+    const refusesInboxWrite = async (sql: string, values: readonly unknown[]) => {
+      try {
+        await pool.query(sql, [...values]);
+        return false;
+      } catch (error: unknown) {
+        return (
+          typeof error === 'object' && error !== null && 'code' in error && error.code === '55000'
+        );
+      }
+    };
+
+    if (
+      !(await refusesInboxWrite(
+        `DELETE FROM marketplace.inbox_receipts WHERE event_id = $1 AND consumer_scope = $2`,
+        [receipt.event_id, receipt.consumer_scope],
+      ))
+    ) {
+      throw new Error('Inbox receipt history accepted a deletion');
+    }
+
+    // The identity check only applies on the one permitted transition, so it has to be
+    // exercised from PROCESSING. Asserting it against an already-PROCESSED receipt
+    // passes for the wrong reason -- the guard stops it on the status check and never
+    // reaches the identity comparison, so removing that comparison leaves the suite
+    // green. This receipt is created in PROCESSING precisely to reach it.
+    // `inbox_event_fk` requires the receipt to reference a real outbox event, so this
+    // reuses one that already exists under a consumer scope of its own rather than
+    // inventing an id -- a fabricated one fails the foreign key and the run would stop
+    // for a reason unrelated to the guard being tested.
+    const inFlightEventId = inboxEvent.eventId;
+    const otherRealEventId = batchEvents[0]?.eventId;
+    if (!otherRealEventId || otherRealEventId === inFlightEventId) {
+      throw new Error('Identity-guard probe needs two distinct committed events');
+    }
+    const inFlightScope = 'synthetic.identity_guard';
+    await pool.query(
+      `INSERT INTO marketplace.inbox_receipts
+         (consumer_scope, event_id, status, request_id, correlation_id, received_at)
+       VALUES ($1, $2, 'PROCESSING', $3, $4, clock_timestamp())`,
+      [inFlightScope, inFlightEventId, createRequestId(), createUuidV7()],
+    );
+
+    if (
+      !(await refusesInboxWrite(
+        `UPDATE marketplace.inbox_receipts
+            SET status = 'PROCESSED', processed_at = clock_timestamp(),
+                event_id = $3
+          WHERE event_id = $1 AND consumer_scope = $2`,
+        [inFlightEventId, inFlightScope, otherRealEventId],
+      ))
+    ) {
+      throw new Error('Inbox receipt accepted an update that repointed it at another event');
+    }
+
+    if (
+      !(await refusesInboxWrite(
+        `UPDATE marketplace.inbox_receipts
+            SET status = 'PROCESSED', processed_at = clock_timestamp(),
+                consumer_scope = $3
+          WHERE event_id = $1 AND consumer_scope = $2`,
+        [inFlightEventId, inFlightScope, 'synthetic.other_consumer'],
+      ))
+    ) {
+      throw new Error('Inbox receipt accepted an update that reassigned it to another consumer');
+    }
+
+    if (
+      !(await refusesInboxWrite(
+        `UPDATE marketplace.inbox_receipts SET status = 'PROCESSING', processed_at = NULL
+          WHERE event_id = $1 AND consumer_scope = $2`,
+        [receipt.event_id, receipt.consumer_scope],
+      ))
+    ) {
+      throw new Error('Inbox receipt accepted a reopen that would allow reprocessing');
     }
   } finally {
     await pool.end();

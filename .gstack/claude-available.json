@@ -1,6 +1,6 @@
 {
   "available": true,
-  "path": "/opt/homebrew/bin/claude",
+  "path": "/Users/anirudhbhatia/.nvm/versions/node/v24.19.0/bin/claude",
   "install_url": "https://docs.anthropic.com/en/docs/claude-code",
-  "checked_at": "2026-08-12T07:57:28.692Z"
+  "checked_at": "2026-08-24T10:45:35.246Z"
 }

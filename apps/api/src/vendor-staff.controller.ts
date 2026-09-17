@@ -1,71 +1,26 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
-  ForbiddenException,
   Get,
   Inject,
-  NotFoundException,
   Param,
   Post,
   Query,
 } from '@nestjs/common';
-import {
-  VendorStaffAuthorizationError,
-  VendorStaffConflictError,
-  VendorStaffInputError,
-  VendorStaffNotFoundError,
-  VendorStaffService,
-  type ManagedVendorRole,
-} from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { VendorStaffService, type ManagedVendorRole } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { VENDOR_STAFF } from './tokens.js';
-
+import { dateField, integerField, object, stringField, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const managedRoles = ['VENDOR_MANAGER', 'VENDOR_PICKER'] as const;
 
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function stringField(body: Record<string, unknown>, key: string): string {
-  const found = body[key];
-  if (typeof found !== 'string') throw new BadRequestException();
-  return found;
-}
-function integerField(body: Record<string, unknown>, key: string): number {
-  const found = body[key];
-  if (!Number.isSafeInteger(found)) throw new BadRequestException();
-  return found as number;
-}
-function dateField(body: Record<string, unknown>, key: string): Date {
-  const found = body[key];
-  const parsed = typeof found === 'string' ? new Date(found) : null;
-  if (!parsed || Number.isNaN(parsed.getTime())) throw new BadRequestException();
-  return parsed;
-}
 function managedRole(body: Record<string, unknown>): ManagedVendorRole {
   const found = body['role'];
   if (!managedRoles.includes(found as ManagedVendorRole)) throw new BadRequestException();
   return found as ManagedVendorRole;
 }
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function map(error: unknown): never {
-  if (error instanceof VendorStaffInputError) throw new BadRequestException(error.message);
-  if (error instanceof VendorStaffNotFoundError) throw new NotFoundException();
-  if (error instanceof VendorStaffConflictError) throw new ConflictException(error.message);
-  if (error instanceof VendorStaffAuthorizationError) throw new ForbiddenException();
-  throw error;
-}
-
 const manageStaff = RequireAuthorization({
   capability: 'vendor.staff.manage',
   conceal_resource: true,
@@ -85,16 +40,21 @@ export class VendorStaffController {
   @manageStaff
   async invite(@Param('vendor_location_id') locationId: string, @Body() raw: unknown) {
     const body = object(raw);
+    // Addressed by phone, because that is the only identifier an owner can
+    // know about their picker. `invitee_user_id` stays accepted for callers
+    // that already hold one (tests, admin tooling).
+    const suppliedId = body['invitee_user_id'];
     try {
-      await this.staff.inviteStaff({
+      return await this.staff.inviteStaff({
         context: currentRequestContext(),
         vendor_location_id: uuid(locationId),
-        invitee_user_id: uuid(stringField(body, 'invitee_user_id')),
+        ...(typeof suppliedId === 'string'
+          ? { invitee_user_id: uuid(suppliedId) }
+          : { invitee_phone: stringField(body, 'invitee_phone') }),
         role: managedRole(body),
       });
-      return { invited: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -112,7 +72,7 @@ export class VendorStaffController {
       });
       return { revoked: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -127,7 +87,7 @@ export class VendorStaffController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -143,7 +103,7 @@ export class VendorStaffController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }
@@ -161,7 +121,7 @@ export class VendorAccessController {
         vendor_location_id: uuid(locationId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }
@@ -182,7 +142,7 @@ export class VendorSettingsController {
         profile_description: stringField(body, 'profile_description'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -199,7 +159,7 @@ export class VendorSettingsController {
         preparation_seconds: integerField(body, 'preparation_seconds'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -224,7 +184,7 @@ export class VendorSettingsController {
       });
       return { updated: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -242,7 +202,37 @@ export class VendorSettingsController {
       });
       return { added: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
+    }
+  }
+
+  @Get('zones')
+  @manageSettings
+  async listZones(@Param('vendor_location_id') locationId: string) {
+    try {
+      return {
+        zones: await this.staff.listServiceZones({
+          context: currentRequestContext(),
+          vendor_location_id: uuid(locationId),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Get('closures')
+  @manageSettings
+  async listClosures(@Param('vendor_location_id') locationId: string) {
+    try {
+      return {
+        closures: await this.staff.listTemporaryClosures({
+          context: currentRequestContext(),
+          vendor_location_id: uuid(locationId),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
     }
   }
 
@@ -259,7 +249,7 @@ export class VendorSettingsController {
       });
       return { added: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -277,7 +267,7 @@ export class VendorSettingsController {
       });
       return { deactivated: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -292,7 +282,7 @@ export class VendorSettingsController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }

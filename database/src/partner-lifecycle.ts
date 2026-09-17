@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,10 +7,27 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction as tx } from './transaction.js';
+import { grantRoleAssignment } from './role-grants.js';
 
 export class PartnerLifecycleInputError extends Error {}
 export class PartnerLifecycleNotFoundError extends Error {}
-export class PartnerLifecycleConflictError extends Error {}
+/**
+ * Carries which kind of conflict it is: a stale version is fixed by reloading,
+ * and every other refusal here is not. One bare 409 covered both, and clients
+ * render that as "Refresh and try again".
+ */
+export class PartnerLifecycleConflictError extends Error {
+  readonly code: 'ORDER_STATE_CONFLICT' | 'VERSION_CONFLICT';
+
+  constructor(
+    message: string,
+    code: 'ORDER_STATE_CONFLICT' | 'VERSION_CONFLICT' = 'ORDER_STATE_CONFLICT',
+  ) {
+    super(message);
+    this.code = code;
+  }
+}
 export class PartnerLifecycleAuthorizationError extends Error {}
 
 export type ApplicationState =
@@ -77,14 +95,14 @@ export interface DisputeCase {
 }
 
 const referencePatterns = {
-  identity: /^SYNTH-PARTNER-IDENTITY-[A-Z0-9-]{4,64}$/,
-  vehicle: /^SYNTH-PARTNER-VEHICLE-[A-Z0-9-]{4,64}$/,
-  bank: /^SYNTH-PARTNER-BANK-[A-Z0-9-]{4,64}$/,
-  insurance: /^SYNTH-PARTNER-INSURANCE-[A-Z0-9-]{4,64}$/,
-  emergency: /^SYNTH-PARTNER-EMERGENCY-[A-Z0-9-]{4,64}$/,
-  training: /^SYNTH-PARTNER-TRAINING-[A-Z0-9-]{4,64}$/,
+  identity: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
+  vehicle: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
+  bank: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
+  insurance: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
+  emergency: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
+  training: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
 };
-const zoneName = /^SYNTH [A-Za-z0-9 &'().,-]{2,95}$/;
+const zoneName = /^[\p{L}\p{N}][\p{L}\p{N} &'().,/-]{2,95}$/u;
 const reasonCode = /^[A-Z][A-Z0-9_]{2,63}$/;
 const vehicleKinds: ReadonlySet<VehicleKind> = new Set([
   'BICYCLE',
@@ -112,20 +130,6 @@ function contextIds(context: RequestContext): Ids {
     request: parseRequestId(context.request_id),
     correlation: parseUuidV7(context.correlation_id),
   };
-}
-async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
 }
 function requirePartner(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'delivery_partner')
@@ -254,7 +258,7 @@ export class PartnerLifecycleService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-partner-lifecycle',
       max: 8,
@@ -283,23 +287,21 @@ export class PartnerLifecycleService {
   }): Promise<PartnerApplication> {
     const applicantId = requirePartner(input.context);
     if (!referencePatterns.identity.test(input.identity_reference))
-      throw new PartnerLifecycleInputError('identity_reference is not a synthetic reference');
+      throw new PartnerLifecycleInputError('identity_reference is invalid');
     if (!referencePatterns.vehicle.test(input.vehicle_reference))
-      throw new PartnerLifecycleInputError('vehicle_reference is not a synthetic reference');
+      throw new PartnerLifecycleInputError('vehicle_reference is invalid');
     if (!vehicleKinds.has(input.vehicle_kind))
       throw new PartnerLifecycleInputError('vehicle_kind is not allowed');
     if (!referencePatterns.bank.test(input.bank_account_reference))
-      throw new PartnerLifecycleInputError('bank_account_reference is not a synthetic reference');
+      throw new PartnerLifecycleInputError('bank_account_reference is invalid');
     if (!referencePatterns.insurance.test(input.insurance_reference))
-      throw new PartnerLifecycleInputError('insurance_reference is not a synthetic reference');
+      throw new PartnerLifecycleInputError('insurance_reference is invalid');
     if (!referencePatterns.emergency.test(input.emergency_contact_reference))
-      throw new PartnerLifecycleInputError(
-        'emergency_contact_reference is not a synthetic reference',
-      );
+      throw new PartnerLifecycleInputError('emergency_contact_reference is invalid');
     if (!referencePatterns.training.test(input.training_reference))
-      throw new PartnerLifecycleInputError('training_reference is not a synthetic reference');
+      throw new PartnerLifecycleInputError('training_reference is invalid');
     if (!zoneName.test(input.home_zone_name))
-      throw new PartnerLifecycleInputError('home_zone_name is not a synthetic zone name');
+      throw new PartnerLifecycleInputError('home_zone_name contains unsupported characters');
     const now = input.now ?? new Date();
     const ids = contextIds(input.context);
     return tx(this.#pool, async (client) => {
@@ -453,6 +455,59 @@ export class PartnerLifecycleService {
     });
   }
 
+  /**
+   * The partner review queue.
+   *
+   * Same gap as the vendor side: an admin could open an application by id and
+   * had no way to discover one, so a partner who submitted through the app
+   * waited on a review nobody could find. Submitted work comes first; a draft
+   * is the applicant's own and is not a reviewer's business yet.
+   */
+  async listApplicationsForAdmin(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+  }): Promise<
+    readonly {
+      readonly partner_application_id: UuidV7;
+      readonly lifecycle_state: string;
+      readonly awaiting_review: boolean;
+      readonly submitted_at: Date | null;
+      readonly updated_at: Date;
+      readonly reason_code: string | null;
+    }[]
+  > {
+    if (input.context.actor?.actor_kind !== 'admin') throw new PartnerLifecycleAuthorizationError();
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const result = await this.#pool.query<{
+      partner_application_id: string;
+      lifecycle_state: string;
+      awaiting_review: boolean;
+      submitted_at: Date | null;
+      updated_at: Date;
+      reason_code: string | null;
+    }>(
+      `SELECT partner_application_id, lifecycle_state, submitted_at, updated_at, reason_code,
+              lifecycle_state IN ('SUBMITTED', 'UNDER_REVIEW') AS awaiting_review
+         FROM marketplace.partner_applications
+        WHERE lifecycle_state <> 'DRAFT'
+        ORDER BY (lifecycle_state IN ('SUBMITTED', 'UNDER_REVIEW')) DESC, updated_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+    return Object.freeze(
+      result.rows.map((row) =>
+        Object.freeze({
+          awaiting_review: row.awaiting_review,
+          lifecycle_state: row.lifecycle_state,
+          partner_application_id: parseUuidV7(row.partner_application_id),
+          reason_code: row.reason_code,
+          submitted_at: row.submitted_at,
+          updated_at: row.updated_at,
+        }),
+      ),
+    );
+  }
+
   async getApplication(input: {
     readonly context: RequestContext;
     readonly partner_application_id: UuidV7;
@@ -477,6 +532,100 @@ export class PartnerLifecycleService {
   // -----------------------------------------------------------------------
   // 9.10 -- earnings
   // -----------------------------------------------------------------------
+
+  /**
+   * What a partner is allowed to do, and why not, in their own words (DLP-47, DLP-56).
+   *
+   * Restrictions and trust reviews were readable only from the admin console,
+   * so a partner who suddenly could not go online had no way to learn that a
+   * restriction existed, what it covered, when it would be reviewed, or that an
+   * appeal was possible. SEC-14 and DLP-56 both require the reason, the basis,
+   * the review date and the appeal route to reach the person restricted.
+   *
+   * Deliberately narrow: a partner sees their own cases and only the fields
+   * that explain the decision. The evidence itself stays behind the admin
+   * evidence viewer (ADM-38) — a reason is owed to them, another party's
+   * evidence is not.
+   */
+  /**
+   * This partner's own application, resolved from their session.
+   *
+   * `applicant_user_id` is UNIQUE, so the session already identifies the
+   * application — yet the profile screen asked the partner to type its UUID
+   * into a text box before it would show their verification state. Nobody
+   * knows their own application id, so in practice the state was unreachable
+   * (DLP-03) and so were the document expiries hanging off it (DLP-04).
+   */
+  async getOwnApplication(input: {
+    readonly context: RequestContext;
+  }): Promise<PartnerApplication | null> {
+    const actor = input.context.actor;
+    if (actor?.actor_kind !== 'delivery_partner') {
+      throw new PartnerLifecycleAuthorizationError();
+    }
+    const found = await this.#pool.query<Record<string, unknown>>(
+      `SELECT * FROM marketplace.partner_applications WHERE applicant_user_id = $1`,
+      [String(actor.actor_id)],
+    );
+    const row = found.rows[0];
+    return row ? projectApplication(row) : null;
+  }
+
+  async listOwnRestrictions(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+  }): Promise<
+    readonly {
+      readonly trust_restriction_case_id: UuidV7;
+      readonly lifecycle_state: string;
+      readonly scope_kind: string;
+      readonly reason_code: string;
+      readonly policy_reference: string;
+      readonly effective_until: string;
+      readonly review_at: string;
+      readonly appealable: boolean;
+    }[]
+  > {
+    const actor = input.context.actor;
+    if (actor?.actor_kind !== 'delivery_partner') {
+      throw new PartnerLifecycleAuthorizationError();
+    }
+    const rows = await this.#pool.query<{
+      trust_restriction_case_id: string;
+      lifecycle_state: string;
+      scope_kind: string;
+      reason_code: string;
+      policy_reference: string;
+      effective_until: Date;
+      review_at: Date;
+    }>(
+      `SELECT trust_restriction_case_id, lifecycle_state, scope_kind, reason_code,
+              policy_reference, effective_until, review_at
+         FROM marketplace.trust_restriction_cases
+        WHERE subject_kind = 'PARTNER' AND subject_reference = $1
+          AND lifecycle_state IN ('PROPOSED', 'ACTIVE', 'EXPIRED', 'REVOKED')
+        ORDER BY created_at DESC
+        LIMIT 25`,
+      [String(actor.actor_id)],
+    );
+    return Object.freeze(
+      rows.rows.map((row) =>
+        Object.freeze({
+          trust_restriction_case_id: parseUuidV7(row.trust_restriction_case_id),
+          lifecycle_state: row.lifecycle_state,
+          scope_kind: row.scope_kind,
+          reason_code: row.reason_code,
+          policy_reference: row.policy_reference,
+          effective_until: row.effective_until.toISOString(),
+          review_at: row.review_at.toISOString(),
+          // Only something currently in force is worth appealing; an expired or
+          // revoked case is history, and offering an appeal against it would be
+          // a dead end dressed up as a route.
+          appealable: row.lifecycle_state === 'ACTIVE' || row.lifecycle_state === 'PROPOSED',
+        }),
+      ),
+    );
+  }
 
   async recordEarnings(input: {
     readonly context: RequestContext;
@@ -768,7 +917,10 @@ export class PartnerLifecycleService {
           `Cannot transition from ${row['lifecycle_state'] as string} to ${input.to}`,
         );
       if ((row['version'] as number) !== input.expected_version)
-        throw new PartnerLifecycleConflictError('Application version has advanced');
+        throw new PartnerLifecycleConflictError(
+          'Application version has advanced',
+          'VERSION_CONFLICT',
+        );
       const updated = await client.query(
         `UPDATE marketplace.partner_applications
             SET lifecycle_state=$2,
@@ -802,14 +954,17 @@ export class PartnerLifecycleService {
       // the state machine, so a plain insert cannot double-grant.
       if (input.to === 'APPROVED') {
         const applicantUserId = row['applicant_user_id'] as string;
-        const partnerRoleAssignmentId = createUuidV7({ now_ms: now.getTime() });
-        await client.query(
-          `INSERT INTO marketplace.role_assignments
-             (role_assignment_id, user_id, role_key, valid_from, granted_by_user_id,
-              request_id, correlation_id)
-           VALUES ($1,$2,'DELIVERY_PARTNER',$3,$4,$5,$6)`,
-          [partnerRoleAssignmentId, applicantUserId, now, actorId, ids.request, ids.correlation],
-        );
+        // Through the one grant path, so the access history records that the
+        // approval is what granted the role -- this write used to skip that.
+        const partnerRoleAssignmentId = await grantRoleAssignment(client, {
+          user_id: parseUuidV7(applicantUserId),
+          role_key: 'DELIVERY_PARTNER',
+          granted_by_user_id: actorId,
+          reason_code: input.reason_code,
+          now,
+          request_id: ids.request,
+          correlation_id: ids.correlation,
+        });
         await client.query(
           `INSERT INTO marketplace.partner_eligibilities
              (partner_eligibility_id, role_assignment_id, user_id, state, eligible_from, reason_code)

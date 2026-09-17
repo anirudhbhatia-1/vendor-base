@@ -1,38 +1,13 @@
 import { createHmac } from 'node:crypto';
-import {
-  createAuthenticatedActor,
-  createRequestContext,
-  createUuidV7,
-  type UuidV7,
-} from '@neighbourhood-store/domain-types';
+import { createUuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import { CatalogueProductService } from '../src/catalogue-products.js';
 import { CustomerCartService } from '../src/customer-cart.js';
 import { CheckoutNotFoundError, GroupedCheckoutService } from '../src/grouped-checkout.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
+import { check, customerContext, vendorContext } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-function customerContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'customer',
-      session_id: createUuidV7(),
-    }),
-  });
-}
-function vendorContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'vendor_staff',
-      session_id: createUuidV7(),
-    }),
-  });
-}
 async function rejectsNotFound(work: () => Promise<unknown>) {
   try {
     await work();
@@ -48,7 +23,15 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
   const carts = new CustomerCartService({ connection_string: connectionString });
   const catalogue = new CatalogueProductService({ connection_string: connectionString });
   const inventory = new InventoryReservationService({ connection_string: connectionString });
-  const checkout = new GroupedCheckoutService({ connection_string: connectionString });
+  // The fixture signs its own provider webhook, so it has to hold the same key
+  // the service verifies with. It previously signed with a 23-character literal
+  // while the service used its default — a signature that could never verify,
+  // because the provider rejects any key under 32 characters.
+  const webhookKey = 'SYNTH-LOCAL-WEBHOOK-KEY-MATERIAL-0001';
+  const checkout = new GroupedCheckoutService({
+    connection_string: connectionString,
+    webhook_key: webhookKey,
+  });
   const now = new Date('2026-08-26T12:00:00.000Z');
   const customerId = createUuidV7();
   const otherCustomerId = createUuidV7();
@@ -83,20 +66,15 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         sku: `SYNTH-SKU-CO${suffix}`,
         variant_title: `SYNTH Checkout Variant ${index}`,
         price_minor: 10_000,
+        // `createProduct` provisions the inventory_items row itself, keyed by
+        // (vendor_location_id, product_reference), so the stock has to be
+        // supplied here. Calling createItem afterwards collided on that unique
+        // key and failed the whole verification chain before it began.
+        initial_stock_quantity: index === 2 ? 0 : 5,
+        low_stock_threshold: 1,
         now,
       });
       products.push(product);
-      await inventory.createItem({
-        context: vendorContext(store.ownerUserId),
-        display_name: `SYNTH Checkout Stock ${index}`,
-        exact_available_quantity: index === 2 ? 0 : 5,
-        low_stock_threshold: 1,
-        now,
-        product_reference: `SYNTH-PROD-CO${suffix}`,
-        quantity_basis: 'COUNTED',
-        reason_code: 'CHECKOUT_FIXTURE',
-        vendor_location_id: store.locationId,
-      });
     }
     const addressId = createUuidV7();
     await pool.query(
@@ -235,7 +213,7 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       outcome: 'SUCCEEDED' as const,
       occurred_at: new Date(now.getTime() + 2_000).toISOString(),
     };
-    const signature = createHmac('sha256', 'SYNTH-LOCAL-WEBHOOK-KEY')
+    const signature = createHmac('sha256', webhookKey)
       .update(JSON.stringify(payload))
       .digest('hex');
     const resolved = await checkout.receiveWebhook({

@@ -15,6 +15,7 @@ import {
   VendorOnboardingService,
   type VerificationDocumentSummary,
 } from '../src/vendor-onboarding.js';
+import { check } from './verify-support.js';
 
 async function expectError(
   operation: () => Promise<unknown>,
@@ -82,10 +83,19 @@ export async function verifyVendorOnboarding(connectionString: string): Promise<
       }),
     });
   const applicantContext = () => createRequestContext();
-  const content = (label: string) =>
-    new TextEncoder().encode(
-      `SYNTHETIC-VERIFICATION-DOCUMENT\n${label}\nfictional company-test evidence only`,
-    );
+  // Storage sniffs the declared media type against the file's own signature
+  // (SEC-08), which this fixture predates: it uploaded plain text while
+  // declaring PDF and PNG, so every upload was rejected. The bytes carry the
+  // real magic numbers now, with the synthetic marker still in the body.
+  const PDF_SIGNATURE = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
+  const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const content = (label: string, mediaType: 'application/pdf' | 'image/png') =>
+    Uint8Array.from([
+      ...(mediaType === 'application/pdf' ? PDF_SIGNATURE : PNG_SIGNATURE),
+      ...new TextEncoder().encode(
+        `SYNTHETIC-VERIFICATION-DOCUMENT\n${label}\nfictional company-test evidence only`,
+      ),
+    ]);
 
   try {
     await pool.query(`TRUNCATE ${TABLES}`);
@@ -132,6 +142,55 @@ export async function verifyVendorOnboarding(connectionString: string): Promise<
       invitation_reference: 'SYNTH-INV-JAIPUR-0001',
       now: base,
     });
+    // D-15 asks for an expiring one-use invitation. One-use was enforced -- a claim is
+    // refused unless the case is still INVITED -- but nothing expired, and the applicant
+    // is optional, so for the ordinary case of inviting a vendor who has not signed up
+    // yet the reference was the only credential and it stayed valid forever. Claiming it
+    // means becoming the applicant, which on approval grants VENDOR_OWNER membership.
+    const expiringInvitationId = await onboarding.createInvitation({
+      context: adminContext(operatorId),
+      expires_at: new Date(base.getTime() + 60_000),
+      invitation_reference: 'SYNTH-INV-EXPIRING-0001',
+      now: base,
+    });
+    let expiredClaimRefused = false;
+    try {
+      await onboarding.claimInvitation({
+        applicant_user_id: otherApplicantId,
+        context: applicantContext(),
+        expected_version: 1,
+        invitation_reference: 'SYNTH-INV-EXPIRING-0001',
+        now: new Date(base.getTime() + 61_000),
+      });
+    } catch (error: unknown) {
+      expiredClaimRefused = error instanceof Error && /Invitation has expired/.test(error.message);
+    }
+    if (!expiredClaimRefused) {
+      throw new Error('An expired invitation was still claimable');
+    }
+    const stillInvited = await onboarding.getForAdmin({
+      context: adminContext(operatorId),
+      onboarding_case_id: expiringInvitationId,
+    });
+    if (stillInvited.lifecycle_state !== 'INVITED') {
+      throw new Error('A refused claim advanced the invitation anyway');
+    }
+
+    // One-use: the reference just claimed above cannot be claimed a second time.
+    let replayRefused = false;
+    try {
+      await onboarding.claimInvitation({
+        applicant_user_id: otherApplicantId,
+        context: applicantContext(),
+        expected_version: 2,
+        invitation_reference: 'SYNTH-INV-JAIPUR-0001',
+        now: base,
+      });
+    } catch (error: unknown) {
+      replayRefused = error instanceof Error;
+    }
+    if (!replayRefused) throw new Error('A claimed invitation was claimable again');
+
     version = await onboarding.submitProfile({
       applicant_user_id: applicantId,
       context: applicantContext(),
@@ -180,7 +239,7 @@ export async function verifyVendorOnboarding(connectionString: string): Promise<
       const uploaded = await onboarding.uploadDocument({
         affected_capability: capability,
         applicant_user_id: applicantId,
-        content: content(kind),
+        content: content(kind, kind === 'PAYOUT_ACCOUNT_PROOF' ? 'image/png' : 'application/pdf'),
         context: applicantContext(),
         document_kind: kind,
         expected_case_version: version,
@@ -214,6 +273,25 @@ export async function verifyVendorOnboarding(connectionString: string): Promise<
           verification_document_id: primaryDocument.verification_document_id,
         }),
       VendorOnboardingAuthorizationError,
+    );
+
+    // The case has to be findable before it can be reviewed. The console could
+    // open one by id and nothing else, so self-service vendor onboarding had no
+    // usable path to a decision at all.
+    const queue = await onboarding.listForAdmin({ context: adminContext(reviewerId) });
+    const queued = queue.find((entry) => entry.onboarding_case_id === invitationId);
+    check(queued !== undefined, 'An onboarding case awaiting review was not in the queue');
+    check(
+      (queued?.document_count ?? 0) >= documents.length,
+      'The queue did not count the documents waiting on the case',
+    );
+    // Everything awaiting review sorts ahead of everything decided, so a
+    // reviewer opening this screen sees the work first.
+    const lastAwaiting = queue.map((entry) => entry.awaiting_review).lastIndexOf(true);
+    const firstDecided = queue.map((entry) => entry.awaiting_review).indexOf(false);
+    check(
+      lastAwaiting === -1 || firstDecided === -1 || lastAwaiting < firstDecided,
+      'Cases awaiting review were not ordered ahead of decided ones',
     );
 
     for (const document of documents) {
@@ -285,6 +363,20 @@ export async function verifyVendorOnboarding(connectionString: string): Promise<
     if (ownerGrant.rows[0]?.count !== '1') {
       throw new Error('Onboarding approval did not grant the applicant a VENDOR_OWNER membership');
     }
+    // And the grant is in the access history. It was not: approval inserted
+    // the owner role directly and wrote no ROLE_GRANTED event.
+    const ownerGrantEvent = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM marketplace.access_membership_events e
+         JOIN marketplace.role_assignments ra USING (role_assignment_id)
+        WHERE e.user_id=$1 AND e.event_type='ROLE_GRANTED' AND ra.role_key='VENDOR_OWNER'
+          AND e.reason_code='ONBOARDING_APPROVED'`,
+      [applicantId],
+    );
+    check(
+      ownerGrantEvent.rows[0]?.count === '1',
+      'Vendor approval left no ROLE_GRANTED event for the owner it created',
+    );
 
     const expiringChanged = await onboarding.advanceDocumentDeadlines({
       at: new Date('2026-09-01T00:00:00.000Z'),

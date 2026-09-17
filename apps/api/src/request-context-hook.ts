@@ -5,12 +5,13 @@ import {
   createTraceContext,
   formatTraceparent,
   parseRequestId,
+  FIELD_ERROR_MESSAGE_KEYS,
 } from '@neighbourhood-store/domain-types';
 import type { FastifyInstance } from 'fastify';
 import { requestContextStorage } from './request-context-storage.js';
 
-export const REQUEST_ID_HEADER = 'x-request-id';
-export const TRACEPARENT_HEADER = 'traceparent';
+const REQUEST_ID_HEADER = 'x-request-id';
+const TRACEPARENT_HEADER = 'traceparent';
 
 function singleHeader(value: string | readonly string[] | undefined): string | undefined {
   if (typeof value === 'string' || value === undefined) return value;
@@ -58,8 +59,8 @@ export function installRequestContextHook(instance: FastifyInstance): void {
                   : 'INVALID_TRACEPARENT',
               message_key:
                 invalidField === 'headers.x_request_id'
-                  ? 'validation.invalid_request_id'
-                  : 'validation.invalid_traceparent',
+                  ? FIELD_ERROR_MESSAGE_KEYS.INVALID_REQUEST_ID
+                  : FIELD_ERROR_MESSAGE_KEYS.INVALID_TRACEPARENT,
             }),
           ],
         }),

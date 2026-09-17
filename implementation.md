@@ -1,7 +1,7 @@
 # Implementation Blueprint — Neighbourhood Store Marketplace
 
 **Status:** Build contract for the MVP
-**Version:** v0.2 · synchronized 13 August 2026
+**Version:** v0.3 · synchronized 6 September 2026
 **Applies to:** Customer App/Web, Vendor Portal, Delivery Partner App/Portal, Admin Console, backend, workers, data, integrations, and operations
 **Related documents:** [README](README.md) · [PRD](prd.md) · [Architecture](architecture.md) · [Design](design.md) · [Workflow](workflow.md) · [AI Rules](rules.md)
 
@@ -255,8 +255,8 @@ Every quote snapshots all pricing, zone, capacity, timer, substitution, refund, 
 | T+0 s | Customer submits checkout with idempotency key | Request record and correlation ID | Button becomes progress state; repeat taps disabled locally |
 | T+0–2 s | Server revalidates each vendor group and locks counted inventory in deterministic order | Fresh group validation and soft holds | Blockers identify only affected groups |
 | T+2–5 s | Pricing signs per-vendor quotes and combined authorization | Quote/version snapshots | Customer sees final per-store and combined amounts |
-| T+5–30 s | Payment adapter authorizes; timeout becomes unknown, never assumed failed | Payment transaction/provider reference | Confirmed, failed-no-charge, or processing/reconciling state |
-| On authorization | One transaction creates checkout group, child orders, provisional reservations, allocations, events, and outbox messages | Exactly one checkout result | Customer opens existing group on retry |
+| Before provider call | One transaction creates holds, group, child-order drafts, allocations, payment attempt, ledger intents and outbox | Durable checkout attempt | Retry finds existing attempt |
+| Provider handoff/webhook | Create provider order outside transaction; verify and reconcile capture before vendor release | Payment/provider reference | Unknown result stays pending; expired-hold late payment reconciles/refunds |
 | Order T+0 s | Vendor notification attempt 1 | Delivery-attempt record | Push plus audible alert on permitted devices |
 | Order T+120 s | If no acknowledgement, notification attempt 2 | Reminder record | Second push/audible alert |
 | Order T+240 s | If still unacknowledged, fallback | SMS/provider result | Owner/escalation staff receive fallback |
@@ -578,8 +578,8 @@ Events contain identifiers and minimum facts. Consumers load authorized detail f
 | `delivery.picked_up` | Fulfilment | Order transition, customer tracking |
 | `delivery.return_authorized` | Fulfilment/support | Partner/vendor notification, customer case |
 | `delivery.return_completed` | Fulfilment | Custody closure, earnings, refund/settlement review |
-| `delivery.completed` | Fulfilment | Order completion, capture/ledger eligibility |
-| `payment.captured` | Payments | Ledger, receipt, settlement eligibility |
+| `delivery.completed` | Fulfilment | Order completion, settlement/ledger eligibility |
+| `payment.captured` | Payments | Ledger and payment receipt; fulfilment/dispute rules still govern settlement eligibility |
 | `refund.completed` | Payments | Ledger, customer/vendor projections, case |
 | `settlement.eligible` | Ledger | Settlement/payout scheduler |
 | `vendor.document_expiring` | Compliance | Vendor notification, compliance queue |
@@ -728,3 +728,11 @@ A slice may enter development only when:
 6. Rollback is rehearsed without rewriting order or ledger history.
 7. Product, operations, finance, security/privacy, and support owners sign the applicable gate.
 8. Documentation references and configuration examples match the released behavior.
+
+## 17. Current staging amendment
+
+[D-15](docs/decisions/D-15.md) supersedes the historical simulator-only/local-only restrictions above for implementation of the owner's staging workstream. D-13 database resumption and D-14 gated production database design remain indexed in the [decision register](docs/decisions/register.md). Historical dates/examples are not active account approvals.
+
+D-15 is authoritative for pre-payment durable checkout, confirmed capture before vendor release, child refund/top-up policy, eight role clients, secure invitations, guest-cart merge, BFF/SecureStore, session-pooler TLS and staging providers. Existing authorization-named payload fields are legacy contract examples, not proof of a gateway hold or permission to defer capture until delivery; reconcile exact DTO semantics and compatibility during Phase 7 before activation.
+
+Use [phases.md](phases.md) for canonical phase numbering and [the audit](docs/engineering/phase-conformance-audit.md) for verified status. No test fixtures or provider scenarios may become public customer request fields.

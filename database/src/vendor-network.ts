@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,6 +7,7 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction } from './transaction.js';
 
 export type VendorLifecycleState = 'ACTIVE' | 'CLOSED' | 'DRAFT' | 'SUSPENDED';
 export type VendorLocationLifecycleState = 'ACTIVE' | 'CLOSED' | 'DRAFT' | 'PAUSED';
@@ -88,7 +90,16 @@ export class VendorNetworkAuthorizationError extends Error {
   readonly code = 'FORBIDDEN';
 }
 
-const SYNTHETIC_NAME = /^SYNTH [A-Za-z0-9][A-Za-z0-9 &'().-]{1,118}$/;
+// A validator looser than its constraint does not accept more input, it just
+// converts a 400 into a 500. Since migration 0062 the constraint is length-only,
+// so this regex is now the narrower of the two.
+//
+// It still cannot store a Devanagari shop name, but no longer because of the
+// schema: `\p{L}` matches Devanagari consonants while the vowel signs that
+// spell most Hindi words are combining marks (`\p{M}`), which this class omits.
+// Widening it is an application change, not a migration. Tracked against
+// MKT-11 / phase 12.3 in docs/engineering/phase-conformance-audit.md.
+const NAME = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'().,-]{1,118}$/u;
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
 const FULFILMENT_MODES = new Set<FulfilmentMode>([
@@ -97,10 +108,25 @@ const FULFILMENT_MODES = new Set<FulfilmentMode>([
   'VENDOR_DELIVERY',
 ]);
 
+/**
+ * Validates a name as a person would type it and stores it in that form.
+ *
+ * Migration 0062 replaced `vendor_business_name_shape` and
+ * `vendor_location_name_shape` with length-only runtime checks, so the
+ * mandatory `SYNTH ` fixture prefix is gone from the schema and a name is
+ * persisted exactly as it was typed. A leading historical prefix is still
+ * stripped here so that re-importing older synthetic fixtures normalizes to
+ * one canonical name instead of accumulating prefixes. The validator stays
+ * exactly as strict as the constraint: a looser check does not accept more
+ * input, it just converts a typed 400 into a raw PostgreSQL 500.
+ */
 function requireName(value: string, label: string): string {
-  const normalized = value.trim().replace(/\s+/g, ' ');
-  if (!SYNTHETIC_NAME.test(normalized)) {
-    throw new VendorNetworkInputError(`${label} must be explicitly synthetic`);
+  const normalized = value
+    .trim()
+    .replace(/^SYNTH(?:ETIC)?[ _-]*/i, '')
+    .replace(/\s+/g, ' ');
+  if (!NAME.test(normalized)) {
+    throw new VendorNetworkInputError(`${label} contains unsupported characters`);
   }
   return normalized;
 }
@@ -164,21 +190,6 @@ function assertAdmin(context: RequestContext): UuidV7 {
     );
   }
   return context.actor.actor_id;
-}
-
-async function transaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
 }
 
 function validateHours(windows: readonly OperatingWindow[]): void {
@@ -255,6 +266,7 @@ async function appendEvent(
       | 'OPERATING_HOURS_REPLACED'
       | 'PROFILE_UPDATED'
       | 'SERVICE_ZONE_ADDED'
+      | 'SERVICE_ZONE_LIFECYCLE_CHANGED'
       | 'TEMPORARY_CLOSURE_ADDED';
     readonly now: Date;
     readonly reason_code: string;
@@ -314,7 +326,7 @@ export class VendorNetworkService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-vendor-network',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
@@ -326,6 +338,63 @@ export class VendorNetworkService {
 
   async close(): Promise<void> {
     await this.#pool.end();
+  }
+
+  /**
+   * Admin overview of every service zone attached to a vendor location, with
+   * the location's coordinates so the operator can see whether the zone still
+   * covers the store after a lat/lng edit.
+   */
+  async listServiceZones(input: { readonly context: RequestContext }): Promise<
+    readonly {
+      readonly service_zone_id: UuidV7;
+      readonly vendor_location_id: UuidV7;
+      readonly zone_name: string;
+      readonly lifecycle_state: 'ACTIVE' | 'INACTIVE';
+      readonly operating_timezone: string;
+      /** Needed to suspend or resume this zone without clobbering a change. */
+      readonly version: number;
+      readonly location_name: string;
+      readonly location_lifecycle_state: string;
+      readonly latitude: number;
+      readonly longitude: number;
+    }[]
+  > {
+    assertAdmin(input.context);
+    const rows = await this.#pool.query<{
+      service_zone_id: string;
+      vendor_location_id: string;
+      zone_name: string;
+      lifecycle_state: 'ACTIVE' | 'INACTIVE';
+      operating_timezone: string;
+      version: number;
+      location_name: string;
+      location_lifecycle_state: string;
+      latitude: string;
+      longitude: string;
+    }>(
+      `SELECT z.service_zone_id, z.vendor_location_id, z.zone_name, z.lifecycle_state,
+              z.operating_timezone, z.version, l.location_name,
+              l.lifecycle_state AS location_lifecycle_state,
+              ST_Y(l.coordinates::geometry)::text AS latitude,
+              ST_X(l.coordinates::geometry)::text AS longitude
+         FROM marketplace.vendor_service_zones z
+         JOIN marketplace.vendor_locations l USING (vendor_location_id)
+        ORDER BY l.location_name, z.zone_name
+        LIMIT 200`,
+    );
+    return rows.rows.map((row) => ({
+      service_zone_id: parseUuidV7(row.service_zone_id),
+      vendor_location_id: parseUuidV7(row.vendor_location_id),
+      zone_name: row.zone_name,
+      lifecycle_state: row.lifecycle_state,
+      operating_timezone: row.operating_timezone,
+      version: row.version,
+      location_name: row.location_name,
+      location_lifecycle_state: row.location_lifecycle_state,
+      latitude: Number(row.latitude),
+      longitude: Number(row.longitude),
+    }));
   }
 
   async createVendor(input: {
@@ -821,6 +890,78 @@ export class VendorNetworkService {
         resulting_version: version,
       });
       return version;
+    });
+  }
+
+  /**
+   * Closes or reopens a service zone.
+   *
+   * The one operational control a launch day cannot run without: when a storm,
+   * a festival or a road closure makes a neighbourhood undeliverable, every
+   * shop that serves it has to stop being offered there, immediately and
+   * reversibly. Discovery already filters on this state, so flipping it takes
+   * effect on the next read with nothing to invalidate.
+   *
+   * Deliberately not zone editing. Redrawing a boundary changes who a shop can
+   * ever serve; closing one changes who it can serve today, and only the second
+   * is something to do under pressure.
+   */
+  async transitionServiceZone(input: {
+    readonly context: RequestContext;
+    readonly expected_version: number;
+    readonly lifecycle_state: 'ACTIVE' | 'INACTIVE';
+    readonly now?: Date;
+    readonly reason_code: string;
+    readonly service_zone_id: UuidV7;
+  }): Promise<number> {
+    if (!/^[A-Z][A-Z0-9_]{2,63}$/.test(input.reason_code)) {
+      throw new VendorNetworkInputError('Reason code must be shouting-snake-case');
+    }
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<{
+        vendor_location_id: string;
+        lifecycle_state: string;
+        version: number;
+      }>(
+        `SELECT vendor_location_id, lifecycle_state, version
+           FROM marketplace.vendor_service_zones WHERE service_zone_id=$1 FOR UPDATE`,
+        [input.service_zone_id],
+      );
+      const zone = found.rows[0];
+      if (!zone) throw new VendorNetworkNotFoundError('Service zone was not found');
+      if (zone.version !== input.expected_version) {
+        throw new VendorNetworkVersionConflictError('Service zone version has advanced');
+      }
+      if (zone.lifecycle_state === input.lifecycle_state) {
+        throw new VendorNetworkTransitionError(`Service zone is already ${input.lifecycle_state}`);
+      }
+      await client.query(
+        `UPDATE marketplace.vendor_service_zones
+            SET lifecycle_state=$2, version=$3, updated_at=$4
+          WHERE service_zone_id=$1`,
+        [input.service_zone_id, input.lifecycle_state, zone.version + 1, now],
+      );
+      const locationId = parseUuidV7(zone.vendor_location_id);
+      const locked = await client.query<{ version: number }>(
+        'SELECT version FROM marketplace.vendor_locations WHERE vendor_location_id=$1 FOR UPDATE',
+        [locationId],
+      );
+      const locationVersion = (locked.rows[0]?.version ?? 0) + 1;
+      await client.query(
+        'UPDATE marketplace.vendor_locations SET version=$2, updated_at=$3 WHERE vendor_location_id=$1',
+        [locationId, locationVersion, now],
+      );
+      await appendEvent(client, {
+        aggregate_id: locationId,
+        aggregate_type: 'VENDOR_LOCATION',
+        context: input.context,
+        event_type: 'SERVICE_ZONE_LIFECYCLE_CHANGED',
+        now,
+        reason_code: input.reason_code,
+        resulting_version: locationVersion,
+      });
+      return zone.version + 1;
     });
   }
 

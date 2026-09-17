@@ -1,5 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { loadDatabaseConfig, requireOnlineTestMigrationConfirmation } from '../src/config.js';
+import { loadDatabaseConfig, requireRemoteMigrationConfirmation } from '../src/config.js';
 import { writeEvent } from '../src/output.js';
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -111,6 +111,46 @@ assert(
       '0036_admin_access_provisioning',
       '0037_local_notifications',
       '0038_customer_decision_payment_adjustments',
+      '0039_password_credentials',
+      '0040_production_access_baseline',
+      '0041_supabase_identities',
+      '0042_supabase_sessions',
+      '0043_admin_provisioning_commands',
+      '0044_delivery_assignment_vendor_order',
+      '0045_gated_capabilities',
+      '0046_payment_method_selection',
+      '0047_catalogue_image_serving',
+      '0048_customer_locale_copy',
+      '0049_lifecycle_state_labels',
+      '0050_delivery_completion_otp',
+      '0051_handoff_code_copy',
+      '0052_partner_self_scoped_capabilities',
+      '0053_pickup_otp_provenance',
+      '0054_product_first_browsing_copy',
+      '0055_vendor_order_delivery_completion',
+      '0056_in_app_notification_channel_policy',
+      '0057_ended_order_authorization_adjustments',
+      '0058_financial_policy_configuration',
+      '0059_admin_operational_controls',
+      '0060_delivery_ratings',
+      '0061_delivery_notification_copy',
+      '0062_remove_synthetic_runtime_constraints',
+      '0063_customer_privacy_requests',
+      '0064_kernel_error_locale_keys',
+      '0065_field_error_locale_keys',
+      '0066_guard_error_contract',
+      '0067_retention_classification_sweep',
+      '0068_invitation_expiry',
+      '0069_price_history_guard',
+      '0070_role_assignment_single_active',
+      '0071_worker_liveness',
+      '0072_resource_already_exists_error',
+      '0073_picking_incomplete_error',
+      '0074_unprocessable_detail_errors',
+      '0075_pickup_otp_partner_issuer',
+      '0076_handover_error_codes',
+      '0077_assignment_event_partner',
+      '0078_partner_presence',
     ]),
   'Unexpected reviewed migrations',
 );
@@ -350,21 +390,53 @@ await expectConfigRejection(
 const projectRef = 'abcdefghijklmnopqrst';
 withOnlineEnvironment(
   {
-    ONLINE_TEST_DATABASE_URL: `postgresql://postgres:synthetic@db.${projectRef}.supabase.co:5432/postgres?sslmode=require`,
+    ONLINE_TEST_DATABASE_URL: `postgresql://postgres:synthetic@db.${projectRef}.supabase.co:5432/postgres?sslmode=verify-full`,
     ONLINE_TEST_SUPABASE_PROJECT_REF: projectRef,
     ONLINE_TEST_MIGRATION_CONFIRM: `apply-${projectRef}-online-test`,
   },
   () => {
     const online = loadDatabaseConfig('online-test');
     assert(online.target === 'online-test', 'Safe Supabase online-test target was rejected');
-    requireOnlineTestMigrationConfirmation('online-test');
+    requireRemoteMigrationConfirmation('online-test');
+  },
+);
+
+withOnlineEnvironment(
+  {
+    SUPABASE_PRODUCTION_MIGRATION_URL: `postgresql://postgres.${projectRef}:synthetic@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=verify-full&sslrootcert=/run/secrets/supabase-ca.crt`,
+    SUPABASE_PRODUCTION_PROJECT_REF: projectRef,
+    SUPABASE_PRODUCTION_MIGRATION_CONFIRM: `apply-${projectRef}-supabase-production`,
+  },
+  () => {
+    const production = loadDatabaseConfig('supabase-production');
+    assert(
+      production.target === 'supabase-production',
+      'Safe Supabase production target was rejected',
+    );
+    requireRemoteMigrationConfirmation('supabase-production');
+  },
+);
+
+withOnlineEnvironment(
+  {
+    SUPABASE_PRODUCTION_MIGRATION_URL: `postgresql://postgres.${projectRef}:synthetic@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=verify-full`,
+    SUPABASE_PRODUCTION_PROJECT_REF: projectRef,
+  },
+  () => {
+    let rejected = false;
+    try {
+      loadDatabaseConfig('supabase-production');
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, 'Production connection without a Supabase CA path was accepted');
   },
 );
 
 withOnlineEnvironment(
   {
     ONLINE_TEST_DATABASE_URL:
-      'postgresql://postgres:synthetic@database.example.com:5432/postgres?sslmode=require',
+      'postgresql://postgres:synthetic@database.example.com:5432/postgres?sslmode=verify-full',
     ONLINE_TEST_SUPABASE_PROJECT_REF: projectRef,
   },
   () => {
@@ -380,14 +452,14 @@ withOnlineEnvironment(
 
 withOnlineEnvironment(
   {
-    ONLINE_TEST_DATABASE_URL: `postgresql://postgres:synthetic@db.${projectRef}.supabase.co:5432/postgres?sslmode=require`,
+    ONLINE_TEST_DATABASE_URL: `postgresql://postgres:synthetic@db.${projectRef}.supabase.co:5432/postgres?sslmode=verify-full`,
     ONLINE_TEST_SUPABASE_PROJECT_REF: projectRef,
     ONLINE_TEST_MIGRATION_CONFIRM: undefined,
   },
   () => {
     let rejected = false;
     try {
-      requireOnlineTestMigrationConfirmation('online-test');
+      requireRemoteMigrationConfirmation('online-test');
     } catch {
       rejected = true;
     }
@@ -395,7 +467,185 @@ withOnlineEnvironment(
   },
 );
 
+withOnlineEnvironment(
+  {
+    SUPABASE_DATABASE_URL: `postgresql://postgres.${projectRef}:synthetic@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=verify-full`,
+    SUPABASE_PROJECT_REF: projectRef,
+    SUPABASE_MIGRATION_CONFIRM: `apply-${projectRef}-supabase-dev`,
+  },
+  () => {
+    const supabase = loadDatabaseConfig('supabase-dev');
+    assert(supabase.target === 'supabase-dev', 'Safe Supabase development target was rejected');
+    requireRemoteMigrationConfirmation('supabase-dev');
+  },
+);
+
+withOnlineEnvironment(
+  {
+    SUPABASE_DATABASE_URL: `postgresql://postgres.${projectRef}:synthetic@aws-0-ap-south-1.pooler.supabase.com:5432/postgres`,
+    SUPABASE_PROJECT_REF: projectRef,
+  },
+  () => {
+    const supabase = loadDatabaseConfig('supabase-dev');
+    assert(
+      new URL(supabase.connectionString).searchParams.get('sslmode') === 'require' &&
+        new URL(supabase.connectionString).searchParams.get('uselibpqcompat') === 'true',
+      'Supabase development URL did not normalize to encrypted libpq-compatible TLS',
+    );
+  },
+);
+
+withOnlineEnvironment(
+  {
+    SUPABASE_DATABASE_URL: `postgresql://postgres.${projectRef}:synthetic@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=verify-full`,
+    SUPABASE_PROJECT_REF: projectRef,
+  },
+  () => {
+    let rejected = false;
+    try {
+      loadDatabaseConfig('supabase-dev');
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, 'Transaction pooler was accepted for Supabase development migrations');
+  },
+);
+
+/**
+ * Drizzle schema drift control.
+ *
+ * `CLAUDE.md` names `database/schema.ts` the schema record of truth, but
+ * nothing enforced it and nothing imports it — every service uses raw SQL
+ * through `pg`. Unwatched, it fell 78 tables behind: whole domains (carts,
+ * checkout, catalogue, payments, the ledger, vendor orders) were never
+ * declared at all.
+ *
+ * This is a ratchet, not a clean bill of health. The existing debt is recorded
+ * below and permitted; a table added by any *new* migration must be declared,
+ * so the gap can only shrink. Removing a name from this list once its table is
+ * declared is the intended way to pay the debt down.
+ */
+const UNDECLARED_TABLE_DEBT: ReadonlySet<string> = new Set([
+  'cart_events',
+  'cart_lines',
+  'cart_vendor_groups',
+  'carts',
+  'catalogue_import_rows',
+  'catalogue_imports',
+  'catalogue_moderation_cases',
+  'catalogue_moderation_events',
+  'catalogue_prices',
+  'catalogue_product_images',
+  'catalogue_product_substitutions',
+  'catalogue_product_variants',
+  'catalogue_products',
+  'checkout_events',
+  'checkout_groups',
+  'checkout_quote_blocked_groups',
+  'checkout_quote_groups',
+  'checkout_quote_lines',
+  'checkout_quotes',
+  'customer_address_events',
+  'customer_addresses',
+  'customer_discovery_events',
+  'customer_favourite_stores',
+  'customer_preferred_store',
+  'customer_recent_searches',
+  'customer_shop_requests',
+  'finance_exceptions',
+  'financial_correction_events',
+  'financial_corrections',
+  'gated_capabilities',
+  'gated_capability_approvals',
+  'in_app_notifications',
+  'incident_controls',
+  'ledger_accounts',
+  'ledger_entries',
+  'ledger_transactions',
+  'locale_keys',
+  'locale_translations',
+  'notification_attempts',
+  'notification_intents',
+  'operational_audit_events',
+  'partner_application_events',
+  'partner_applications',
+  'partner_availability',
+  'partner_availability_events',
+  'partner_dispute_cases',
+  'partner_earnings_records',
+  'partner_exception_events',
+  'partner_offline_proofs',
+  'partner_wait_earning_adjustments',
+  'partner_wait_timer_events',
+  'partner_wait_timers',
+  'payment_allocations',
+  'payment_authorization_adjustments',
+  'payment_events',
+  'payment_transactions',
+  'payout_batches',
+  'payouts',
+  'provider_statement_imports',
+  'provider_statement_rows',
+  'provider_webhook_receipts',
+  'refund_events',
+  'refunds',
+  'report_exports',
+  'settlement_lines',
+  'settlements',
+  'support_case_events',
+  'support_case_evidence',
+  'support_case_messages',
+  'support_cases',
+  'trust_restriction_cases',
+  'vendor_order_customer_decisions',
+  'vendor_order_events',
+  'vendor_order_line_picks',
+  'vendor_order_lines',
+  'vendor_order_ratings',
+  'vendor_orders',
+  'vendor_staff_events',
+]);
+
+const migrationTables = new Set<string>();
+for (const filename of migrationFiles) {
+  const sql = await readFile(new URL(`../migrations/${filename}`, import.meta.url), 'utf8');
+  for (const match of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?marketplace\.([a-z0-9_]+)/gi)) {
+    migrationTables.add((match[1] as string).toLowerCase());
+  }
+  for (const match of sql.matchAll(/DROP TABLE (?:IF EXISTS )?marketplace\.([a-z0-9_]+)/gi)) {
+    migrationTables.delete((match[1] as string).toLowerCase());
+  }
+}
+
+const schemaSource = await readFile(new URL('../schema.ts', import.meta.url), 'utf8');
+const declaredTables = new Set(
+  [...schemaSource.matchAll(/marketplaceSchema\.table\(\s*'([a-z0-9_]+)'/g)].map(
+    (match) => match[1] as string,
+  ),
+);
+
+const undeclared = [...migrationTables].filter(
+  (table) => !declaredTables.has(table) && !UNDECLARED_TABLE_DEBT.has(table),
+);
+assert(
+  undeclared.length === 0,
+  `Migrations create tables that database/schema.ts does not declare: ${undeclared.sort().join(', ')}. ` +
+    'Add the Drizzle declaration alongside the migration (never `drizzle-kit push`).',
+);
+
+// A name left in the debt list after its table is declared would quietly keep
+// the exemption alive for a table someone later removed from the schema.
+const staleDebt = [...UNDECLARED_TABLE_DEBT].filter(
+  (table) => declaredTables.has(table) || !migrationTables.has(table),
+);
+assert(
+  staleDebt.length === 0,
+  `These tables no longer need an exemption in UNDECLARED_TABLE_DEBT: ${staleDebt.sort().join(', ')}`,
+);
+
 writeEvent('database.static_controls.verified', {
   compose_services: 2,
   migration_pairs: upNames.length,
+  schema_tables_declared: declaredTables.size,
+  schema_tables_undeclared: UNDECLARED_TABLE_DEBT.size,
 });

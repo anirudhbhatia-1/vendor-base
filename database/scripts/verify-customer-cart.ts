@@ -13,10 +13,8 @@ import {
   DEFAULT_CART_GROUP_LIMIT,
 } from '../src/customer-cart.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
+import { check, rejects, vendorContext } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 function context(userId: UuidV7) {
   return createRequestContext({
     actor: createAuthenticatedActor({
@@ -26,25 +24,6 @@ function context(userId: UuidV7) {
     }),
   });
 }
-function vendorContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'vendor_staff',
-      session_id: createUuidV7(),
-    }),
-  });
-}
-async function rejects(work: () => Promise<unknown>, kind: new () => Error, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof kind, `${message} (raised ${String(error)})`);
-    return;
-  }
-  throw new Error(message);
-}
-
 const jaipur = { latitude: 26.91, longitude: 75.81 };
 
 async function makeProduct(

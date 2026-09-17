@@ -16,7 +16,14 @@ const skippedDirectories = new Set([
 ]);
 const packageImportAllowlist = {
   contracts: new Set(['domain-types']),
+  // The error-message table lives with the error codes; the browser session
+  // helpers render it, so they may read domain-types and nothing else.
+  'pwa-auth': new Set(['contracts', 'domain-types']),
+  // The native sign-in screen calls the typed client and paints with the
+  // shared tokens; it decides nothing.
+  'app-auth': new Set(['contracts', 'ui-tokens']),
   'test-data': new Set(['contracts', 'domain-types']),
+  ui: new Set(['ui-tokens']),
 };
 
 function ownerOf(relativeFile) {

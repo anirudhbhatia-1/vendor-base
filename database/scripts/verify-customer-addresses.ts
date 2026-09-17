@@ -1,9 +1,17 @@
 import {
   createAuthenticatedActor,
   createRequestContext,
+  createRequestId,
   createUuidV7,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
+import {
+  activateConfigurationVersion,
+  approveConfigurationVersion,
+  createConfigurationDraft,
+  scheduleConfigurationVersion,
+  validateConfigurationVersion,
+} from '../src/versioned-configuration.js';
 import { Pool } from 'pg';
 import {
   CustomerAddressAuthorizationError,
@@ -13,10 +21,8 @@ import {
   CustomerAddressService,
   DEFAULT_SAVED_ADDRESS_LIMIT,
 } from '../src/customer-addresses.js';
+import { check, rejects } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 function context(userId: UuidV7) {
   return createRequestContext({
     actor: createAuthenticatedActor({
@@ -26,16 +32,6 @@ function context(userId: UuidV7) {
     }),
   });
 }
-async function rejects(work: () => Promise<unknown>, kind: new () => Error, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof kind, `${message} (raised ${String(error)})`);
-    return;
-  }
-  throw new Error(message);
-}
-
 // Inside the zone below; the far point sits outside it.
 const inside = { latitude: 26.91, longitude: 75.81 };
 const outside = { latitude: 19.076, longitude: 72.8777 };
@@ -363,6 +359,56 @@ export async function verifyCustomerAddresses(connectionString: string): Promise
       () => addresses.listAddresses({ context: createRequestContext({}) }),
       CustomerAddressAuthorizationError,
       'An unauthenticated caller listed saved addresses',
+    );
+
+    // Requirement 3 says the limit of four is *configurable*, and only the fallback was
+    // exercised. `savedAddressLimit` reads `customer.saved_address_limit` from versioned
+    // configuration and returns 4 whenever that lookup yields nothing usable — so if the
+    // lookup broke entirely, every assertion above would still pass on the default and
+    // the operator control would be silently dead.
+    const proposerId = createUuidV7();
+    const approverId = createUuidV7();
+    for (const actorId of [proposerId, approverId]) {
+      await pool.query(
+        `INSERT INTO marketplace.users (user_id, created_at, updated_at)
+         VALUES ($1,$2,$2) ON CONFLICT (user_id) DO NOTHING`,
+        [actorId, now],
+      );
+    }
+    const limitDraft = await createConfigurationDraft(pool, {
+      actor_id: proposerId,
+      configuration_key: 'customer.saved_address_limit',
+      configuration_kind: 'SETTING',
+      configuration_value: 6,
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: proposerId,
+      configuration_version_id: limitDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: limitDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: limitDraft.configuration_version_id,
+      effective_from: new Date(now.getTime() - 1_000),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: approverId,
+      at: now,
+      configuration_version_id: limitDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    check(
+      (await addresses.savedAddressLimit(now)) === 6,
+      'An activated saved-address limit did not replace the default',
     );
   } finally {
     await addresses.close();

@@ -1,3 +1,5 @@
+import { createHmac } from 'node:crypto';
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -7,10 +9,31 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import { IdentityAccessService, type VendorRole } from './identity-access.js';
+import { parsePhoneIdentifier } from './otp-identity.js';
+import { transaction as tx } from './transaction.js';
 
 export class VendorStaffInputError extends Error {}
 export class VendorStaffNotFoundError extends Error {}
-export class VendorStaffConflictError extends Error {}
+/**
+ * Carries which kind of conflict it is.
+ *
+ * One class covered three unrelated situations -- a disabled account, an owner who
+ * already owns the store, and a name that is taken -- and the API mapped all of
+ * them to a bare 409, which clients render as "Refresh and try again". Refreshing
+ * fixes none of them. The code travels with the error so the transport can say
+ * something true.
+ */
+export class VendorStaffConflictError extends Error {
+  readonly code: 'ORDER_STATE_CONFLICT' | 'RESOURCE_ALREADY_EXISTS';
+
+  constructor(
+    message: string,
+    code: 'ORDER_STATE_CONFLICT' | 'RESOURCE_ALREADY_EXISTS' = 'ORDER_STATE_CONFLICT',
+  ) {
+    super(message);
+    this.code = code;
+  }
+}
 export class VendorStaffAuthorizationError extends Error {}
 
 export type ManagedVendorRole = 'VENDOR_MANAGER' | 'VENDOR_PICKER';
@@ -25,6 +48,8 @@ export interface MyAccess {
   readonly vendor_location_id: UuidV7;
   readonly role: VendorRole;
   readonly capabilities: readonly string[];
+  /** So a staff list can say which row is you without a second lookup. */
+  readonly user_id: UuidV7;
 }
 
 export interface LocationSettings {
@@ -33,6 +58,29 @@ export interface LocationSettings {
   readonly minimum_order_minor: number;
   readonly preparation_seconds: number;
   readonly version: number;
+}
+
+/**
+ * A zone as the shopkeeper needs to see it.
+ *
+ * The console could add zones and deactivate one by id, but never list them —
+ * so the only way to remove a zone was to already know a UUID the product
+ * never displays. An area you cannot see is an area you cannot correct, and
+ * these decide who can discover the store at all.
+ */
+export interface ServiceZoneSummary {
+  readonly service_zone_id: UuidV7;
+  readonly zone_name: string;
+  readonly lifecycle_state: string;
+  readonly area_square_metres: number;
+  readonly created_at: Date;
+}
+
+export interface TemporaryClosureSummary {
+  readonly temporary_closure_id: UuidV7;
+  readonly starts_at: Date;
+  readonly ends_at: Date;
+  readonly reason_code: string;
 }
 
 export interface ActivityEntry {
@@ -45,21 +93,6 @@ export interface ActivityEntry {
 
 const reasonCode = /^[A-Z][A-Z0-9_]{2,63}$/;
 const managedRoles: ReadonlySet<ManagedVendorRole> = new Set(['VENDOR_MANAGER', 'VENDOR_PICKER']);
-
-async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 
 interface MembershipRow {
   readonly role_assignment_id: string;
@@ -128,17 +161,55 @@ async function recordActivity(
 export class VendorStaffService {
   readonly #pool: Pool;
   readonly #access: IdentityAccessService;
+  readonly #hashKey: string;
 
   constructor(input: {
     readonly connection_string: string;
     readonly access: IdentityAccessService;
+    readonly hash_key: string;
   }) {
-    this.#pool = new Pool({
+    if (!input.hash_key) throw new Error('VendorStaffService requires a hash key');
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-vendor-staff',
       max: 8,
     });
     this.#access = input.access;
+    this.#hashKey = input.hash_key;
+  }
+
+  /**
+   * Turns what an owner actually knows — a phone number — into a user id.
+   *
+   * Requiring the invitee's UUID made this route unusable: nothing in the
+   * product ever shows one person another person's internal id, so every
+   * invitation a shopkeeper could physically type was rejected as malformed.
+   *
+   * Resolution only, never creation. An owner must not be able to bring an
+   * account into existence for an arbitrary number; the invitee signs in once
+   * themselves first. That this reveals whether a number has an account is
+   * accepted deliberately: the route is owner-only for one location and every
+   * call is written to `vendor_staff_events`.
+   */
+  async #resolveInviteeByPhone(client: PoolClient, phone: string): Promise<UuidV7> {
+    const lookupHash = createHmac('sha256', this.#hashKey)
+      .update(`phone:${parsePhoneIdentifier(phone)}`)
+      .digest('hex');
+    const found = await client.query<{ user_id: string; active: boolean }>(
+      `SELECT pi.user_id, u.state = 'ACTIVE' AS active
+         FROM marketplace.phone_identities pi
+         JOIN marketplace.users u USING (user_id)
+        WHERE pi.phone_lookup_hash = $1`,
+      [lookupHash],
+    );
+    const row = found.rows[0];
+    if (!row) {
+      throw new VendorStaffNotFoundError(
+        'No account uses that number yet. Ask them to sign in to the app once, then invite them.',
+      );
+    }
+    if (!row.active) throw new VendorStaffConflictError('That account is disabled');
+    return parseUuidV7(row.user_id);
   }
 
   async close(): Promise<void> {
@@ -153,41 +224,51 @@ export class VendorStaffService {
   async inviteStaff(input: {
     readonly context: RequestContext;
     readonly vendor_location_id: UuidV7;
-    readonly invitee_user_id: UuidV7;
+    /** Either the invitee's phone identifier or, for system callers, their id. */
+    readonly invitee_phone?: string;
+    readonly invitee_user_id?: UuidV7;
     readonly role: ManagedVendorRole;
     readonly now?: Date;
-  }): Promise<void> {
+  }): Promise<{ readonly invitee_user_id: UuidV7 }> {
     if (!managedRoles.has(input.role))
       throw new VendorStaffInputError('Only manager or picker may be invited');
+    if (!input.invitee_phone && !input.invitee_user_id)
+      throw new VendorStaffInputError('An invitation needs the invitee phone number');
     const now = input.now ?? new Date();
     const ids = {
       request: parseRequestId(input.context.request_id),
       correlation: parseUuidV7(input.context.correlation_id),
     };
-    await tx(this.#pool, async (client) => {
+    return tx(this.#pool, async (client) => {
       const { userId: ownerId } = await requireMembership(
         client,
         input.context,
         input.vendor_location_id,
         ['VENDOR_OWNER'],
       );
+      const inviteeUserId =
+        input.invitee_user_id ??
+        (await this.#resolveInviteeByPhone(client, input.invitee_phone as string));
+      if (inviteeUserId === ownerId)
+        throw new VendorStaffConflictError('You already own this store', 'RESOURCE_ALREADY_EXISTS');
       await this.#access.grantVendorMembership({
         context: input.context,
         granted_by_user_id: ownerId,
         role: input.role,
-        user_id: input.invitee_user_id,
+        user_id: inviteeUserId,
         vendor_location_id: input.vendor_location_id,
         now,
       });
       await recordActivity(client, {
         vendor_location_id: input.vendor_location_id,
         actor_user_id: ownerId,
-        target_user_id: input.invitee_user_id,
+        target_user_id: inviteeUserId,
         event_type: 'STAFF_INVITED',
         reason_code: `${input.role}_INVITED`,
         ids,
         now,
       });
+      return Object.freeze({ invitee_user_id: inviteeUserId });
     });
   }
 
@@ -283,11 +364,12 @@ export class VendorStaffService {
     readonly vendor_location_id: UuidV7;
   }): Promise<MyAccess> {
     return tx(this.#pool, async (client) => {
-      const { role } = await requireMembership(client, input.context, input.vendor_location_id, [
-        'VENDOR_OWNER',
-        'VENDOR_MANAGER',
-        'VENDOR_PICKER',
-      ]);
+      const { role, userId } = await requireMembership(
+        client,
+        input.context,
+        input.vendor_location_id,
+        ['VENDOR_OWNER', 'VENDOR_MANAGER', 'VENDOR_PICKER'],
+      );
       const capabilities = await client.query<{ capability_key: string }>(
         'SELECT capability_key FROM marketplace.role_capabilities WHERE role_key = $1 ORDER BY capability_key',
         [role],
@@ -296,6 +378,7 @@ export class VendorStaffService {
         vendor_location_id: input.vendor_location_id,
         role,
         capabilities: Object.freeze(capabilities.rows.map((row) => row.capability_key)),
+        user_id: userId,
       });
     });
   }
@@ -530,20 +613,39 @@ export class VendorStaffService {
         request: parseRequestId(input.context.request_id),
         correlation: parseUuidV7(input.context.correlation_id),
       };
-      await client.query(
-        `INSERT INTO marketplace.vendor_service_zones
-           (service_zone_id, vendor_location_id, zone_name, operating_timezone, boundary,
-            request_id, correlation_id)
-         VALUES ($1,$2,$3,$4,ST_SetSRID(ST_GeomFromText($5),4326)::geography,$6,$6)`,
-        [
-          createUuidV7({ now_ms: now.getTime() }),
-          input.vendor_location_id,
-          input.zone_name,
-          timezone,
-          input.boundary_wkt,
-          ids.request,
-        ],
-      );
+      // ST_Multi because the column is geography(MultiPolygon) and the vendor console
+      // draws a single ring, so it sends POLYGON. PostGIS rejects the narrower type
+      // outright rather than widening it. Already-multi input passes through unchanged.
+      try {
+        await client.query(
+          `INSERT INTO marketplace.vendor_service_zones
+             (service_zone_id, vendor_location_id, zone_name, operating_timezone, boundary,
+              request_id, correlation_id)
+           VALUES ($1,$2,$3,$4,ST_Multi(ST_SetSRID(ST_GeomFromText($5),4326))::geography,$6,$6)`,
+          [
+            createUuidV7({ now_ms: now.getTime() }),
+            input.vendor_location_id,
+            input.zone_name,
+            timezone,
+            input.boundary_wkt,
+            ids.request,
+          ],
+        );
+      } catch (error) {
+        // service_zone_name_unique is UNIQUE (vendor_location_id, zone_name) and covers
+        // deactivated zones too, so a name is spent once used. Reusing one is the
+        // operator's input, not a fault, and must not surface as INTERNAL_ERROR.
+        if (
+          typeof error === 'object' &&
+          error !== null &&
+          (error as { code?: unknown }).code === '23505'
+        )
+          throw new VendorStaffConflictError(
+            'A service zone with this name already exists',
+            'RESOURCE_ALREADY_EXISTS',
+          );
+        throw error;
+      }
       await recordActivity(client, {
         vendor_location_id: input.vendor_location_id,
         actor_user_id: userId,
@@ -604,6 +706,83 @@ export class VendorStaffService {
         [input.vendor_location_id],
       );
       return Object.freeze(result.rows.map((row) => row.fulfilment_mode));
+    });
+  }
+
+  /** Active zones first: those are the ones deciding discoverability today. */
+  async listServiceZones(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+  }): Promise<readonly ServiceZoneSummary[]> {
+    return tx(this.#pool, async (client) => {
+      await requireMembership(client, input.context, input.vendor_location_id, [
+        'VENDOR_OWNER',
+        'VENDOR_MANAGER',
+        'VENDOR_PICKER',
+      ]);
+      const result = await client.query<{
+        service_zone_id: string;
+        zone_name: string;
+        lifecycle_state: string;
+        area_square_metres: string;
+        created_at: Date;
+      }>(
+        `SELECT service_zone_id, zone_name, lifecycle_state, created_at,
+                ST_Area(boundary) AS area_square_metres
+           FROM marketplace.vendor_service_zones
+          WHERE vendor_location_id = $1
+          ORDER BY (lifecycle_state = 'ACTIVE') DESC, created_at DESC`,
+        [input.vendor_location_id],
+      );
+      return Object.freeze(
+        result.rows.map((row) =>
+          Object.freeze({
+            area_square_metres: Number(row.area_square_metres),
+            created_at: row.created_at,
+            lifecycle_state: row.lifecycle_state,
+            service_zone_id: parseUuidV7(row.service_zone_id),
+            zone_name: row.zone_name,
+          }),
+        ),
+      );
+    });
+  }
+
+  /** Closures that have not finished yet — a past closure is not actionable. */
+  async listTemporaryClosures(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<readonly TemporaryClosureSummary[]> {
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      await requireMembership(client, input.context, input.vendor_location_id, [
+        'VENDOR_OWNER',
+        'VENDOR_MANAGER',
+        'VENDOR_PICKER',
+      ]);
+      const result = await client.query<{
+        temporary_closure_id: string;
+        starts_at: Date;
+        ends_at: Date;
+        reason_code: string;
+      }>(
+        `SELECT temporary_closure_id, starts_at, ends_at, reason_code
+           FROM marketplace.vendor_location_temporary_closures
+          WHERE vendor_location_id = $1 AND ends_at > $2
+          ORDER BY starts_at ASC`,
+        [input.vendor_location_id, now],
+      );
+      return Object.freeze(
+        result.rows.map((row) =>
+          Object.freeze({
+            ends_at: row.ends_at,
+            reason_code: row.reason_code,
+            starts_at: row.starts_at,
+            temporary_closure_id: parseUuidV7(row.temporary_closure_id),
+          }),
+        ),
+      );
     });
   }
 

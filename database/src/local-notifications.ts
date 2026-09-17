@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,13 +7,19 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import {
+  LocalDeterministicMessageProvider,
+  type ProviderScenario,
+  type PushProvider,
+  type SmsProvider,
+} from './provider-ports.js';
 
 export class NotificationAuthorizationError extends Error {}
 export class NotificationNotFoundError extends Error {}
 export class NotificationInputError extends Error {}
 
 type Channel = 'IN_APP' | 'PUSH' | 'SMS';
-type Scenario = 'SUCCESS' | 'TRANSIENT_FAILURE' | 'PERMANENT_FAILURE';
+type Scenario = ProviderScenario;
 
 function actor(context: RequestContext) {
   if (!context.actor) throw new NotificationAuthorizationError();
@@ -32,12 +39,20 @@ function contextIds(context: RequestContext) {
 
 export class LocalNotificationService {
   readonly #pool: Pool;
-  constructor(input: { connection_string: string }) {
-    this.#pool = new Pool({
+  readonly #pushProvider: PushProvider;
+  readonly #smsProvider: SmsProvider;
+  constructor(input: {
+    readonly connection_string: string;
+    readonly push_provider?: PushProvider;
+    readonly sms_provider?: SmsProvider;
+  }) {
+    this.#pool = createDatabasePool({
       application_name: 'local-notifications',
       connectionString: input.connection_string,
       max: 6,
     });
+    this.#pushProvider = input.push_provider ?? new LocalDeterministicMessageProvider();
+    this.#smsProvider = input.sms_provider ?? new LocalDeterministicMessageProvider();
   }
   async close() {
     await this.#pool.end();
@@ -132,7 +147,7 @@ export class LocalNotificationService {
          JOIN marketplace.vendor_orders orders USING(vendor_order_id)
          JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
         WHERE event.event_type IN ('ACCEPTED','DECLINED','TIMED_OUT','SUBSTITUTION_PROPOSED',
-          'WEIGHT_PROPOSED','READY','PICKED_UP','SUPPORT_CASE_OPENED')
+          'WEIGHT_PROPOSED','READY','PICKED_UP','DELIVERED','RETURNED','SUPPORT_CASE_OPENED')
           AND NOT EXISTS(SELECT 1 FROM marketplace.notification_intents intent
             WHERE intent.source_kind='vendor_order_event' AND intent.source_id=event.event_id)
         ORDER BY event.occurred_at LIMIT $1`,
@@ -247,22 +262,30 @@ export class LocalNotificationService {
         delivered += 1;
         continue;
       }
-      const enabled =
-        channel === 'IN_APP' ||
-        (await this.#channelEnabled(
-          client,
-          intent.recipient_user_id,
-          intent.notification_kind,
-          channel,
-        ));
+      // IN_APP needs no provider, but it is still a channel a person can be
+      // given a choice about (0056). It used to short-circuit this check, which
+      // made it the one channel nobody could switch off.
+      const enabled = await this.#channelEnabled(
+        client,
+        intent.recipient_user_id,
+        intent.notification_kind,
+        channel,
+      );
+      const delivery =
+        enabled && channel !== 'IN_APP'
+          ? await (channel === 'SMS' ? this.#smsProvider : this.#pushProvider).send({
+              attempt,
+              operation_reference: `${intent.notification_intent_id}-${channel}`,
+              payload: intent.template_payload,
+              scenario: intent.provider_scenario,
+            })
+          : null;
       const state = !enabled
         ? 'SKIPPED'
-        : intent.provider_scenario === 'SUCCESS' ||
-            (intent.provider_scenario === 'TRANSIENT_FAILURE' && attempt >= 3)
+        : channel === 'IN_APP'
           ? 'DELIVERED'
-          : 'FAILED';
-      const transient = enabled && intent.provider_scenario === 'TRANSIENT_FAILURE' && attempt < 3;
-      retry ||= transient;
+          : (delivery?.state ?? 'FAILED');
+      retry ||= delivery?.retryable ?? false;
       if (state === 'DELIVERED') delivered += 1;
       await client.query(
         `INSERT INTO marketplace.notification_attempts
@@ -275,12 +298,10 @@ export class LocalNotificationService {
           channel,
           attempt,
           state,
-          state === 'DELIVERED' ? `SYNTH-NOTIFY-${intent.notification_intent_id}-${channel}` : null,
-          state === 'FAILED'
-            ? transient
-              ? 'FAKE_TRANSIENT_FAILURE'
-              : 'FAKE_PERMANENT_FAILURE'
-            : null,
+          channel === 'IN_APP' && state === 'DELIVERED'
+            ? `SYNTH-NOTIFY-${intent.notification_intent_id}-${channel}`
+            : (delivery?.provider_reference ?? null),
+          delivery?.error_code ?? null,
           now,
         ],
       );

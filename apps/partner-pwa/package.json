@@ -7,12 +7,21 @@
   "type": "module",
   "scripts": {
     "build": "next build",
-    "dev": "next dev --hostname 127.0.0.1 --port 3102",
-    "start": "next start --hostname 127.0.0.1 --port 3102",
+    "build:supabase-production": "node ../../tooling/scripts/run-with-public-env.mjs ../../infrastructure/supabase-production/.env next build",
+    "dev": "node ../../tooling/scripts/ensure-packages-built.mjs && next dev --hostname 127.0.0.1 --port 3102",
+    "dev:supabase": "node ../../tooling/scripts/ensure-packages-built.mjs && node ../../tooling/scripts/run-with-public-env.mjs ../../infrastructure/supabase-dev/.env next dev --hostname 127.0.0.1 --port 3102",
+    "dev:supabase-production": "node ../../tooling/scripts/ensure-packages-built.mjs && node ../../tooling/scripts/run-with-public-env.mjs ../../infrastructure/supabase-production/.env next dev --hostname 127.0.0.1 --port 3102",
+    "start": "node ../../tooling/scripts/ensure-packages-built.mjs && next start --hostname 127.0.0.1 --port 3102",
+    "test:unit": "node ../../tooling/scripts/ensure-packages-built.mjs && node --import tsx --test app/*.spec.ts",
     "typecheck": "next typegen && tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@neighbourhood-store/contracts": "workspace:*",
+    "@neighbourhood-store/pwa-auth": "workspace:*",
+    "@neighbourhood-store/ui": "workspace:*",
     "@neighbourhood-store/ui-tokens": "workspace:*",
+    "@supabase/ssr": "0.12.4",
+    "@supabase/supabase-js": "2.58.0",
     "next": "16.3.1",
     "react": "19.2.3",
     "react-dom": "19.2.3"

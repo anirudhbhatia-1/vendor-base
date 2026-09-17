@@ -6,12 +6,6 @@
     "lib": ["DOM", "DOM.Iterable", "ES2024"],
     "plugins": [{ "name": "next" }]
   },
-  "include": [
-    "next-env.d.ts",
-    "../../types/next-url-pattern.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    ".next/types/**/*.ts"
-  ],
-  "exclude": ["node_modules"]
+  "include": ["next-env.d.ts", "../../types/next-url-pattern.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", ".next", "open-next.config.ts"]
 }

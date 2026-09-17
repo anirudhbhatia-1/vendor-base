@@ -5,8 +5,8 @@
   "activeEnvironment": "local",
   "providers": {
     "sourceAndCi": "GitHub Free",
-    "pwaAndCdn": "Cloudflare Pages",
-    "objectStorage": "Cloudflare R2",
+    "pwaAndCdn": "Cloudflare Pages for the vendor, partner and admin static exports; Workers/OpenNext for the customer PWA and its same-origin BFF",
+    "objectStorage": "Supabase Storage",
     "database": "Supabase Free PostgreSQL/PostGIS",
     "compute": "OCI Always Free",
     "queue": "Valkey on OCI",
@@ -31,5 +31,9 @@
     "compute": "not-provisioned",
     "remainingProviders": "not-connected"
   },
-  "credentialPolicy": "Provider credentials are stored only in provider secret stores or OCI Vault and are never committed."
+  "credentialPolicy": "Provider credentials are stored only in provider secret stores or OCI Vault and are never committed.",
+  "supersededTargets": {
+    "objectStorage": "Cloudflare R2, superseded by D-15 which approves Supabase Storage; the adapter is implemented, no bucket is provisioned",
+    "pwaAndCdn": "Cloudflare Pages for all four PWAs, superseded by D-15 which moves the customer PWA to Workers/OpenNext because a static export cannot serve its BFF routes"
+  }
 }

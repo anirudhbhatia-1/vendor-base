@@ -1,7 +1,10 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View, TextInput } from 'react-native';
 import { colors, radii, spacing } from '@neighbourhood-store/ui-tokens/native';
-const apiUrl = 'http://10.0.2.2:3001';
+import { createRawRequester } from '@neighbourhood-store/contracts';
+const globalEnv =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+const apiUrl = globalEnv['EXPO_PUBLIC_API_URL'] ?? 'http://10.0.2.2:3001';
 type Item = {
   kind: string;
   object_id: string;
@@ -10,25 +13,21 @@ type Item = {
   next_action: string;
 };
 type Notice = { in_app_notification_id: string; template_key: string };
-export function ControlPlane() {
-  const [token, setToken] = useState('');
+export function ControlPlane({ accessToken = '' }: { accessToken?: string } = {}) {
+  const token = accessToken;
   const [items, setItems] = useState<Item[]>([]);
-  const [message, setMessage] = useState('Connect an authorized admin session.');
+  const [orders, setOrders] = useState<Record<string, unknown>[]>([]);
+  const [message, setMessage] = useState(
+    token ? 'Signed in. Press Load queues.' : 'Sign in with admin credentials above.',
+  );
   const [report, setReport] = useState('');
   const [accessUserId, setAccessUserId] = useState('');
   const [roleAssignmentId, setRoleAssignmentId] = useState('');
   const [notices, setNotices] = useState<Notice[]>([]);
   const [configurationVersionId, setConfigurationVersionId] = useState('');
   async function request(path: string, init?: RequestInit) {
-    const response = await fetch(`${apiUrl}/${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(init?.body ? { 'content-type': 'application/json' } : {}),
-      },
-    });
-    if (!response.ok) throw new Error(`Control request denied (${response.status}).`);
-    return response.json();
+    const raw = createRawRequester({ baseUrl: apiUrl, getToken: () => token });
+    return raw<unknown>(`/${path}`, init);
   }
   async function load() {
     try {
@@ -39,6 +38,17 @@ export function ControlPlane() {
       );
     } catch (e) {
       setMessage(e instanceof Error ? e.message : 'Dashboard failed.');
+    }
+  }
+  async function loadOrders() {
+    try {
+      const body = (await request('admin/control/orders')) as {
+        checkout_groups?: Record<string, unknown>[];
+      };
+      setOrders(body.checkout_groups ?? []);
+      setMessage(`Order monitor: ${(body.checkout_groups ?? []).length} checkout group(s).`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Order monitor failed.');
     }
   }
   async function finance() {
@@ -102,18 +112,13 @@ export function ControlPlane() {
   }
   return (
     <View style={s.panel}>
-      <Text style={s.kicker}>PHASE 11 CONTROL PLANE</Text>
+      <Text style={s.kicker}>CONTROL PLANE</Text>
       <Text style={s.heading}>Accountable operations queue</Text>
-      <TextInput
-        value={token}
-        onChangeText={setToken}
-        placeholder="Admin access token"
-        style={s.input}
-      />
       <View style={s.actions}>
-        <Button label="Load queues" onPress={load} />
-        <Button label="Finance report" onPress={finance} />
-        <Button label="Unread notifications" onPress={notifications} />
+        <Button label="Load queues" onPress={() => token && void load()} />
+        <Button label="Load orders" onPress={() => token && void loadOrders()} />
+        <Button label="Finance report" onPress={() => token && void finance()} />
+        <Button label="Unread notifications" onPress={() => token && void notifications()} />
       </View>
       <Text style={s.message}>{message}</Text>
       <View style={s.item}>
@@ -150,6 +155,23 @@ export function ControlPlane() {
           </Text>
         </View>
       ))}
+      {orders.map((row, idx) => {
+        const ref =
+          typeof row['checkout_reference'] === 'string'
+            ? row['checkout_reference']
+            : `Group ${idx + 1}`;
+        const state = typeof row['lifecycle_state'] === 'string' ? row['lifecycle_state'] : '';
+        const nested = Array.isArray(row['orders']) ? (row['orders'] as unknown[]).length : 0;
+        return (
+          <View key={`order-${idx}`} style={s.item}>
+            <Text style={s.kind}>CHECKOUT GROUP</Text>
+            <Text style={s.title}>{ref}</Text>
+            <Text style={s.meta}>
+              {state.replaceAll('_', ' ')} · {nested} vendor order{nested === 1 ? '' : 's'}
+            </Text>
+          </View>
+        );
+      })}
       {notices.map((notice) => (
         <Text style={s.meta} key={notice.in_app_notification_id}>
           {notice.template_key.replaceAll('.', ' ')}

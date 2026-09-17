@@ -1,7 +1,9 @@
 import { createRequestId, createUuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool, type Client } from 'pg';
 import { withDatabaseClient } from '../src/client.js';
+import { takeAssertionCount } from './verify-support.js';
 import { loadDatabaseConfig } from '../src/config.js';
+import { createDatabasePool } from '../src/database-pool.js';
 import {
   expectedFixtureHash,
   readFixtureHash,
@@ -14,6 +16,7 @@ import { rebuildDatabase } from '../src/rebuild.js';
 import {
   executeIdempotentCommand,
   IdempotencyKeyReusedError,
+  canonicalRequestHash,
   reconcileUncertainCommand,
 } from '../src/idempotency.js';
 import {
@@ -38,10 +41,12 @@ import { verifyInventoryReservations } from './verify-inventory-reservations.js'
 import { verifyAssignmentCustody } from './verify-assignment-custody.js';
 import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
+import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
 import { verifyCatalogueFreshnessModeration } from './verify-catalogue-freshness-moderation.js';
 import { verifyCatalogueProducts } from './verify-catalogue-products.js';
 import { verifyCustomerAddresses } from './verify-customer-addresses.js';
 import { verifyCustomerDiscovery } from './verify-customer-discovery.js';
+import { verifyCustomerEnrolment } from './verify-customer-enrolment.js';
 import { verifyCustomerCart } from './verify-customer-cart.js';
 import { verifyVendorStaff } from './verify-vendor-staff.js';
 import { verifyGroupedCheckout } from './verify-grouped-checkout.js';
@@ -65,6 +70,49 @@ async function assertVersions(client: Client): Promise<void> {
   }
   if (!versions.postgis_version?.startsWith('3.6.')) {
     throw new Error('Lifecycle verification requires PostGIS 3.6.x');
+  }
+}
+
+/**
+ * A hosted pooler closing the socket under a checked-out client ended the
+ * worker: pg emits 'error' on the client, pg-pool listens only while the client
+ * is idle, and an 'error' with no listener is thrown from `emit`. The process
+ * printed "Connection terminated unexpectedly" and stopped ticking. This is
+ * the exact event, raised on a client the pool has handed out.
+ */
+async function verifyDatabasePoolResilience(connectionString: string): Promise<void> {
+  const pool = createDatabasePool({
+    application_name: 'neighbourhood-store-test-pool-verifier',
+    connectionString,
+    max: 1,
+  });
+  try {
+    const client = await pool.connect();
+    let survived = false;
+    try {
+      client.emit(
+        'error',
+        Object.assign(new Error('SYNTH connection terminated unexpectedly'), {
+          code: 'ECONNRESET',
+        }),
+      );
+      survived = true;
+    } catch {
+      survived = false;
+    } finally {
+      client.release(true);
+    }
+    if (!survived) {
+      throw new Error(
+        'A connection error on a checked-out client was unhandled and would end the process',
+      );
+    }
+    const again = await pool.query<{ one: number }>('SELECT 1 AS one');
+    if (again.rows[0]?.one !== 1) {
+      throw new Error('The pool did not serve again after a checked-out client failed');
+    }
+  } finally {
+    await pool.end();
   }
 }
 
@@ -218,6 +266,57 @@ async function verifyIdempotentCommands(connectionString: string): Promise<void>
     );
     if (!retained.rows[0]?.retained) {
       throw new Error('Uncertain provider outcome retention is too short for reconciliation');
+    }
+
+    // A handler that dies mid-flight leaves the outcome genuinely unknown. The lease
+    // expires, the record becomes UNCERTAIN, and it must be due for reconciliation
+    // promptly while still being retained for the full seven days. These were the same
+    // constant, so an abandoned payment authorization would have waited a week.
+    const abandonedInput = {
+      actor_id: actorId,
+      command_scope: 'payment.authorize_order',
+      idempotency_key: 'abandoned-lease-0001',
+      request_body: { amount_minor: 4200, order_reference: 'ORD-SYNTH-0002' },
+      request_id: createRequestId(),
+    };
+    await pool.query(
+      `INSERT INTO marketplace.idempotency_records
+         (record_id, actor_id, command_scope, idempotency_key, request_hash, request_id,
+          status, lease_expires_at, expires_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'IN_PROGRESS',
+               clock_timestamp() - interval '1 minute',
+               clock_timestamp() + interval '24 hours',
+               clock_timestamp() - interval '5 minutes',
+               clock_timestamp() - interval '5 minutes')`,
+      [
+        createUuidV7(),
+        actorId,
+        abandonedInput.command_scope,
+        abandonedInput.idempotency_key,
+        canonicalRequestHash(abandonedInput.request_body),
+        abandonedInput.request_id,
+      ],
+    );
+    let abandonedExecutions = 0;
+    const abandoned = await executeIdempotentCommand(pool, abandonedInput, async () => {
+      abandonedExecutions += 1;
+      return { kind: 'completed', http_status: 200, response_body: { retried: true } };
+    });
+    if (abandonedExecutions !== 0 || abandoned.status !== 'UNCERTAIN') {
+      throw new Error('An abandoned command was re-executed instead of held for reconciliation');
+    }
+    const abandonedTiming = await pool.query<{ due_soon: boolean; retained: boolean }>(
+      `SELECT reconciliation_due_at <= clock_timestamp() + interval '10 minutes' AS due_soon,
+              expires_at >= created_at + interval '7 days' AS retained
+         FROM marketplace.idempotency_records
+        WHERE actor_id = $1 AND command_scope = $2 AND idempotency_key = $3`,
+      [actorId, abandonedInput.command_scope, abandonedInput.idempotency_key],
+    );
+    if (!abandonedTiming.rows[0]?.due_soon) {
+      throw new Error('An abandoned command is not due for reconciliation promptly');
+    }
+    if (!abandonedTiming.rows[0]?.retained) {
+      throw new Error('An abandoned command is not retained long enough to reconcile');
     }
 
     const reconciled = await reconcileUncertainCommand(pool, {
@@ -597,6 +696,23 @@ async function verifyAggregateVersioning(connectionString: string): Promise<void
         typeof error === 'object' && error !== null && 'code' in error && error.code === '55000';
     }
     if (!appendOnlyRejected) throw new Error('Append-only transition history accepted mutation');
+
+    // Deletion, not only mutation. The trigger is BEFORE DELETE OR UPDATE, but only the
+    // update half was covered, so narrowing it to BEFORE UPDATE would have passed this
+    // suite while letting an actor erase the record of what they did -- which is worse
+    // than editing it, because nothing is left to contradict.
+    let appendOnlyDeleteRejected = false;
+    try {
+      await pool.query(`DELETE FROM marketplace.aggregate_transitions WHERE transition_id = $1`, [
+        accepted.transition_id,
+      ]);
+    } catch (error: unknown) {
+      appendOnlyDeleteRejected =
+        typeof error === 'object' && error !== null && 'code' in error && error.code === '55000';
+    }
+    if (!appendOnlyDeleteRejected) {
+      throw new Error('Append-only transition history accepted a deletion');
+    }
   } finally {
     await pool.end();
   }
@@ -624,36 +740,60 @@ process.env.DB_REBUILD_CONFIRM = 'rebuild-neighbourhood-store-test';
 await withDatabaseClient(config, async (client) => {
   await migrateUp(client);
   await assertVersions(client);
-  await verifyIdempotentCommands(config.connectionString);
-  await verifyAggregateVersioning(config.connectionString);
-  await verifyTransactionalMessaging(config.connectionString);
-  await verifyDurableJobs(config.connectionString);
-  await verifyVersionedConfiguration(config.connectionString);
-  await verifyReferenceModule(config.connectionString);
-  await verifyOtpIdentity(config.connectionString);
-  await verifyIdentitySessions(config.connectionString);
-  await verifyIdentityPreferences(config.connectionString);
-  await verifyVendorNetwork(config.connectionString);
-  await verifyVendorOnboarding(config.connectionString);
-  await verifyVendorPublication(config.connectionString);
-  await verifyInventoryReservations(config.connectionString);
-  await verifyCatalogueFreshnessModeration(config.connectionString);
-  await verifyCatalogueProducts(config.connectionString);
-  await verifyCustomerAddresses(config.connectionString);
-  await verifyCustomerDiscovery(config.connectionString);
-  await verifyCustomerCart(config.connectionString);
-  await verifyGroupedCheckout(config.connectionString);
-  await verifyVendorFulfilment(config.connectionString);
-  await verifyAdminControlPlane(config.connectionString);
-  await verifyPartnerLifecycle(config.connectionString);
-  await verifyPartnerAvailability(config.connectionString);
-  await verifyPartnerWaitPolicy(config.connectionString);
-  await verifyLocalNotifications(config.connectionString);
-  await verifyLaunchReadiness(config.connectionString);
-  await verifyVendorStaff(config.connectionString);
-  await verifyAssignmentCustody(config.connectionString);
-  await verifyMoneyLifecycle(config.connectionString);
-  await verifyIdentityAccess(config.connectionString);
+  // Each module's count is what its assertions actually did, measured by the
+  // shared `check`; nothing here is typed by hand. A module that still asserts
+  // with inline `throw new Error(...)` is not counted and reports null rather
+  // than a zero that would read as "asserts nothing".
+  const measured: Record<string, number | null> = {};
+  const measure = async (name: string, run: () => Promise<void>) => {
+    takeAssertionCount();
+    await run();
+    const count = takeAssertionCount();
+    measured[`${name}_assertions`] = count > 0 ? count : null;
+  };
+  await measure('database_pool_resilience', () =>
+    verifyDatabasePoolResilience(config.connectionString),
+  );
+  await measure('idempotent_commands', () => verifyIdempotentCommands(config.connectionString));
+  await measure('aggregate_versioning', () => verifyAggregateVersioning(config.connectionString));
+  await measure('transactional_messaging', () =>
+    verifyTransactionalMessaging(config.connectionString),
+  );
+  await measure('durable_jobs', () => verifyDurableJobs(config.connectionString));
+  await measure('versioned_configuration', () =>
+    verifyVersionedConfiguration(config.connectionString),
+  );
+  await measure('reference_module', () => verifyReferenceModule(config.connectionString));
+  await measure('otp_identity', () => verifyOtpIdentity(config.connectionString));
+  await measure('identity_sessions', () => verifyIdentitySessions(config.connectionString));
+  await measure('identity_preferences', () => verifyIdentityPreferences(config.connectionString));
+  await measure('vendor_network', () => verifyVendorNetwork(config.connectionString));
+  await measure('vendor_onboarding', () => verifyVendorOnboarding(config.connectionString));
+  await measure('vendor_publication', () => verifyVendorPublication(config.connectionString));
+  await measure('inventory_reservations', () =>
+    verifyInventoryReservations(config.connectionString),
+  );
+  await measure('catalogue_freshness_moderation', () =>
+    verifyCatalogueFreshnessModeration(config.connectionString),
+  );
+  await measure('catalogue_products', () => verifyCatalogueProducts(config.connectionString));
+  await measure('customer_addresses', () => verifyCustomerAddresses(config.connectionString));
+  await measure('customer_discovery', () => verifyCustomerDiscovery(config.connectionString));
+  await measure('customer_enrolment', () => verifyCustomerEnrolment(config.connectionString));
+  await measure('customer_cart', () => verifyCustomerCart(config.connectionString));
+  await measure('grouped_checkout', () => verifyGroupedCheckout(config.connectionString));
+  await measure('vendor_fulfilment', () => verifyVendorFulfilment(config.connectionString));
+  await measure('admin_control_plane', () => verifyAdminControlPlane(config.connectionString));
+  await measure('admin_onboarding', () => verifyAdminOnboarding(config.connectionString));
+  await measure('partner_lifecycle', () => verifyPartnerLifecycle(config.connectionString));
+  await measure('partner_availability', () => verifyPartnerAvailability(config.connectionString));
+  await measure('partner_wait_policy', () => verifyPartnerWaitPolicy(config.connectionString));
+  await measure('local_notifications', () => verifyLocalNotifications(config.connectionString));
+  await measure('launch_readiness', () => verifyLaunchReadiness(config.connectionString));
+  await measure('vendor_staff', () => verifyVendorStaff(config.connectionString));
+  await measure('assignment_custody', () => verifyAssignmentCustody(config.connectionString));
+  await measure('money_lifecycle', () => verifyMoneyLifecycle(config.connectionString));
+  await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);
   const secondHash = await seedFixtures(client);
@@ -998,34 +1138,9 @@ await withDatabaseClient(config, async (client) => {
 
   writeEvent('database.lifecycle.verified', {
     fixture_hash: rebuiltHash,
-    aggregate_scenarios: 6,
-    access_scenarios: 14,
-    configuration_scenarios: 8,
-    idempotency_scenarios: 5,
-    identity_isolation_scenarios: 8,
-    job_scenarios: 7,
-    messaging_scenarios: 6,
+    ...measured,
+    assertions_note: 'null: the module asserts with inline throws and is not yet counted',
     migrations: statuses.length,
-    otp_scenarios: 8,
-    reference_scenarios: 5,
-    preference_scenarios: 12,
-    session_scenarios: 9,
-    vendor_network_scenarios: 12,
-    vendor_onboarding_scenarios: 15,
-    vendor_publication_scenarios: 10,
-    inventory_reservation_scenarios: 11,
-    catalogue_freshness_moderation_scenarios: 6,
-    catalogue_product_scenarios: 11,
-    customer_address_scenarios: 12,
-    customer_discovery_scenarios: 9,
-    customer_cart_scenarios: 9,
-    vendor_staff_scenarios: 10,
-    assignment_custody_scenarios: 11,
-    vendor_fulfilment_scenarios: 20,
-    partner_lifecycle_scenarios: 26,
-    launch_readiness_scenarios: 13,
-    money_lifecycle_scenarios: 22,
-    admin_control_plane_scenarios: 13,
     target: 'test',
   });
 });

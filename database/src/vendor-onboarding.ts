@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -11,6 +12,8 @@ import {
   type ProtectedObjectStorage,
   type StorageScanScenario,
 } from './protected-object-storage.js';
+import { transaction } from './transaction.js';
+import { grantRoleAssignment } from './role-grants.js';
 
 export type OnboardingEntryKind = 'APPLICATION' | 'INVITATION' | 'LEAD';
 export type OnboardingState =
@@ -81,8 +84,24 @@ export class VendorOnboardingInputError extends Error {
 export class VendorOnboardingNotFoundError extends Error {
   readonly code = 'RESOURCE_NOT_FOUND';
 }
+/**
+ * Carries which kind of conflict it is.
+ *
+ * The code was the literal string 'CONFLICT', which is not a stable error code,
+ * so the filter ignored it and the response read as VERSION_CONFLICT -- "Refresh
+ * and try again" -- for all thirteen refusals. Only the stale-version ones are
+ * fixed by reloading.
+ */
 export class VendorOnboardingConflictError extends Error {
-  readonly code = 'CONFLICT';
+  readonly code: 'ORDER_STATE_CONFLICT' | 'VERSION_CONFLICT';
+
+  constructor(
+    message: string,
+    code: 'ORDER_STATE_CONFLICT' | 'VERSION_CONFLICT' = 'ORDER_STATE_CONFLICT',
+  ) {
+    super(message);
+    this.code = code;
+  }
 }
 export class VendorOnboardingAuthorizationError extends Error {
   readonly code = 'FORBIDDEN';
@@ -91,11 +110,21 @@ export class VendorOnboardingIncompleteError extends Error {
   readonly code = 'UNPROCESSABLE_ENTITY';
 }
 
-const SYNTHETIC_NAME = /^SYNTH [A-Za-z0-9][A-Za-z0-9 &'().-]{1,118}$/;
-const BUSINESS_REFERENCE = /^SYNTH-BIZ-[A-Z0-9-]{6,64}$/;
-const PAYOUT_REFERENCE = /^SYNTH-PAYOUT-[A-Z0-9-]{6,64}$/;
-const INVITATION_REFERENCE = /^SYNTH-INV-[A-Z0-9-]{6,64}$/;
-const EVIDENCE_REFERENCE = /^SYNTH-EVIDENCE-[A-Z0-9-]{6,64}$/;
+const NAME = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'().,-]{1,118}$/u;
+const BUSINESS_REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{5,127}$/;
+const PAYOUT_REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{5,127}$/;
+const INVITATION_REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{5,127}$/;
+
+/**
+ * How long an unclaimed invitation stays claimable.
+ *
+ * D-15 requires an expiring one-use invitation and does not name a period, so this is a
+ * default an owner can revise rather than a decision hidden in a call site. Fourteen
+ * days is long enough for a vendor to be reached and to sign up, and short enough that
+ * a reference which leaks does not stay usable indefinitely.
+ */
+const INVITATION_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
+const EVIDENCE_REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{5,127}$/;
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
 const REQUIRED_DOCUMENTS = new Set<VerificationDocumentKind>([
   'BUSINESS_REGISTRATION',
@@ -104,6 +133,7 @@ const REQUIRED_DOCUMENTS = new Set<VerificationDocumentKind>([
 ]);
 
 interface CaseRow {
+  readonly invitation_expires_at: Date | null;
   readonly applicant_user_id: string | null;
   readonly business_profile_reference: string | null;
   readonly created_by_user_id: string | null;
@@ -173,8 +203,8 @@ function requireReference(value: string, pattern: RegExp, label: string): string
 
 function requireName(value: string): string {
   const normalized = value.trim().replace(/\s+/g, ' ');
-  if (!SYNTHETIC_NAME.test(normalized)) {
-    throw new VendorOnboardingInputError('Company-test vendor names must be explicitly synthetic');
+  if (!NAME.test(normalized)) {
+    throw new VendorOnboardingInputError('Vendor name contains unsupported characters');
   }
   return normalized;
 }
@@ -206,7 +236,7 @@ function requireCoordinate(value: number, minimum: number, maximum: number): num
 
 function requireProfile(input: ProposedVendorProfile) {
   if (input.category !== 'FRUIT_VEGETABLE') {
-    throw new VendorOnboardingInputError('Category is not enabled for the synthetic pilot');
+    throw new VendorOnboardingInputError('Category is not currently enabled');
   }
   if (
     !Number.isSafeInteger(input.minimum_order_minor) ||
@@ -242,21 +272,6 @@ function requireProfile(input: ProposedVendorProfile) {
   };
 }
 
-async function transaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 async function lockCase(client: PoolClient, caseId: UuidV7, expectedVersion?: number) {
   const result = await client.query<CaseRow>(
     'SELECT * FROM marketplace.vendor_onboarding_cases WHERE onboarding_case_id=$1 FOR UPDATE',
@@ -265,7 +280,7 @@ async function lockCase(client: PoolClient, caseId: UuidV7, expectedVersion?: nu
   const row = result.rows[0];
   if (!row) throw new VendorOnboardingNotFoundError('Onboarding case was not found');
   if (expectedVersion !== undefined && row.version !== expectedVersion) {
-    throw new VendorOnboardingConflictError('Onboarding case version is stale');
+    throw new VendorOnboardingConflictError('Onboarding case version is stale', 'VERSION_CONFLICT');
   }
   return row;
 }
@@ -351,7 +366,7 @@ export class VendorOnboardingService {
     readonly storage: ProtectedObjectStorage;
   }) {
     this.#storage = input.storage;
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-vendor-onboarding',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
@@ -370,6 +385,7 @@ export class VendorOnboardingService {
     readonly context: RequestContext;
     readonly created_by_user_id?: UuidV7 | null;
     readonly entry_kind: OnboardingEntryKind;
+    readonly invitation_expires_at?: Date | null;
     readonly invitation_reference?: string | null;
     readonly now?: Date;
   }): Promise<UuidV7> {
@@ -392,8 +408,9 @@ export class VendorOnboardingService {
       await client.query(
         `INSERT INTO marketplace.vendor_onboarding_cases
         (onboarding_case_id, entry_kind, lifecycle_state, applicant_user_id, created_by_user_id,
-         invitation_reference, current_reason_code, request_id, correlation_id, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)`,
+         invitation_reference, invitation_expires_at, current_reason_code, request_id,
+         correlation_id, created_at, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)`,
         [
           caseId,
           input.entry_kind,
@@ -401,6 +418,7 @@ export class VendorOnboardingService {
           input.applicant_user_id ?? null,
           input.created_by_user_id ?? null,
           input.invitation_reference ?? null,
+          input.invitation_expires_at ?? null,
           reasonCode,
           contextIds.requestId,
           contextIds.correlationId,
@@ -440,12 +458,19 @@ export class VendorOnboardingService {
   async createInvitation(input: {
     readonly applicant_user_id?: UuidV7;
     readonly context: RequestContext;
+    readonly expires_at?: Date;
     readonly invitation_reference: string;
     readonly now?: Date;
   }): Promise<UuidV7> {
     const admin = requireAdmin(input.context);
+    const issuedAt = input.now ?? new Date();
+    const expiresAt = input.expires_at ?? new Date(issuedAt.getTime() + INVITATION_LIFETIME_MS);
+    if (expiresAt.getTime() <= issuedAt.getTime()) {
+      throw new VendorOnboardingInputError('Invitation expiry must be after it is issued');
+    }
     return this.#create({
       applicant_user_id: input.applicant_user_id ?? null,
+      invitation_expires_at: expiresAt,
       context: input.context,
       created_by_user_id: admin,
       entry_kind: 'INVITATION',
@@ -494,7 +519,10 @@ export class VendorOnboardingService {
       const row = found.rows[0];
       if (!row) throw new VendorOnboardingNotFoundError('Invitation was not found');
       if (row.version !== input.expected_version)
-        throw new VendorOnboardingConflictError('Onboarding case version is stale');
+        throw new VendorOnboardingConflictError(
+          'Onboarding case version is stale',
+          'VERSION_CONFLICT',
+        );
       if (
         row.lifecycle_state !== 'INVITED' ||
         (row.applicant_user_id !== null && row.applicant_user_id !== input.applicant_user_id)
@@ -502,6 +530,14 @@ export class VendorOnboardingService {
         throw new VendorOnboardingAuthorizationError(
           'Invitation cannot be claimed by this identity',
         );
+      }
+      // Refused separately from the identity check so an expired invitation says so,
+      // rather than reading as though the caller were the wrong person.
+      if (
+        row.invitation_expires_at !== null &&
+        row.invitation_expires_at.getTime() <= now.getTime()
+      ) {
+        throw new VendorOnboardingAuthorizationError('Invitation has expired');
       }
       const version = row.version + 1;
       await client.query(
@@ -961,21 +997,17 @@ export class VendorOnboardingService {
       // without a claimed applicant (applicant_user_id null) has no user to
       // own it, so the grant is skipped in that case.
       if (row.applicant_user_id) {
-        const ownerRoleAssignmentId = createUuidV7({ now_ms: now.getTime() });
-        await client.query(
-          `INSERT INTO marketplace.role_assignments
-             (role_assignment_id, user_id, role_key, valid_from, granted_by_user_id,
-              request_id, correlation_id)
-           VALUES ($1,$2,'VENDOR_OWNER',$3,$4,$5,$6)`,
-          [
-            ownerRoleAssignmentId,
-            row.applicant_user_id,
-            now,
-            reviewer,
-            contextIds.requestId,
-            contextIds.correlationId,
-          ],
-        );
+        // Through the one grant path, so the access history records that the
+        // approval is what made them an owner -- this write used to skip that.
+        const ownerRoleAssignmentId = await grantRoleAssignment(client, {
+          user_id: parseUuidV7(row.applicant_user_id),
+          role_key: 'VENDOR_OWNER',
+          granted_by_user_id: reviewer,
+          reason_code: 'ONBOARDING_APPROVED',
+          now,
+          request_id: contextIds.requestId,
+          correlation_id: contextIds.correlationId,
+        });
         await client.query(
           `INSERT INTO marketplace.staff_memberships
              (staff_membership_id, role_assignment_id, user_id, vendor_location_id)
@@ -1343,6 +1375,63 @@ export class VendorOnboardingService {
     );
     if (!result.rows[0]) throw new VendorOnboardingNotFoundError('Onboarding case was not found');
     return this.#summary(result.rows[0]);
+  }
+
+  /**
+   * The review queue.
+   *
+   * The console could open a case by id and nothing else, so an admin could only
+   * review an application whose UUID had reached them through some channel
+   * outside the product — which meant self-service vendor onboarding had no
+   * usable path to approval at all. Cases awaiting a decision come first;
+   * decided ones stay visible so a reviewer can find what they just did.
+   */
+  async listForAdmin(input: { readonly context: RequestContext; readonly limit?: number }): Promise<
+    readonly {
+      readonly onboarding_case_id: UuidV7;
+      readonly lifecycle_state: string;
+      readonly entry_kind: string;
+      readonly business_profile_reference: string | null;
+      readonly document_count: number;
+      readonly awaiting_review: boolean;
+      readonly updated_at: Date;
+    }[]
+  > {
+    requireAdmin(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const result = await this.#pool.query<{
+      onboarding_case_id: string;
+      lifecycle_state: string;
+      entry_kind: string;
+      business_profile_reference: string | null;
+      document_count: string;
+      awaiting_review: boolean;
+      updated_at: Date;
+    }>(
+      `SELECT c.onboarding_case_id, c.lifecycle_state, c.entry_kind,
+              c.business_profile_reference, c.updated_at,
+              c.lifecycle_state IN ('PENDING', 'UNDER_REVIEW', 'REVERIFICATION') AS awaiting_review,
+              (SELECT count(*) FROM marketplace.vendor_verification_documents d
+                WHERE d.onboarding_case_id = c.onboarding_case_id)::text AS document_count
+         FROM marketplace.vendor_onboarding_cases c
+        ORDER BY (c.lifecycle_state IN ('PENDING', 'UNDER_REVIEW', 'REVERIFICATION')) DESC,
+                 c.updated_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+    return Object.freeze(
+      result.rows.map((row) =>
+        Object.freeze({
+          awaiting_review: row.awaiting_review,
+          business_profile_reference: row.business_profile_reference,
+          document_count: Number(row.document_count),
+          entry_kind: row.entry_kind,
+          lifecycle_state: row.lifecycle_state,
+          onboarding_case_id: parseUuidV7(row.onboarding_case_id),
+          updated_at: row.updated_at,
+        }),
+      ),
+    );
   }
 
   async getForAdmin(input: {

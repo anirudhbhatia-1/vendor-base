@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -7,6 +8,7 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import { resolveConfiguration } from './versioned-configuration.js';
+import { transaction as tx } from './transaction.js';
 
 export class CustomerAddressInputError extends Error {}
 export class CustomerAddressNotFoundError extends Error {}
@@ -66,8 +68,8 @@ interface AddressRow {
   readonly version: number;
 }
 
-const addressReference = /^SYNTH-ADDRESS-[A-Z0-9-]{4,64}$/;
-const addressLabel = /^SYNTH [A-Za-z0-9][A-Za-z0-9 &'().,-]{1,80}$/;
+const addressReference = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const addressLabel = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'().,/-]{1,80}$/u;
 const pinCode = /^[1-9][0-9]{5}$/;
 
 function customer(context: RequestContext): UuidV7 {
@@ -119,26 +121,11 @@ const selectColumns = `customer_address_id, address_reference, label, pin_code,
   ST_X(coordinates::geometry)::text AS longitude,
   coordinate_source, landmark, delivery_instructions, is_selected, lifecycle_state, version`;
 
-async function tx<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const value = await work(client);
-    await client.query('COMMIT');
-    return value;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 export class CustomerAddressService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-customer-addresses',
       max: 8,
@@ -194,9 +181,9 @@ export class CustomerAddressService {
   }): Promise<CustomerAddress> {
     const userId = customer(input.context);
     if (!addressReference.test(input.address_reference))
-      throw new CustomerAddressInputError('Address reference must be a synthetic reference');
+      throw new CustomerAddressInputError('Address reference is invalid');
     if (!addressLabel.test(input.label))
-      throw new CustomerAddressInputError('Address label must be a synthetic label');
+      throw new CustomerAddressInputError('Address label contains unsupported characters');
     if (!pinCode.test(input.pin_code))
       throw new CustomerAddressInputError('Pin code must be six digits');
     requireCoordinates(input.latitude, input.longitude);
@@ -307,7 +294,7 @@ export class CustomerAddressService {
   }): Promise<CustomerAddress> {
     const userId = customer(input.context);
     if (!addressLabel.test(input.label))
-      throw new CustomerAddressInputError('Address label must be a synthetic label');
+      throw new CustomerAddressInputError('Address label contains unsupported characters');
     if (!pinCode.test(input.pin_code))
       throw new CustomerAddressInputError('Pin code must be six digits');
     if (!Number.isSafeInteger(input.expected_version) || input.expected_version < 1)

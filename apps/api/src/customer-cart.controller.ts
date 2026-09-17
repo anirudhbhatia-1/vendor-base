@@ -1,47 +1,27 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
-  ForbiddenException,
   Get,
   Inject,
-  NotFoundException,
   Param,
   Post,
   Put,
 } from '@nestjs/common';
 import {
-  CustomerCartAuthorizationError,
-  CustomerCartConflictError,
-  CustomerCartInputError,
-  CustomerCartNotFoundError,
   CustomerCartService,
+  CustomerDiscoveryService,
   type FulfilmentMethod,
   type SubstitutionPreference,
 } from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
-import { CUSTOMER_CART } from './tokens.js';
-
+import { CUSTOMER_CART, CUSTOMER_DISCOVERY } from './tokens.js';
+import { integerField, object, stringField, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const fulfilmentMethods = ['CUSTOMER_PICKUP', 'PLATFORM_DELIVERY', 'VENDOR_DELIVERY'] as const;
 const substitutionPreferences = ['ALLOW_SAME_STORE', 'ASK_CUSTOMER', 'NO_SUBSTITUTION'] as const;
 
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function stringField(body: Record<string, unknown>, key: string): string {
-  const found = body[key];
-  if (typeof found !== 'string') throw new BadRequestException();
-  return found;
-}
-function integerField(body: Record<string, unknown>, key: string): number {
-  const found = body[key];
-  if (!Number.isSafeInteger(found)) throw new BadRequestException();
-  return found as number;
-}
 function optionalFulfilmentMethod(body: Record<string, unknown>): {
   readonly fulfilment_method?: FulfilmentMethod;
 } {
@@ -64,21 +44,6 @@ function optionalSubstitutionPreference(body: Record<string, unknown>): {
     throw new BadRequestException();
   return { substitution_preference: found as SubstitutionPreference };
 }
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function map(error: unknown): never {
-  if (error instanceof CustomerCartInputError) throw new BadRequestException(error.message);
-  if (error instanceof CustomerCartNotFoundError) throw new NotFoundException();
-  if (error instanceof CustomerCartConflictError) throw new ConflictException(error.message);
-  if (error instanceof CustomerCartAuthorizationError) throw new ForbiddenException();
-  throw error;
-}
-
 const ownsCart = RequireAuthorization({
   capability: 'customer.cart.manage',
   conceal_resource: true,
@@ -86,7 +51,10 @@ const ownsCart = RequireAuthorization({
 
 @Controller('customer/cart')
 export class CustomerCartController {
-  constructor(@Inject(CUSTOMER_CART) private readonly cart: CustomerCartService) {}
+  constructor(
+    @Inject(CUSTOMER_CART) private readonly cart: CustomerCartService,
+    @Inject(CUSTOMER_DISCOVERY) private readonly discovery: CustomerDiscoveryService,
+  ) {}
 
   @Get()
   @ownsCart
@@ -94,7 +62,7 @@ export class CustomerCartController {
     try {
       return await this.cart.currentCart({ context: currentRequestContext() });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -108,7 +76,7 @@ export class CustomerCartController {
         customer_address_id: uuid(stringField(body, 'customer_address_id')),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -117,7 +85,7 @@ export class CustomerCartController {
   async addLine(@Body() raw: unknown) {
     const body = object(raw);
     try {
-      return await this.cart.addLine({
+      const cart = await this.cart.addLine({
         context: currentRequestContext(),
         vendor_location_id: uuid(stringField(body, 'vendor_location_id')),
         catalogue_variant_id: uuid(stringField(body, 'catalogue_variant_id')),
@@ -125,8 +93,15 @@ export class CustomerCartController {
         ...optionalFulfilmentMethod(body),
         ...optionalSubstitutionPreference(body),
       });
+      // Step 6.3 requirement 5 measures search-to-cart conversion. Recorded only
+      // after the line is actually held, so a rejected add is never counted, and
+      // only when the client attributes the add to search results.
+      if (body['from_search'] === true) {
+        await this.discovery.recordSearchToCart({ context: currentRequestContext() });
+      }
+      return cart;
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -140,9 +115,10 @@ export class CustomerCartController {
         cart_line_id: uuid(lineId),
         expected_version: integerField(body, 'expected_version'),
         quantity: integerField(body, 'quantity'),
+        ...optionalSubstitutionPreference(body),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -155,7 +131,7 @@ export class CustomerCartController {
         cart_line_id: uuid(lineId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -176,7 +152,7 @@ export class CustomerCartController {
           typeof body['customer_note'] === 'string' ? (body['customer_note'] as string) : null,
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -186,7 +162,7 @@ export class CustomerCartController {
     try {
       return { outcomes: await this.cart.revalidate({ context: currentRequestContext() }) };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }

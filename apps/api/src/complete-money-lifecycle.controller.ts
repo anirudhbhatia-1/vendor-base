@@ -1,60 +1,19 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
-  ForbiddenException,
   Get,
   HttpCode,
   Inject,
-  NotFoundException,
   Param,
   Post,
 } from '@nestjs/common';
-import {
-  CompleteMoneyLifecycleService,
-  MoneyAuthorizationError,
-  MoneyInputError,
-  MoneyNotFoundError,
-  MoneyStateError,
-} from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { CompleteMoneyLifecycleService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
-
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function string(value: Record<string, unknown>, key: string): string {
-  if (typeof value[key] !== 'string') throw new BadRequestException();
-  return value[key];
-}
-function integer(value: Record<string, unknown>, key: string, minimum = 0): number {
-  const found = value[key];
-  if (!Number.isSafeInteger(found) || Number(found) < minimum) throw new BadRequestException();
-  return Number(found);
-}
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function optionalUuid(value: Record<string, unknown>, key: string): UuidV7 | undefined {
-  return value[key] === undefined ? undefined : uuid(string(value, key));
-}
-function translate(error: unknown): never {
-  if (error instanceof MoneyInputError || error instanceof TypeError)
-    throw new BadRequestException(error.message);
-  if (error instanceof MoneyNotFoundError) throw new NotFoundException();
-  if (error instanceof MoneyStateError) throw new ConflictException({ error_code: error.code });
-  if (error instanceof MoneyAuthorizationError) throw new ForbiddenException();
-  throw error;
-}
-
+import { integerField, object, optionalUuid, stringField, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const manage = RequireAuthorization({
   admin_scope: { kind: 'GLOBAL' },
   capability: 'admin.finance.ledger_manage',
@@ -88,13 +47,14 @@ export class CompleteMoneyAdminController {
     const body = object(raw);
     try {
       return await this.money.voidAuthorization({
-        command_reference: string(body, 'command_reference'),
+        command_reference: stringField(body, 'command_reference'),
         context: currentRequestContext(),
-        expected_version: integer(body, 'expected_version', 1),
+        expected_version: integerField(body, 'expected_version', 1),
         payment_transaction_id: uuid(id),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -102,8 +62,8 @@ export class CompleteMoneyAdminController {
   @manage
   async createPayoutBatch(@Body() raw: unknown) {
     const body = object(raw);
-    const beneficiaryKind = string(body, 'beneficiary_kind');
-    const providerScenario = string(body, 'provider_scenario');
+    const beneficiaryKind = stringField(body, 'beneficiary_kind');
+    const providerScenario = stringField(body, 'provider_scenario');
     if (!['VENDOR', 'PARTNER'].includes(beneficiaryKind)) throw new BadRequestException();
     if (!['SUCCESS', 'DECLINE', 'UNKNOWN', 'MALFORMED'].includes(providerScenario))
       throw new BadRequestException();
@@ -114,7 +74,8 @@ export class CompleteMoneyAdminController {
         provider_scenario: providerScenario as 'DECLINE' | 'MALFORMED' | 'SUCCESS' | 'UNKNOWN',
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -124,7 +85,8 @@ export class CompleteMoneyAdminController {
     try {
       return await this.money.scheduleDailyPayoutJob({ context: currentRequestContext() });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -138,21 +100,22 @@ export class CompleteMoneyAdminController {
         context: currentRequestContext(),
         rows: body['rows'].map((rawRow) => {
           const row = object(rawRow);
-          const kind = string(row, 'operation_kind');
-          const state = string(row, 'provider_state');
+          const kind = stringField(row, 'operation_kind');
+          const state = stringField(row, 'provider_state');
           if (!['PAYMENT', 'PAYOUT', 'REFUND'].includes(kind)) throw new BadRequestException();
           if (!['FAILED', 'SUCCEEDED', 'UNKNOWN'].includes(state)) throw new BadRequestException();
           return {
-            amount_minor: integer(row, 'amount_minor', 1),
+            amount_minor: integerField(row, 'amount_minor', 1),
             operation_kind: kind as 'PAYMENT' | 'PAYOUT' | 'REFUND',
-            provider_operation_reference: string(row, 'provider_operation_reference'),
+            provider_operation_reference: stringField(row, 'provider_operation_reference'),
             provider_state: state as 'FAILED' | 'SUCCEEDED' | 'UNKNOWN',
           };
         }),
-        statement_reference: string(body, 'statement_reference'),
+        statement_reference: stringField(body, 'statement_reference'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -163,31 +126,32 @@ export class CompleteMoneyAdminController {
     if (!Array.isArray(body['entries'])) throw new BadRequestException();
     try {
       return await this.money.proposeCorrection({
-        amount_minor: integer(body, 'amount_minor', 1),
+        amount_minor: integerField(body, 'amount_minor', 1),
         context: currentRequestContext(),
-        correction_reference: string(body, 'correction_reference'),
+        correction_reference: stringField(body, 'correction_reference'),
         entries: body['entries'].map((rawEntry) => {
           const entry = object(rawEntry);
           const partnerUserId = optionalUuid(entry, 'partner_user_id');
           const vendorLocationId = optionalUuid(entry, 'vendor_location_id');
           return {
-            account_reference: string(entry, 'account_reference'),
-            component: string(entry, 'component'),
-            credit_minor: integer(entry, 'credit_minor'),
-            debit_minor: integer(entry, 'debit_minor'),
+            account_reference: stringField(entry, 'account_reference'),
+            component: stringField(entry, 'component'),
+            credit_minor: integerField(entry, 'credit_minor', 0),
+            debit_minor: integerField(entry, 'debit_minor', 0),
             ...(partnerUserId ? { partner_user_id: partnerUserId } : {}),
             ...(entry['source_order_reference'] === undefined
               ? {}
-              : { source_order_reference: string(entry, 'source_order_reference') }),
+              : { source_order_reference: stringField(entry, 'source_order_reference') }),
             ...(vendorLocationId ? { vendor_location_id: vendorLocationId } : {}),
           };
         }),
-        evidence_reference: string(body, 'evidence_reference'),
-        original_ledger_transaction_id: uuid(string(body, 'original_ledger_transaction_id')),
-        reason_code: string(body, 'reason_code'),
+        evidence_reference: stringField(body, 'evidence_reference'),
+        original_ledger_transaction_id: uuid(stringField(body, 'original_ledger_transaction_id')),
+        reason_code: stringField(body, 'reason_code'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -199,11 +163,12 @@ export class CompleteMoneyAdminController {
     try {
       return await this.money.approveAndPostCorrection({
         context: currentRequestContext(),
-        expected_version: integer(body, 'expected_version', 1),
+        expected_version: integerField(body, 'expected_version', 1),
         financial_correction_id: uuid(id),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -217,7 +182,8 @@ export class CompleteMoneyAdminController {
         partner_earnings_record_id: uuid(id),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -227,7 +193,8 @@ export class CompleteMoneyAdminController {
     try {
       return await this.money.financeQueue({ context: currentRequestContext() });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }
@@ -248,7 +215,8 @@ export class CustomerFinanceController {
         context: currentRequestContext(),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }
@@ -269,7 +237,8 @@ export class VendorFinanceController {
         vendor_location_id: uuid(id),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }
@@ -287,7 +256,8 @@ export class PartnerFinanceController {
     try {
       return await this.money.partnerStatement({ context: currentRequestContext() });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }

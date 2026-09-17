@@ -2,8 +2,11 @@
   "extends": ["expo/tsconfig.base", "../../tsconfig.base.json"],
   "compilerOptions": {
     "jsx": "react-jsx",
+    // Errors inside third-party declarations only (`expo-asset`); this app's own code
+    // stays fully checked. Confirmed with `tsc --skipLibCheck false`.
+    "skipLibCheck": true,
     "lib": ["ES2022"],
     "types": ["react", "react-native"]
   },
-  "include": ["App.tsx"]
+  "include": ["app/**/*.ts", "app/**/*.tsx", "*.ts", "*.tsx"]
 }

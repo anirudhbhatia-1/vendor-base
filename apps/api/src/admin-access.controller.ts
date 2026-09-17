@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
   ForbiddenException,
   HttpCode,
@@ -10,8 +9,6 @@ import {
   Post,
 } from '@nestjs/common';
 import {
-  AccessConflictError,
-  AccessInputError,
   IdentityAccessService,
   type AdminRole,
   type AdminScopeKind,
@@ -20,27 +17,8 @@ import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ACCESS_IDENTITY } from './tokens.js';
-
-function object(value: unknown) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function text(value: Record<string, unknown>, key: string) {
-  if (typeof value[key] !== 'string') throw new BadRequestException();
-  return value[key];
-}
-function optionalDate(value: Record<string, unknown>, key: string) {
-  if (value[key] === undefined || value[key] === null) return undefined;
-  const date = new Date(text(value, key));
-  if (!Number.isFinite(date.getTime())) throw new BadRequestException();
-  return date;
-}
-function translate(error: unknown): never {
-  if (error instanceof AccessInputError || error instanceof TypeError)
-    throw new BadRequestException();
-  if (error instanceof AccessConflictError) throw new ConflictException(error.message);
-  throw error;
-}
+import { object, optionalDate, stringField } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const manage = RequireAuthorization({
   capability: 'admin.access.role_manage',
   admin_scope: { kind: 'GLOBAL' },
@@ -58,23 +36,26 @@ export class AdminAccessController {
     const value = object(raw);
     const context = currentRequestContext();
     if (context.actor?.actor_kind !== 'admin') throw new ForbiddenException();
-    const scopeKind = text(value, 'scope_kind') as AdminScopeKind;
+    const scopeKind = stringField(value, 'scope_kind') as AdminScopeKind;
     const validUntil = optionalDate(value, 'valid_until');
     try {
       const roleAssignmentId = await this.access.grantAdminMembership({
         context,
         granted_by_user_id: context.actor.actor_id,
-        role: text(value, 'role') as AdminRole,
+        role: stringField(value, 'role') as AdminRole,
         scope: {
           kind: scopeKind,
-          ...(scopeKind === 'GLOBAL' ? {} : { scope_id: parseUuidV7(text(value, 'scope_id')) }),
+          ...(scopeKind === 'GLOBAL'
+            ? {}
+            : { scope_id: parseUuidV7(stringField(value, 'scope_id')) }),
         },
         user_id: parseUuidV7(userId),
         ...(validUntil ? { valid_until: validUntil } : {}),
       });
       return { role_assignment_id: roleAssignmentId };
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -90,12 +71,13 @@ export class AdminAccessController {
     try {
       await this.access.revokeRole({
         context: currentRequestContext(),
-        reason_code: text(value, 'reason_code'),
+        reason_code: stringField(value, 'reason_code'),
         role_assignment_id: parseUuidV7(roleAssignmentId),
         user_id: parseUuidV7(userId),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }

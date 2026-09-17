@@ -71,6 +71,26 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   smallest affected object"; today the smallest addressable object a customer support workflow
   can act on is the vendor_order. Line-level support scoping is a later refinement.
 
+## Modules (16 September 2026)
+
+`VendorFulfilmentService` (`database/src/vendor-fulfilment.ts`) is the one object the API and the
+worker construct; since the tech-debt audit's Phase D the work is in five modules, by who acts and
+on what, with what they share in `vendor-order-core.ts` (errors, shapes, lock, event, holds
+release, authorization release, the one order-summary query):
+
+| Module | Concern |
+| --- | --- |
+| `vendor-order-transitions.ts` | accept, decline, start picking, mark ready; the system's expiry of an unanswered order |
+| `order-picking.ts` | lines found / missing / substitution / weight; the customer's decision and its timeout; the pick list |
+| `order-handover.ts` | the three collection-code issuers, who must be at the counter, `completePickup`, inventory settlement |
+| `customer-orders.ts` | history, receipt, tracking, cancellation, rating, support cases |
+| `vendor-order-views.ts` | the board, one order, the store's numbers and open cases |
+
+Two behaviours changed with the split. The shop's response deadline (`accept_by`) is written by
+checkout at placement — before, only the verifier ever set one, so no real order carried a
+countdown and none ever expired. And the pick list is scoped to the route's location, so a member
+of one store can no longer read another store's picks by order id.
+
 ## API
 
 - **`vendor/locations/:vendor_location_id/orders`** (`vendor.order.fulfil`): `accept`, `decline`,
@@ -83,7 +103,7 @@ the vendor_order or line-snapshot invariants Phase 7 established:
 
 ## Verification
 
-`database/scripts/verify-vendor-fulfilment.ts` — 14 connected scenarios driving Phase 7 into
+`database/scripts/verify-vendor-fulfilment.ts` — connected scenarios (145 counted assertions) driving Phase 7 into
 Phase 8: a real two-store checkout is placed, one order is declined and its reservations released
 without touching the sibling's, the other is accepted (with stale-version rejection covered), a
 line is picked, mark-ready fails first while lines are unresolved and succeeds after, an OTP is
@@ -92,7 +112,7 @@ the right OTP completes pickup and clears the hash, inventory commits transition
 holds to `COMMITTED`, the customer's history and receipt reflect the outcome, rating is
 single-shot, and a support case can be opened. A third store fixture is used to drive the
 system-timeout path in isolation. Wired into `verify-lifecycle.ts` as
-`vendor_fulfilment_scenarios`.
+`vendor_fulfilment_assertions`.
 
 ## Boundaries
 

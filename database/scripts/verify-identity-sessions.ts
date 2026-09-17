@@ -192,6 +192,7 @@ export async function verifyIdentitySessions(connectionString: string): Promise<
         }),
       SessionInvalidError,
     );
+
     await sessions.authenticateAccess({
       access_token: rotated.access_token,
       context: context(),
@@ -205,6 +206,38 @@ export async function verifyIdentitySessions(connectionString: string): Promise<
           refresh_token: first.refresh_token,
         }),
       SessionReplayDetectedError,
+    );
+    // The replay is already proven to be refused and to invalidate the rotated access
+    // token. These add what that leaves open: the reason is recorded for an operator
+    // reading the session later, and *every* refresh token in the family is dead, not
+    // only the access token. Whoever holds the newer refresh token must not be able to
+    // keep the session alive -- which is the whole point of revoking on replay.
+    const afterReplay = await pool.query<{ revoke_reason: string | null; state: string }>(
+      `SELECT state, revoke_reason FROM marketplace.sessions WHERE session_id = $1`,
+      [first.session_id],
+    );
+    if (
+      afterReplay.rows[0]?.state !== 'REVOKED' ||
+      afterReplay.rows[0].revoke_reason !== 'REFRESH_REPLAY'
+    ) {
+      throw new Error('Refresh replay did not record a revoked session with its reason');
+    }
+    const survivingTokens = await pool.query<{ active: string }>(
+      `SELECT count(*)::text AS active FROM marketplace.session_refresh_tokens
+        WHERE session_id = $1 AND status = 'ACTIVE'`,
+      [first.session_id],
+    );
+    if (survivingTokens.rows[0]?.active !== '0') {
+      throw new Error('A refresh token survived the replay revocation');
+    }
+    await rejectsWith(
+      () =>
+        sessions.refresh({
+          context: context(),
+          now: new Date(base.getTime() + 61_500),
+          refresh_token: rotated.refresh_token,
+        }),
+      SessionInvalidError,
     );
     await rejectsWith(
       () =>

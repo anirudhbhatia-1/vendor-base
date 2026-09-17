@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import { createHash } from 'node:crypto';
 import {
   createUuidV7,
@@ -7,15 +8,25 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { listDeadLetterEvents, recoverDeadLetterEvent } from './transactional-messaging.js';
+import { transaction as tx } from './transaction.js';
 
 export class AdminControlInputError extends Error {}
 export class AdminControlNotFoundError extends Error {}
 export class AdminControlStateError extends Error {}
 export class AdminControlAuthorizationError extends Error {}
-const SYNTH = /^SYNTH-[A-Z0-9-]{4,64}$/;
+const REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
 function admin(context: RequestContext) {
   if (context.actor?.actor_kind !== 'admin') throw new AdminControlAuthorizationError();
+  return context.actor.actor_id;
+}
+/** An operator, or the worker acting on a committed domain event. */
+function operationsAutomation(context: RequestContext) {
+  const kind = context.actor?.actor_kind;
+  if (!context.actor || (kind !== 'admin' && kind !== 'system')) {
+    throw new AdminControlAuthorizationError();
+  }
   return context.actor.actor_id;
 }
 function operator(context: RequestContext) {
@@ -28,28 +39,13 @@ function reason(value: string) {
   return value;
 }
 function marked(value: string) {
-  if (!SYNTH.test(value)) throw new AdminControlInputError('Reference is not synthetic');
+  if (!REFERENCE.test(value)) throw new AdminControlInputError('Reference is invalid');
   return value;
 }
-async function tx<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
-  }
-}
-
 export class AdminControlPlaneService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-admin-control',
       max: 10,
@@ -68,17 +64,135 @@ export class AdminControlPlaneService {
   ) q ORDER BY risk_minor DESC,created_at ASC LIMIT 100`);
     return { items: r.rows };
   }
+  /**
+   * Checkout groups and the vendor orders under them.
+   *
+   * `stalled_only` narrows this to orders sitting past a deadline that has
+   * already passed — an unanswered acceptance, an unanswered customer decision,
+   * an offer nobody took. Every one of those deadlines already existed; nothing
+   * asked which of them had quietly run out.
+   */
   async orderMonitor(input: {
     readonly context: RequestContext;
     readonly checkout_group_id?: UuidV7;
+    readonly stalled_only?: boolean;
+    readonly now?: Date;
   }) {
     admin(input.context);
+    if (input.stalled_only) return this.#stalledOrders(input.now ?? new Date());
     const r = await this.#pool.query(
       `SELECT cg.*,COALESCE(json_agg(json_build_object('vendor_order_id',o.vendor_order_id,'reference',o.order_reference,'state',o.lifecycle_state,'vendor_location_id',o.vendor_location_id) ORDER BY o.order_reference) FILTER(WHERE o.vendor_order_id IS NOT NULL),'[]') orders FROM marketplace.checkout_groups cg LEFT JOIN marketplace.vendor_orders o USING(checkout_group_id) WHERE ($1::uuid IS NULL OR cg.checkout_group_id=$1) GROUP BY cg.checkout_group_id ORDER BY cg.updated_at DESC LIMIT 100`,
       [input.checkout_group_id ?? null],
     );
     return { checkout_groups: r.rows };
   }
+  /**
+   * Domain events that exhausted every retry and stopped.
+   *
+   * The outbox refuses to lose an event — an unhandled or failing one goes to
+   * the dead-letter path rather than being acknowledged — but nothing surfaced
+   * that path to a human. A side effect that never ran was invisible: a payment
+   * uncaptured, a partner unpaid, a customer untold, with nothing to look at.
+   */
+  async deadLetterQueue(input: { readonly context: RequestContext; readonly limit?: number }) {
+    admin(input.context);
+    const events = await listDeadLetterEvents(this.#pool, Math.min(input.limit ?? 50, 100));
+    return {
+      events: events.map((event) => ({
+        aggregate_id: event.aggregate_id,
+        aggregate_type: event.aggregate_type,
+        attempt_count: event.attempt_count,
+        event_id: event.event_id,
+        event_type: event.event_type,
+        last_error_code: event.last_error_code,
+      })),
+    };
+  }
+
+  /**
+   * Returns one dead-lettered event for redelivery.
+   *
+   * Separated from reading because it re-runs a side effect that moves real
+   * state. The recovery is recorded against the operator who asked for it.
+   */
+  async recoverDeadLetter(input: {
+    readonly context: RequestContext;
+    readonly event_id: UuidV7;
+    readonly reason_code: string;
+  }) {
+    const actor = admin(input.context);
+    if (!REASON.test(input.reason_code)) {
+      throw new AdminControlInputError('Reason code must be shouting-snake-case');
+    }
+    const recoveryId = await recoverDeadLetterEvent(this.#pool, {
+      actor_id: actor,
+      event_id: input.event_id,
+      reason_code: input.reason_code,
+      request_id: parseRequestId(input.context.request_id),
+    });
+    const client = await this.#pool.connect();
+    try {
+      await this.#audit(
+        client,
+        input.context,
+        actor,
+        'DEAD_LETTER_RECOVERED',
+        'OUTBOX_EVENT',
+        input.event_id,
+        input.reason_code,
+        null,
+        { recovery_id: recoveryId },
+      );
+    } finally {
+      client.release();
+    }
+    return { recovery_id: recoveryId };
+  }
+
+  async #stalledOrders(now: Date) {
+    const stalled = await this.#pool.query(
+      `SELECT orders.vendor_order_id, orders.order_reference, orders.lifecycle_state,
+              orders.vendor_location_id, orders.checkout_group_id,
+              CASE
+                WHEN orders.lifecycle_state='PLACED' AND orders.accept_by <= $1
+                  THEN 'ACCEPT_DEADLINE_PASSED'
+                WHEN decision.decision_id IS NOT NULL THEN 'CUSTOMER_DECISION_OVERDUE'
+                ELSE 'DELIVERY_OFFER_EXPIRED'
+              END AS stall_reason,
+              EXTRACT(EPOCH FROM ($1 - orders.updated_at))::bigint::text AS stalled_seconds
+         FROM marketplace.vendor_orders orders
+         LEFT JOIN LATERAL (
+           SELECT d.decision_id FROM marketplace.vendor_order_customer_decisions d
+            WHERE d.vendor_order_id = orders.vendor_order_id
+              AND d.answer='PENDING' AND d.decision_deadline_at <= $1
+            LIMIT 1
+         ) decision ON true
+         LEFT JOIN marketplace.delivery_assignments assignment
+           ON assignment.vendor_order_id = orders.vendor_order_id
+          AND assignment.assignment_state IN ('UNASSIGNED','OFFER_EXPIRED','DECLINED')
+        WHERE orders.lifecycle_state NOT IN ('DELIVERED','RETURNED','CANCELLED','EXPIRED')
+          AND (
+            (orders.lifecycle_state='PLACED' AND orders.accept_by <= $1)
+            OR decision.decision_id IS NOT NULL
+            OR (assignment.delivery_assignment_id IS NOT NULL
+                AND orders.lifecycle_state IN ('READY','PICKED_UP'))
+          )
+        ORDER BY orders.updated_at
+        LIMIT 100`,
+      [now],
+    );
+    return { stalled_orders: stalled.rows };
+  }
+
+  /**
+   * Opens a support case against one order.
+   *
+   * Accepts the system as an actor as well as an administrator, because some
+   * cases should not wait for a person to notice: an order whose goods came
+   * back has already failed, and leaving it in a state nobody reads is how a
+   * customer ends up chasing their own refund. The route above is still
+   * capability-gated; only the worker reaches this as `system`.
+   */
   async createSupportCase(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
@@ -87,7 +201,7 @@ export class AdminControlPlaneService {
     readonly severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
     readonly response_due_at: Date;
   }) {
-    const who = admin(input.context);
+    const who = operationsAutomation(input.context);
     if (input.description.trim().length < 1 || input.description.length > 1000)
       throw new AdminControlInputError('Support description is invalid');
     return tx(this.#pool, async (client) => {

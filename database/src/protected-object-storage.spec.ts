@@ -11,33 +11,32 @@ import {
   ProtectedObjectRejectedError,
 } from './protected-object-storage.js';
 
-const synthetic = new TextEncoder().encode(
-  'SYNTHETIC-VERIFICATION-DOCUMENT\nfictional company-test evidence',
-);
+const pdfDocument = new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF');
+const pngDocument = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'neighbourhood-protected-object-'));
   return {
     root,
     storage: new LocalProtectedObjectStorage({
-      grant_key: 'synthetic-local-grant-key-material-0001',
+      grant_key: 'local-protected-grant-key-material-0001',
       root_directory: root,
     }),
   };
 }
 
-test('stores synthetic evidence privately and reads it only with a valid short grant', async () => {
+test('stores evidence privately and reads it only with a valid short grant', async () => {
   const { root, storage } = await fixture();
   try {
     const key = `vendor-onboarding/${createUuidV7()}/${createUuidV7()}/object`;
     const stored = await storage.put({
-      content: synthetic,
+      content: pdfDocument,
       media_type: 'application/pdf',
       object_key: key,
     });
     const grant = storage.issueReadGrant({ object_key: key, ttl_seconds: 60 });
     const read = await storage.readGranted({ expected_sha256: stored.content_sha256, grant });
-    assert.deepEqual(read, synthetic);
+    assert.deepEqual(read, pdfDocument);
     await assert.rejects(
       storage.readGranted({
         expected_sha256: stored.content_sha256,
@@ -51,7 +50,7 @@ test('stores synthetic evidence privately and reads it only with a valid short g
   }
 });
 
-test('rejects non-synthetic, scan-rejected, traversal, and checksum-mismatched objects', async () => {
+test('rejects mismatched content, scan rejection, traversal, and checksum mismatch', async () => {
   const { root, storage } = await fixture();
   try {
     const caseId = createUuidV7();
@@ -66,7 +65,7 @@ test('rejects non-synthetic, scan-rejected, traversal, and checksum-mismatched o
     );
     await assert.rejects(
       storage.put({
-        content: synthetic,
+        content: pngDocument,
         media_type: 'image/png',
         object_key: key,
         scan_scenario: 'rejected',
@@ -78,7 +77,7 @@ test('rejects non-synthetic, scan-rejected, traversal, and checksum-mismatched o
       ProtectedObjectInputError,
     );
     const stored = await storage.put({
-      content: synthetic,
+      content: pngDocument,
       media_type: 'image/png',
       object_key: key,
     });
@@ -88,6 +87,50 @@ test('rejects non-synthetic, scan-rejected, traversal, and checksum-mismatched o
       ProtectedObjectRejectedError,
     );
     assert.equal(stored.scan_state, 'CLEAN');
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test('shares objects and signed grants across API and worker storage instances', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'neighbourhood-cross-process-object-'));
+  const grantKey = 'cross-process-protected-grant-key-material';
+  const apiStorage = new LocalProtectedObjectStorage({
+    grant_key: grantKey,
+    root_directory: root,
+  });
+  const workerStorage = new LocalProtectedObjectStorage({
+    grant_key: grantKey,
+    root_directory: root,
+  });
+  try {
+    const apiKey = `catalogue-images/${createUuidV7()}/${createUuidV7()}/object`;
+    const apiWrite = await apiStorage.put({
+      content: pngDocument,
+      media_type: 'image/png',
+      object_key: apiKey,
+    });
+    assert.deepEqual(
+      await workerStorage.readGranted({
+        expected_sha256: apiWrite.content_sha256,
+        grant: apiStorage.issueReadGrant({ object_key: apiKey, ttl_seconds: 30 }),
+      }),
+      pngDocument,
+    );
+
+    const workerKey = `vendor-onboarding/${createUuidV7()}/${createUuidV7()}/object`;
+    const workerWrite = await workerStorage.put({
+      content: pdfDocument,
+      media_type: 'application/pdf',
+      object_key: workerKey,
+    });
+    assert.deepEqual(
+      await apiStorage.readGranted({
+        expected_sha256: workerWrite.content_sha256,
+        grant: workerStorage.issueReadGrant({ object_key: workerKey, ttl_seconds: 30 }),
+      }),
+      pdfDocument,
+    );
   } finally {
     await rm(root, { force: true, recursive: true });
   }

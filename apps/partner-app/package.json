@@ -7,14 +7,18 @@
   "type": "module",
   "main": "expo/AppEntry.js",
   "scripts": {
-    "android": "expo start --android --port 8083",
+    "android": "node ../../tooling/scripts/ensure-packages-built.mjs && expo start --android --port 8083",
     "build": "expo export --platform android --output-dir dist",
-    "dev": "expo start --offline --port 8083",
+    "dev": "node ../../tooling/scripts/ensure-packages-built.mjs && expo start --offline --port 8083",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@neighbourhood-store/app-auth": "workspace:*",
+    "@neighbourhood-store/contracts": "workspace:*",
     "@neighbourhood-store/ui-tokens": "workspace:*",
+    "@supabase/supabase-js": "2.58.0",
     "expo": "56.0.19",
+    "expo-secure-store": "56.0.4",
     "expo-status-bar": "56.0.4",
     "react": "19.2.3",
     "react-native": "0.85.3"

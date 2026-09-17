@@ -30,10 +30,23 @@ function main() {
   const common = [...selected.prefix, '-f', composeFile];
   const actions = {
     config: [...common, 'config'],
-    down: [...common, 'stop', 'database'],
-    'test-down': [...common, '--profile', 'test', 'rm', '-f', '-s', 'database-test'],
-    'test-up': [...common, '--profile', 'test', 'up', '-d', '--wait', 'database-test'],
-    up: [...common, 'up', '-d', '--wait', 'database'],
+    // The worker treats Valkey as an optional scale adapter, but BullMQ still
+    // needs a reachable instance to open its queues, so each stack starts its
+    // own: `valkey` on 6379 for local, `valkey-test` on 6380 for the disposable
+    // test database used by the integration smokes.
+    down: [...common, 'stop', 'database', 'valkey'],
+    'test-down': [...common, '--profile', 'test', 'rm', '-f', '-s', 'database-test', 'valkey-test'],
+    'test-up': [
+      ...common,
+      '--profile',
+      'test',
+      'up',
+      '-d',
+      '--wait',
+      'database-test',
+      'valkey-test',
+    ],
+    up: [...common, 'up', '-d', '--wait', 'database', 'valkey'],
   };
   const arguments_ = actions[action];
   if (!arguments_)

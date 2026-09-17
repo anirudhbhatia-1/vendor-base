@@ -1,6 +1,7 @@
 # Database migration and synthetic-fixture workflow
 
-**Scope:** Phase 2.4 database lifecycle, Phase 3 shared persistence controls, Phase 4 synthetic identity/access controls, Phase 5.1–5.7 vendor/catalogue/delivery/money domain, and Phase 6.1–6.7 customer address/discovery/cart domain, company-local and isolated test databases only
+**Scope:** reviewed synthetic marketplace schema for local, isolated-test and Supabase database-only
+development targets
 
 **Production authority:** None
 
@@ -41,6 +42,20 @@ pnpm db:status
 pnpm db:rollback
 ```
 
+For the Supabase-hosted synthetic development database, first follow
+`runbooks/supabase-dev/README.md`, then use:
+
+```sh
+pnpm db:status:supabase
+pnpm db:migrate:supabase
+```
+
+Remote migrations require an exact project-bound confirmation and allow only the selected Supabase
+Direct or Session pooler connection on port 5432. Supabase development connections are encrypted
+with libpq-compatible `sslmode=require`; production must install Supabase's CA and use
+`sslmode=verify-full`. Remote rollback, rebuild, reset and seed commands are intentionally not
+exposed.
+
 Each migration is a reviewed pair:
 
 ```text
@@ -60,12 +75,12 @@ The runner:
 
 Migration SQL must not contain `BEGIN`, `COMMIT`, or `ROLLBACK`; transaction ownership belongs to the runner. Use additive expand-and-contract migrations. A destructive or irreversible change needs a separately approved recovery plan and must not be disguised as an empty down file.
 
-The reviewed migration ladder is authoritative and currently runs from `0000_baseline` through
-`0037_local_notifications`. It covers the shared reliability/identity foundations, vendor and
+The reviewed migration ladder is authoritative and currently contains 40 paired migrations through
+`0040_production_access_baseline`. It covers the shared reliability/identity foundations, vendor and
 catalogue lifecycle, customer shopping and checkout, fulfilment/custody, complete synthetic money,
 partner/admin operations, search/localization, partner availability and wait policy, controlled
-admin provisioning, and local notification delivery. `pnpm db:status` prints the exact ordered
-files; later migrations must always roll back before the baseline.
+admin provisioning, local notification delivery and password-origin sessions. A status command
+prints the exact ordered files; later migrations must always roll back before the baseline.
 
 Drizzle configuration lives in `drizzle.config.ts`, and typed schema declarations start in `schema.ts`. Drizzle-generated SQL must be converted into a paired reviewed migration before execution. Never apply automatic schema synchronization.
 
@@ -75,6 +90,10 @@ Drizzle configuration lives in `drizzle.config.ts`, and typed schema declaration
 pnpm db:seed
 pnpm db:reset
 ```
+
+`db:seed` and `db:reset` cover the fixture-determinism harness below and nothing else. To get a
+database the applications can actually be used against, follow them with `pnpm db:seed:marketplace`
+and `pnpm db:seed:admin`; the full sequence is in `docs/engineering/local-entry-points.md`.
 
 Fixtures live only in `marketplace_test.fixture_records`, separate from the future authoritative domain schema. Every display name starts with `SYNTH`, every JSON payload carries `synthetic: true`, and database checks reject missing markers. Seed execution deletes and recreates the same seven ordered records and verifies a canonical SHA-256 hash. It never loads customer identity, phone, address, payment, document, or real store data.
 
@@ -186,3 +205,11 @@ See `docs/engineering/identity-isolation-proof.md` for the Phase 4.6 cross-role,
 The compiled database package exports transactional OTP-to-session issuance, access authentication, refresh rotation with replay-family revocation, access/refresh expiry, same-user session listing/revocation, current sign-out, and hashed notification-token lifecycle. Raw credentials are returned only to the immediate caller and are never stored.
 
 See `docs/engineering/sessions-and-devices.md` for token lifetimes, API contracts, transaction guarantees, threat tests, and the boundary before roles.
+
+## Boundaries
+
+This directory owns the schema, migrations, domain services and the connected `verify-*`
+ladder. It may import `@neighbourhood-store/domain-types` and `@neighbourhood-store/contracts`.
+It must not import an application: the database package is what applications depend on, so an
+edge in the other direction would make the schema depend on one client's needs. Clients never
+reach these tables directly — the API is the only thing that opens a connection.

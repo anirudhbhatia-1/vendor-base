@@ -1,50 +1,20 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
   Delete,
-  ForbiddenException,
   Get,
   Inject,
-  NotFoundException,
   Param,
   Post,
   Put,
 } from '@nestjs/common';
-import {
-  CustomerAddressAuthorizationError,
-  CustomerAddressConflictError,
-  CustomerAddressInputError,
-  CustomerAddressNotFoundError,
-  CustomerAddressService,
-  type CoordinateSource,
-} from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { CustomerAddressService, type CoordinateSource } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { CUSTOMER_ADDRESSES } from './tokens.js';
-
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function stringField(body: Record<string, unknown>, key: string): string {
-  const found = body[key];
-  if (typeof found !== 'string') throw new BadRequestException();
-  return found;
-}
-function numberField(body: Record<string, unknown>, key: string): number {
-  const found = body[key];
-  if (typeof found !== 'number' || !Number.isFinite(found)) throw new BadRequestException();
-  return found;
-}
-function optionalText(body: Record<string, unknown>, key: string): string | null {
-  const found = body[key];
-  if (found === undefined || found === null) return null;
-  if (typeof found !== 'string') throw new BadRequestException();
-  return found;
-}
+import { nullableString, numberField, object, stringField, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 // `exactOptionalPropertyTypes` forbids passing an explicit undefined, so an
 // absent source is spread away rather than set.
 function coordinateSource(body: Record<string, unknown>): {
@@ -55,21 +25,6 @@ function coordinateSource(body: Record<string, unknown>): {
   if (found !== 'MANUAL_PIN' && found !== 'DEVICE_LOCATION') throw new BadRequestException();
   return { coordinate_source: found };
 }
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function map(error: unknown): never {
-  if (error instanceof CustomerAddressInputError) throw new BadRequestException(error.message);
-  if (error instanceof CustomerAddressNotFoundError) throw new NotFoundException();
-  if (error instanceof CustomerAddressConflictError) throw new ConflictException(error.message);
-  if (error instanceof CustomerAddressAuthorizationError) throw new ForbiddenException();
-  throw error;
-}
-
 // Every route is contained to the authenticated customer account, and a
 // concealed resource returns 404 rather than confirming another customer's row.
 const ownsAddresses = RequireAuthorization({
@@ -90,7 +45,7 @@ export class CustomerAddressesController {
         addresses: await this.addresses.listAddresses({ context: currentRequestContext() }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -107,11 +62,11 @@ export class CustomerAddressesController {
         latitude: numberField(body, 'latitude'),
         longitude: numberField(body, 'longitude'),
         ...coordinateSource(body),
-        landmark: optionalText(body, 'landmark'),
-        delivery_instructions: optionalText(body, 'delivery_instructions'),
+        landmark: nullableString(body, 'landmark'),
+        delivery_instructions: nullableString(body, 'delivery_instructions'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -131,11 +86,11 @@ export class CustomerAddressesController {
         latitude: numberField(body, 'latitude'),
         longitude: numberField(body, 'longitude'),
         ...coordinateSource(body),
-        landmark: optionalText(body, 'landmark'),
-        delivery_instructions: optionalText(body, 'delivery_instructions'),
+        landmark: nullableString(body, 'landmark'),
+        delivery_instructions: nullableString(body, 'delivery_instructions'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -148,7 +103,7 @@ export class CustomerAddressesController {
         customer_address_id: uuid(addressId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -163,7 +118,7 @@ export class CustomerAddressesController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -176,7 +131,7 @@ export class CustomerAddressesController {
         customer_address_id: uuid(addressId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }

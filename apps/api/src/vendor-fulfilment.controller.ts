@@ -1,68 +1,20 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
-  ForbiddenException,
   Get,
+  Header,
+  HttpCode,
   Inject,
-  NotFoundException,
   Param,
   Post,
 } from '@nestjs/common';
-import {
-  FulfilmentAuthorizationError,
-  FulfilmentConflictError,
-  FulfilmentInputError,
-  FulfilmentNotFoundError,
-  PickupOtpExhaustedError,
-  PickupOtpExpiredError,
-  PickupOtpMismatchError,
-  VendorFulfilmentService,
-} from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { AssignmentCustodyService, VendorFulfilmentService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
-import { VENDOR_FULFILMENT } from './tokens.js';
-
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function stringField(body: Record<string, unknown>, key: string): string {
-  const found = body[key];
-  if (typeof found !== 'string') throw new BadRequestException();
-  return found;
-}
-function optionalString(body: Record<string, unknown>, key: string): string | undefined {
-  const found = body[key];
-  if (found === undefined || found === null) return undefined;
-  if (typeof found !== 'string') throw new BadRequestException();
-  return found;
-}
-function integerField(body: Record<string, unknown>, key: string): number {
-  const found = body[key];
-  if (!Number.isSafeInteger(found)) throw new BadRequestException();
-  return found as number;
-}
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
-function map(error: unknown): never {
-  if (error instanceof FulfilmentInputError) throw new BadRequestException(error.message);
-  if (error instanceof FulfilmentNotFoundError) throw new NotFoundException();
-  if (error instanceof FulfilmentConflictError) throw new ConflictException(error.message);
-  if (error instanceof FulfilmentAuthorizationError) throw new ForbiddenException();
-  if (error instanceof PickupOtpMismatchError) throw new ConflictException('OTP_MISMATCH');
-  if (error instanceof PickupOtpExhaustedError) throw new ConflictException('OTP_EXHAUSTED');
-  if (error instanceof PickupOtpExpiredError) throw new ConflictException('OTP_EXPIRED');
-  throw error;
-}
-
+import { ASSIGNMENT_CUSTODY, VENDOR_FULFILMENT } from './tokens.js';
+import { integerField, object, optionalString, stringField, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 const vendorFulfil = RequireAuthorization({
   capability: 'vendor.order.fulfil',
   conceal_resource: true,
@@ -84,6 +36,81 @@ const customerSupport = RequireAuthorization({
   capability: 'customer.support.open',
   conceal_resource: true,
 });
+const partnerActs = RequireAuthorization({
+  capability: 'partner.assignment.act',
+  conceal_resource: true,
+  delivery_assignment_id_param: 'delivery_assignment_id',
+});
+
+/**
+ * The partner's side of a vendor handover (DLP-24).
+ *
+ * Lives with the fulfilment routes rather than the assignment routes because
+ * the code it mints is the vendor order's pickup code -- the same column, the
+ * same lifetime, the same validation in `complete-pickup` -- and not a property
+ * of the assignment.
+ */
+@Controller('partner/assignments')
+export class PartnerHandoverController {
+  constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
+
+  /**
+   * A POST for the same reasons as the customer's codes: it mints a fresh
+   * value, which is a state change, and it keeps the code out of the URL.
+   */
+  @Post(':delivery_assignment_id/pickup-otp')
+  @partnerActs
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async pickupOtp(@Param('delivery_assignment_id') assignmentId: string) {
+    try {
+      return await this.fulfilment.issuePartnerPickupOtp({
+        context: currentRequestContext(),
+        delivery_assignment_id: uuid(assignmentId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+}
+
+/**
+ * A store's own numbers and the cases open against it (VEN-43, VEN-45, VEN-47).
+ *
+ * Read-only, scoped to the location the caller staffs.
+ */
+@Controller('vendor/locations/:vendor_location_id/insights')
+export class VendorInsightsController {
+  constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
+
+  @Get()
+  @vendorFulfil
+  async summary(@Param('vendor_location_id') locationId: string) {
+    try {
+      return await this.fulfilment.locationInsights({
+        context: currentRequestContext(),
+        vendor_location_id: uuid(locationId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Get('support-cases')
+  @vendorFulfil
+  async supportCases(@Param('vendor_location_id') locationId: string) {
+    try {
+      return {
+        cases: await this.fulfilment.locationSupportCases({
+          context: currentRequestContext(),
+          vendor_location_id: uuid(locationId),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+}
 
 @Controller('vendor/locations/:vendor_location_id/orders')
 export class VendorOrderFulfilmentController {
@@ -100,7 +127,7 @@ export class VendorOrderFulfilmentController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -121,7 +148,7 @@ export class VendorOrderFulfilmentController {
         preparation_estimate_seconds: integerField(body, 'preparation_estimate_seconds'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -145,7 +172,7 @@ export class VendorOrderFulfilmentController {
           : {}),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -165,7 +192,7 @@ export class VendorOrderFulfilmentController {
         expected_version: integerField(body, 'expected_version'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -188,7 +215,7 @@ export class VendorOrderFulfilmentController {
         actual_unit_price_minor: integerField(body, 'actual_unit_price_minor'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -207,7 +234,7 @@ export class VendorOrderFulfilmentController {
         vendor_order_line_id: uuid(lineId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -232,7 +259,7 @@ export class VendorOrderFulfilmentController {
         reason_note: stringField(body, 'reason_note'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -256,7 +283,7 @@ export class VendorOrderFulfilmentController {
         reason_note: stringField(body, 'reason_note'),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -280,7 +307,7 @@ export class VendorOrderFulfilmentController {
           : {}),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -289,15 +316,20 @@ export class VendorOrderFulfilmentController {
   async issueOtp(
     @Param('vendor_location_id') locationId: string,
     @Param('vendor_order_id') orderId: string,
+    @Body() raw: unknown,
   ) {
+    // The alternative-proof path (VEN-35), so it carries the reason the
+    // customer's own code could not be used.
+    const value = object(raw);
     try {
       return await this.fulfilment.issuePickupOtp({
         context: currentRequestContext(),
+        reason_code: stringField(value, 'reason_code'),
         vendor_order_id: uuid(orderId),
         vendor_location_id: uuid(locationId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -320,14 +352,14 @@ export class VendorOrderFulfilmentController {
           : {}),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
   @Get(':vendor_order_id/picks')
   @vendorFulfil
   async listPicks(
-    @Param('vendor_location_id') _locationId: string,
+    @Param('vendor_location_id') locationId: string,
     @Param('vendor_order_id') orderId: string,
   ) {
     try {
@@ -335,10 +367,11 @@ export class VendorOrderFulfilmentController {
         picks: await this.fulfilment.listPicks({
           context: currentRequestContext(),
           vendor_order_id: uuid(orderId),
+          vendor_location_id: uuid(locationId),
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }
@@ -346,6 +379,19 @@ export class VendorOrderFulfilmentController {
 @Controller('customer/decisions')
 export class CustomerDecisionsController {
   constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
+
+  @Get('pending')
+  @customerRead
+  async pending() {
+    try {
+      const decisions = await this.fulfilment.listPendingCustomerDecisions({
+        context: currentRequestContext(),
+      });
+      return { decisions };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
 
   @Post(':decision_id/answer')
   @customerDecide
@@ -360,14 +406,66 @@ export class CustomerDecisionsController {
         answer,
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
+    }
+  }
+}
+
+@Controller('customer/support-cases')
+export class CustomerSupportCaseController {
+  constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
+
+  /** The customer's own cases, so an open issue is visible to the person who raised it. */
+  @Get()
+  @customerRead
+  async list() {
+    try {
+      return {
+        cases: await this.fulfilment.listCustomerSupportCases({
+          context: currentRequestContext(),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Get(':support_case_id')
+  @customerRead
+  async detail(@Param('support_case_id') caseId: string) {
+    try {
+      return await this.fulfilment.getCustomerSupportCase({
+        context: currentRequestContext(),
+        support_case_id: uuid(caseId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Post(':support_case_id/messages')
+  @customerRead
+  async message(@Param('support_case_id') caseId: string, @Body() raw: unknown) {
+    const body = object(raw);
+    if (typeof body.body !== 'string') throw new BadRequestException();
+    try {
+      return await this.fulfilment.addCustomerSupportMessage({
+        context: currentRequestContext(),
+        support_case_id: uuid(caseId),
+        body: body.body,
+      });
+    } catch (error) {
+      translateDomainError(error);
     }
   }
 }
 
 @Controller('customer/orders')
 export class CustomerOrderHistoryController {
-  constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
+  constructor(
+    @Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService,
+    @Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService,
+  ) {}
 
   @Get()
   @customerRead
@@ -377,7 +475,95 @@ export class CustomerOrderHistoryController {
         groups: await this.fulfilment.listCustomerOrders({ context: currentRequestContext() }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
+    }
+  }
+
+  /** What cancelling would do, before the customer commits to it. */
+  @Get(':vendor_order_id/cancellation-preview')
+  @customerRead
+  async cancellationPreview(@Param('vendor_order_id') orderId: string) {
+    try {
+      return await this.fulfilment.previewCancellation({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Post(':vendor_order_id/cancel')
+  @customerDecide
+  @HttpCode(200)
+  async cancel(@Param('vendor_order_id') orderId: string, @Body() raw: unknown) {
+    const body = object(raw);
+    try {
+      return await this.fulfilment.cancelByCustomer({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+        expected_version: integerField(body, 'expected_version'),
+        reason_code: stringField(body, 'reason_code'),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  /**
+   * The customer's collection code for a pickup order (CUS-51).
+   *
+   * A POST for the same reasons as the delivery code: it mints a fresh value,
+   * which is a state change, and keeps the code out of the URL.
+   */
+  @Post(':vendor_order_id/pickup-otp')
+  @customerDecide
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async pickupOtp(@Param('vendor_order_id') orderId: string) {
+    try {
+      return await this.fulfilment.issueCustomerPickupOtp({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  /**
+   * The customer's delivery code (CUS-56).
+   *
+   * A POST, not a GET: each call mints a fresh code and spends the previous
+   * one, which is a state change, and it keeps the code out of a URL and so out
+   * of history, referrers and access logs (SEC-09).
+   */
+  @Post(':vendor_order_id/delivery-otp')
+  @customerDecide
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async deliveryOtp(@Param('vendor_order_id') orderId: string) {
+    try {
+      return await this.assignments.issueDeliveryOtp({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  /** Coarse delivery stage. Never the partner's identity or live position. */
+  @Get(':vendor_order_id/tracking')
+  @customerRead
+  async tracking(@Param('vendor_order_id') orderId: string) {
+    try {
+      return await this.fulfilment.customerTracking({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+      });
+    } catch (error) {
+      translateDomainError(error);
     }
   }
 
@@ -390,7 +576,7 @@ export class CustomerOrderHistoryController {
         vendor_order_id: uuid(orderId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -409,7 +595,7 @@ export class CustomerOrderHistoryController {
       });
       return { rated: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -426,7 +612,7 @@ export class CustomerOrderHistoryController {
       });
       return { support_case_id: supportCaseId };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }

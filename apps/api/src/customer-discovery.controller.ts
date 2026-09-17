@@ -1,62 +1,24 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
   Delete,
-  ForbiddenException,
   Get,
   Inject,
-  NotFoundException,
   Param,
   Post,
   Query,
 } from '@nestjs/common';
-import {
-  CustomerDiscoveryAuthorizationError,
-  CustomerDiscoveryConflictError,
-  CustomerDiscoveryInputError,
-  CustomerDiscoveryNotFoundError,
-  CustomerDiscoveryService,
-} from '@neighbourhood-store/database';
-import { parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { CustomerDiscoveryService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { CUSTOMER_DISCOVERY } from './tokens.js';
-
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function stringField(body: Record<string, unknown>, key: string): string {
-  const found = body[key];
-  if (typeof found !== 'string') throw new BadRequestException();
-  return found;
-}
-function numberField(body: Record<string, unknown>, key: string): number {
-  const found = body[key];
-  if (typeof found !== 'number' || !Number.isFinite(found)) throw new BadRequestException();
-  return found;
-}
-function uuid(value: string): UuidV7 {
-  try {
-    return parseUuidV7(value);
-  } catch {
-    throw new BadRequestException();
-  }
-}
+import { numberField, object, stringField, uuid } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 function requireQuery(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0) throw new BadRequestException();
   return value;
 }
-function map(error: unknown): never {
-  if (error instanceof CustomerDiscoveryInputError) throw new BadRequestException(error.message);
-  if (error instanceof CustomerDiscoveryNotFoundError) throw new NotFoundException();
-  if (error instanceof CustomerDiscoveryConflictError) throw new ConflictException(error.message);
-  if (error instanceof CustomerDiscoveryAuthorizationError) throw new ForbiddenException();
-  throw error;
-}
-
 const asCustomer = RequireAuthorization({
   capability: 'customer.discovery.use',
   conceal_resource: true,
@@ -83,7 +45,7 @@ export class CustomerDiscoveryController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -112,7 +74,7 @@ export class CustomerDiscoveryController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -124,7 +86,7 @@ export class CustomerDiscoveryController {
         recent_searches: await this.discovery.recentSearches({ context: currentRequestContext() }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -138,7 +100,7 @@ export class CustomerDiscoveryController {
       });
       return { deleted: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -151,7 +113,7 @@ export class CustomerDiscoveryController {
         vendor_location_id: uuid(locationId),
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -165,7 +127,7 @@ export class CustomerDiscoveryController {
       });
       return { favourited: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -179,7 +141,7 @@ export class CustomerDiscoveryController {
       });
       return { favourited: false };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -194,7 +156,7 @@ export class CustomerDiscoveryController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -208,7 +170,7 @@ export class CustomerDiscoveryController {
       });
       return { set: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -219,7 +181,7 @@ export class CustomerDiscoveryController {
       await this.discovery.clearPreferredStore({ context: currentRequestContext() });
       return { cleared: true };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -233,7 +195,7 @@ export class CustomerDiscoveryController {
         }),
       };
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 
@@ -251,7 +213,7 @@ export class CustomerDiscoveryController {
         note: typeof body['note'] === 'string' ? (body['note'] as string) : null,
       });
     } catch (error) {
-      map(error);
+      translateDomainError(error);
     }
   }
 }

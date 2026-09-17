@@ -5,11 +5,18 @@ export type SafeLogValue =
 export const REDACTED_VALUE = '[REDACTED]';
 
 const PROTECTED_KEY_PATTERN =
-  /(?:^|_)(?:access_token|address|bank_account|card|cookie|coordinates|credential|cvv|device_token|email|latitude|longitude|otp|passcode|password|payment_token|phone|precise_location|refresh_token|secret|set_cookie|token)(?:$|_)/i;
+  /(?:^|_)(?:aadhaar|access_token|account_number|address|bank_account|card|cookie|coordinates|credential|cvv|device_token|email|ifsc|lat|latitude|lng|lon|longitude|mobile|msisdn|otp|pan|passcode|password|payment_token|phone|precise_location|refresh_token|secret|set_cookie|token|upi|vpa)(?:$|_)/i;
 const AUTHORIZATION_KEY_PATTERN = /^(?:authorization|authorization_header|proxy_authorization)$/i;
 
+/**
+ * Normalizes a key so the protected-word pattern can see its boundaries.
+ *
+ * Only `-` was converted, so camelCase slipped through: `phoneNumber`, `otpCode` and
+ * `accessToken` were all logged in full while their snake_case spellings were
+ * redacted. Provider payloads are the obvious way in, since most arrive camelCase.
+ */
 function safeKey(value: string): string {
-  return value.replaceAll('-', '_');
+  return value.replaceAll('-', '_').replace(/([a-z0-9])([A-Z])/g, '$1_$2');
 }
 
 function redact(value: unknown, seen: WeakSet<object>, depth: number): SafeLogValue {

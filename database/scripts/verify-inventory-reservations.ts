@@ -9,10 +9,7 @@ import {
   InventoryReservationService,
   InventoryUnavailableError,
 } from '../src/inventory-reservations.js';
-
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
+import { check } from './verify-support.js';
 
 function context(kind: 'customer' | 'system' | 'vendor_staff') {
   return createRequestContext({
@@ -111,6 +108,26 @@ export async function verifyInventoryReservations(connectionString: string): Pro
       afterHold.find((item) => item.inventory_item_id === countedId)?.exact_available_quantity ===
         1,
       'Counted hold did not atomically reduce exact availability',
+    );
+
+    // The vendor console's read model. `inventory_items` has no foreign key to
+    // the catalogue, while the checkout quote joins the two on
+    // `(vendor_location_id, product_reference)` with an inner join — so a stock
+    // line whose reference matches no catalogue product is unsellable, and the
+    // console used to render it identically to a real one.
+    const stockLines = await service.listLocationStock({
+      context: staffContext,
+      vendor_location_id: locationId,
+    });
+    const countedLine = stockLines.find((line) => line.inventory_item_id === countedId);
+    check(countedLine !== undefined, 'The stock read model omitted a line that exists');
+    check(
+      countedLine?.catalogue_product_id === null,
+      'A stock line with no catalogue product was reported as sellable',
+    );
+    check(
+      countedLine?.held_quantity === 4,
+      `Held quantity was not carried on the row (${String(countedLine?.held_quantity)})`,
     );
 
     const replay = await service.softHold({

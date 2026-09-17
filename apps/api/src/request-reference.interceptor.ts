@@ -5,6 +5,7 @@ import {
   type NestInterceptor,
 } from '@nestjs/common';
 import { map, type Observable } from 'rxjs';
+import { trace } from '@opentelemetry/api';
 import { apiLogger } from './json-logger.js';
 import { currentRequestContext } from './request-context-storage.js';
 
@@ -22,6 +23,11 @@ export class RequestReferenceInterceptor implements NestInterceptor {
     const request = context
       .switchToHttp()
       .getRequest<{ method: string; routeOptions?: { url?: string } }>();
+    trace.getActiveSpan()?.setAttributes({
+      'app.request_id': requestContext.request_id,
+      'app.correlation_id': requestContext.correlation_id,
+      ...(requestContext.causation_id ? { 'app.causation_id': requestContext.causation_id } : {}),
+    });
     return next.handle().pipe(
       map((value: unknown) => {
         apiLogger.event('http.request.completed', {

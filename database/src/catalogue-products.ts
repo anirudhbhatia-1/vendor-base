@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import { createHash } from 'node:crypto';
 import {
   createUuidV7,
@@ -6,7 +7,9 @@ import {
   type RequestContext,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
-import { Pool, type PoolClient } from 'pg';
+import { Pool } from 'pg';
+import type { ProtectedObjectStorage } from './protected-object-storage.js';
+import { transaction as tx } from './transaction.js';
 
 export const CATALOGUE_CSV_TEMPLATE =
   'product_reference,title,category,unit_label,tax_basis,sku,variant_title,price_minor,quantity_basis,exact_available_quantity,low_stock_threshold,variable_weight,permitted_weight_variance_bps\n';
@@ -110,10 +113,10 @@ const header = [
   'variable_weight',
   'permitted_weight_variance_bps',
 ] as const;
-const productRef = /^SYNTH-PROD-[A-Z0-9-]{4,64}$/;
-const sku = /^SYNTH-SKU-[A-Z0-9-]{4,64}$/;
-const title = /^SYNTH [A-Za-z0-9][A-Za-z0-9 &'().,-]{1,118}$/;
-const key = /^SYNTH-IMPORT-[A-Z0-9-]{4,64}$/;
+const productRef = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
+const sku = /^[A-Z0-9][A-Z0-9._:/-]{2,95}$/;
+const title = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'().,/%+-]{1,118}$/u;
+const key = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 function actor(context: RequestContext): UuidV7 {
   if (!context.actor || !['vendor_staff', 'admin'].includes(context.actor.actor_kind))
     throw new CatalogueImportAuthorizationError();
@@ -193,20 +196,6 @@ function parse(content: string): readonly { row: Parsed; errors: readonly string
     return { row, errors };
   });
 }
-async function tx<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const out = await fn(client);
-    await client.query('COMMIT');
-    return out;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 function result(row: ImportRecord, rows: readonly CatalogueImportRow[]): CatalogueImport {
   return Object.freeze({
     catalogue_import_id: parseUuidV7(row.catalogue_import_id),
@@ -220,15 +209,58 @@ function result(row: ImportRecord, rows: readonly CatalogueImportRow[]): Catalog
 }
 export class CatalogueProductService {
   readonly #pool: Pool;
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+  readonly #storage: ProtectedObjectStorage | undefined;
+  constructor(input: {
+    readonly connection_string: string;
+    readonly storage?: ProtectedObjectStorage;
+  }) {
+    this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-catalogue-products',
       max: 8,
     });
+    this.#storage = input.storage;
   }
   async close() {
     await this.#pool.end();
+  }
+
+  async uploadImage(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+    readonly catalogue_product_id: UuidV7;
+    readonly content: Uint8Array;
+    readonly media_type: 'image/png' | 'image/jpeg';
+    readonly alt_text: string;
+    readonly position: number;
+    readonly now?: Date;
+  }): Promise<{ catalogue_image_id: UuidV7; object_reference: string }> {
+    if (!this.#storage) {
+      throw new CatalogueImportInputError();
+    }
+    const now = input.now ?? new Date();
+    const imageId = createUuidV7({ now_ms: now.getTime() });
+    const objectKey = `catalogue-images/${input.vendor_location_id}/${imageId}/object`;
+    const stored = await this.#storage.put({
+      content: input.content,
+      media_type: input.media_type,
+      object_key: objectKey,
+    });
+    const result = await this.addImage({
+      context: input.context,
+      vendor_location_id: input.vendor_location_id,
+      catalogue_product_id: input.catalogue_product_id,
+      object_reference: objectKey,
+      alt_text: input.alt_text,
+      position: input.position,
+      stored: {
+        media_type: input.media_type,
+        content_sha256: stored.content_sha256,
+        content_length: stored.content_length,
+      },
+      now,
+    });
+    return { catalogue_image_id: result.catalogue_image_id, object_reference: objectKey };
   }
   async stageImport(input: {
     readonly context: RequestContext;
@@ -240,7 +272,7 @@ export class CatalogueProductService {
   }): Promise<CatalogueImport> {
     actor(input.context);
     if (
-      !/^SYNTH-[A-Z0-9._-]{4,120}\.csv$/.test(input.source_filename) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._ -]{1,120}\.csv$/i.test(input.source_filename) ||
       !key.test(input.idempotency_key)
     )
       throw new CatalogueImportInputError();
@@ -483,6 +515,8 @@ export class CatalogueProductService {
     readonly sku: string;
     readonly variant_title: string;
     readonly price_minor: number;
+    readonly initial_stock_quantity?: number;
+    readonly low_stock_threshold?: number;
     readonly now?: Date;
   }) {
     const actorId = actor(input.context);
@@ -548,8 +582,163 @@ export class CatalogueProductService {
           ids.correlation,
         ],
       );
+      // Provision an inventory_items row keyed by (vendor_location_id, product_reference)
+      // so customer discovery does not treat the new product as stale. When an initial
+      // stock quantity is supplied, we create a COUNTED item; otherwise VENDOR_CONFIRMS.
+      const inventoryId = createUuidV7({ now_ms: now.getTime() + 3 });
+      const hasStock =
+        typeof input.initial_stock_quantity === 'number' &&
+        Number.isSafeInteger(input.initial_stock_quantity) &&
+        input.initial_stock_quantity >= 0;
+      const threshold =
+        typeof input.low_stock_threshold === 'number' &&
+        Number.isSafeInteger(input.low_stock_threshold)
+          ? Math.max(0, input.low_stock_threshold)
+          : 0;
+      if (hasStock) {
+        const qty = input.initial_stock_quantity as number;
+        const state = qty === 0 ? 'OUT_OF_STOCK' : qty <= threshold ? 'LOW_STOCK' : 'AVAILABLE';
+        await client.query(
+          `INSERT INTO marketplace.inventory_items
+             (inventory_item_id, vendor_location_id, product_reference, display_name,
+              quantity_basis, availability_state, exact_available_quantity, low_stock_threshold,
+              last_confirmed_at, version, request_id, correlation_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'COUNTED', $5, $6, $7, $8, 1, $9, $10, $8, $8)
+           ON CONFLICT DO NOTHING`,
+          [
+            inventoryId,
+            input.vendor_location_id,
+            input.product_reference,
+            input.title,
+            state,
+            qty,
+            threshold,
+            now,
+            ids.request,
+            ids.correlation,
+          ],
+        );
+      } else {
+        await client.query(
+          `INSERT INTO marketplace.inventory_items
+             (inventory_item_id, vendor_location_id, product_reference, display_name,
+              quantity_basis, availability_state, last_confirmed_at, version, request_id,
+              correlation_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'VENDOR_CONFIRMS', 'VENDOR_CONFIRMS', $5, 1, $6, $7, $5, $5)
+           ON CONFLICT DO NOTHING`,
+          [
+            inventoryId,
+            input.vendor_location_id,
+            input.product_reference,
+            input.title,
+            now,
+            ids.request,
+            ids.correlation,
+          ],
+        );
+      }
       return { catalogue_product_id: productId, catalogue_variant_id: variantId, version: 1 };
     });
+  }
+
+  async setVariantPrice(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+    readonly catalogue_variant_id: UuidV7;
+    readonly price_minor: number;
+    readonly reason_code?: string;
+    readonly now?: Date;
+  }): Promise<{ readonly catalogue_price_id: UuidV7 }> {
+    const actorId = actor(input.context);
+    if (
+      !Number.isSafeInteger(input.price_minor) ||
+      input.price_minor < 0 ||
+      input.price_minor > 1_000_000_000
+    ) {
+      throw new CatalogueImportInputError();
+    }
+    const now = input.now ?? new Date();
+    const requestId = parseRequestId(input.context.request_id);
+    const correlationId = parseUuidV7(input.context.correlation_id);
+    // Validate the variant belongs to a product in this vendor's location.
+    const scope = await this.#pool.query<{ exists: boolean }>(
+      `SELECT 1 AS exists FROM marketplace.catalogue_product_variants v
+         JOIN marketplace.catalogue_products p ON p.catalogue_product_id = v.catalogue_product_id
+        WHERE v.catalogue_variant_id = $1 AND p.vendor_location_id = $2 AND v.lifecycle_state = 'ACTIVE'`,
+      [input.catalogue_variant_id, input.vendor_location_id],
+    );
+    if (!scope.rows[0]) {
+      throw new CatalogueImportInputError();
+    }
+    const priceId = createUuidV7({ now_ms: now.getTime() });
+    const client = await this.#pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Close the price this one replaces. Every reader of a current price
+      // matches on `effective_until IS NULL`, so leaving the old row open left
+      // two current prices for the same variant: discovery picked one of them
+      // arbitrarily with LIMIT 1, and checkout's placement guard — which
+      // refuses a quote whose snapshot price no longer matches — could compare
+      // against whichever row the planner happened to return.
+      await client.query(
+        `UPDATE marketplace.catalogue_prices
+            SET effective_until=$2
+          WHERE catalogue_variant_id=$1 AND effective_until IS NULL`,
+        [input.catalogue_variant_id, now],
+      );
+      await client.query(
+        `INSERT INTO marketplace.catalogue_prices
+           (catalogue_price_id, catalogue_variant_id, price_minor, currency,
+            effective_from, reason_code, actor_id, request_id, correlation_id, created_at)
+         VALUES ($1, $2, $3, 'INR', $4, $5, $6, $7, $8, $4)`,
+        [
+          priceId,
+          input.catalogue_variant_id,
+          input.price_minor,
+          now,
+          input.reason_code ?? 'MANUAL_UPDATE',
+          actorId,
+          requestId,
+          correlationId,
+        ],
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    return { catalogue_price_id: priceId };
+  }
+
+  async listCategories(
+    input: {
+      readonly vendor_location_id?: UuidV7;
+    } = {},
+  ): Promise<readonly { readonly category: string; readonly product_count: number }[]> {
+    const rows = input.vendor_location_id
+      ? await this.#pool.query<{ category: string; product_count: string }>(
+          `SELECT category, COUNT(*)::text AS product_count
+             FROM marketplace.catalogue_products
+            WHERE vendor_location_id = $1 AND lifecycle_state = 'ACTIVE'
+            GROUP BY category
+            ORDER BY category`,
+          [input.vendor_location_id],
+        )
+      : await this.#pool.query<{ category: string; product_count: string }>(
+          `SELECT p.category, COUNT(*)::text AS product_count
+             FROM marketplace.catalogue_products p
+             JOIN marketplace.vendor_publication_cases pub
+               ON pub.vendor_location_id = p.vendor_location_id AND pub.lifecycle_state = 'PUBLISHED'
+            WHERE p.lifecycle_state = 'ACTIVE'
+            GROUP BY p.category
+            ORDER BY p.category`,
+        );
+    return rows.rows.map((row) => ({
+      category: row.category,
+      product_count: Number(row.product_count),
+    }));
   }
 
   async updateProduct(input: {
@@ -626,11 +815,28 @@ export class CatalogueProductService {
     readonly object_reference: string;
     readonly alt_text: string;
     readonly position: number;
+    /**
+     * What the protected object store needs to hand the bytes back.
+     *
+     * `readGranted` verifies content against an expected checksum before
+     * returning it, so a row without one can never be served; the media type is
+     * recorded rather than sniffed at request time. Omitted for a fixture row
+     * that references no stored object, which then renders as a placeholder.
+     */
+    readonly stored?: {
+      readonly media_type: 'image/jpeg' | 'image/png';
+      readonly content_sha256: string;
+      readonly content_length: number;
+    };
     readonly now?: Date;
   }) {
     actor(input.context);
+    // Accept opaque provider references and locally-stored object keys.
     if (
-      !/^SYNTH-OBJECT-[A-Z0-9-]{4,64}$/.test(input.object_reference) ||
+      !(
+        /^[A-Za-z0-9][A-Za-z0-9._:/-]{3,255}$/.test(input.object_reference) ||
+        /^catalogue-images\/[0-9a-f-]{36}\/[0-9a-f-]{36}\/object$/.test(input.object_reference)
+      ) ||
       !title.test(input.alt_text) ||
       !Number.isSafeInteger(input.position) ||
       input.position < 1 ||
@@ -646,13 +852,16 @@ export class CatalogueProductService {
       const imageId = createUuidV7({ now_ms: (input.now ?? new Date()).getTime() });
       try {
         await client.query(
-          `INSERT INTO marketplace.catalogue_product_images (catalogue_image_id,catalogue_product_id,object_reference,alt_text,position,created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
+          `INSERT INTO marketplace.catalogue_product_images (catalogue_image_id,catalogue_product_id,object_reference,alt_text,position,media_type,content_sha256,content_length,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
           [
             imageId,
             input.catalogue_product_id,
             input.object_reference,
             input.alt_text,
             input.position,
+            input.stored?.media_type ?? null,
+            input.stored?.content_sha256 ?? null,
+            input.stored?.content_length ?? null,
             input.now ?? new Date(),
           ],
         );
@@ -663,6 +872,62 @@ export class CatalogueProductService {
       }
       return { catalogue_image_id: imageId };
     });
+  }
+
+  /**
+   * The bytes of one published catalogue image.
+   *
+   * Public on purpose: a storefront photograph is Public data under the
+   * architecture's classification, unlike a vendor's verification documents,
+   * which share the same object store behind an authenticated, granted path.
+   * The grant is minted here and consumed immediately, so no signed URL is ever
+   * handed to a browser and the object key never leaves the server.
+   *
+   * Returns null when the image does not exist, belongs to a product that is no
+   * longer active, or is a fixture row with no stored object — all of which the
+   * caller answers identically, so a probe cannot distinguish them.
+   */
+  async readPublishedImage(input: {
+    readonly catalogue_image_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<{
+    readonly bytes: Uint8Array;
+    readonly media_type: 'image/jpeg' | 'image/png';
+    readonly content_sha256: string;
+  } | null> {
+    if (!this.#storage) return null;
+    const found = await this.#pool.query<{
+      object_reference: string;
+      media_type: 'image/jpeg' | 'image/png' | null;
+      content_sha256: string | null;
+    }>(
+      `SELECT i.object_reference, i.media_type, i.content_sha256
+         FROM marketplace.catalogue_product_images i
+         JOIN marketplace.catalogue_products p
+           ON p.catalogue_product_id = i.catalogue_product_id
+        WHERE i.catalogue_image_id = $1
+          AND p.lifecycle_state = 'ACTIVE'
+          AND i.content_sha256 IS NOT NULL`,
+      [input.catalogue_image_id],
+    );
+    const row = found.rows[0];
+    if (!row || row.media_type === null || row.content_sha256 === null) return null;
+    const grant = this.#storage.issueReadGrant({
+      object_key: row.object_reference,
+      ttl_seconds: 30,
+    });
+    try {
+      const bytes = await this.#storage.readGranted({
+        expected_sha256: row.content_sha256,
+        grant,
+        ...(input.now === undefined ? {} : { now: input.now }),
+      });
+      return { bytes, media_type: row.media_type, content_sha256: row.content_sha256 };
+    } catch {
+      // A missing or corrupted object is an operational fault, not a client
+      // error: the caller renders the placeholder rather than a broken image.
+      return null;
+    }
   }
 
   async setSubstitution(input: {

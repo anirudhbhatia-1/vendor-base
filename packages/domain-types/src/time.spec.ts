@@ -24,3 +24,29 @@ test('preserves a validated IANA operating timezone beside the UTC instant', () 
   });
   assert.throws(() => createIanaTimeZone('Jaipur/Local'), /IANA timezone/);
 });
+
+test('createIanaTimeZone accepts named zones, including multi-part and alias names', () => {
+  for (const zone of [
+    'Asia/Kolkata',
+    'America/Argentina/Buenos_Aires',
+    'Europe/London',
+    'Asia/Calcutta',
+    'UTC',
+  ]) {
+    assert.equal(createIanaTimeZone(zone), zone);
+  }
+});
+
+test('createIanaTimeZone refuses a fixed UTC offset that ECMA-402 would accept', () => {
+  // `new Intl.DateTimeFormat('en', { timeZone: '+05:30' })` does not throw, so the Intl
+  // probe alone let an offset through. An offset carries no daylight-saving rules, so a
+  // vendor stored with one computes its own opening hours wrongly for half the year in
+  // any zone that observes DST.
+  for (const offset of ['+05:30', '-08:00', '+0530', '-8']) {
+    assert.throws(() => createIanaTimeZone(offset), /not a fixed UTC offset/);
+  }
+});
+
+test('createIanaTimeZone still refuses a zone that does not exist', () => {
+  assert.throws(() => createIanaTimeZone('Mars/Olympus'), /valid IANA timezone name/);
+});

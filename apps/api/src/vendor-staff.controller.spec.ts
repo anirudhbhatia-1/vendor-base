@@ -40,6 +40,10 @@ const settingsRoutes = [
   'addZone',
   'deactivateZone',
   'fulfilmentModes',
+  // Reading zones and closures is scoped exactly like writing them: a store
+  // that cannot see its own service area cannot correct it.
+  'listZones',
+  'listClosures',
 ] as const;
 
 test('contains every staff route to vendor.staff.manage at the owning location', () => {

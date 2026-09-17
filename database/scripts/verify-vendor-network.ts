@@ -11,6 +11,7 @@ import {
   VendorNetworkTransitionError,
   VendorNetworkVersionConflictError,
 } from '../src/vendor-network.js';
+import { check } from './verify-support.js';
 
 async function expectError(
   operation: () => Promise<unknown>,
@@ -78,10 +79,59 @@ export async function verifyVendorNetwork(connectionString: string): Promise<voi
       [adminId, base],
     );
 
+    // A name is typed the way a person says it and stored the way the schema
+    // demands. Rejecting the human form here only moved the failure into a raw
+    // check violation, which reached the admin as a 500.
+    //
+    // Migration 0062 removed the mandatory `SYNTH ` prefix from
+    // `vendor_business_name_shape`, so a name is now stored exactly as a person
+    // types it. This assertion still demanded the old synthetic form and was
+    // failing the whole `pnpm db:verify` ladder at its second module.
+    const namedVendorId = createUuidV7();
+    const named = await network.createVendor({
+      business_name: 'Sharma Kirana',
+      context: context(),
+      vendor_id: namedVendorId,
+    });
+    check(
+      named.business_name === 'Sharma Kirana',
+      `A plain business name was not stored as typed (${named.business_name})`,
+    );
+
+    // A historical fixture prefix must normalize away rather than accumulate,
+    // so re-importing synthetic data cannot produce "SYNTH SYNTH ..." names.
+    const prefixedVendorId = createUuidV7();
+    const prefixed = await network.createVendor({
+      business_name: 'SYNTH Sharma Kirana',
+      context: context(),
+      vendor_id: prefixedVendorId,
+    });
+    check(
+      prefixed.business_name === 'Sharma Kirana',
+      `A historical synthetic prefix was not normalized away (${prefixed.business_name})`,
+    );
+
+    // MKT-11 is a Launch feature and the launch city is Jaipur, so a shop whose name is
+    // written in Hindi must be storable. `\p{L}` matches Devanagari consonants but not
+    // the vowel signs that spell most Hindi words -- those are combining marks -- so
+    // every user-visible name field rejected names like this one while the database
+    // constraint, length-only since migration 0062, would have accepted them.
+    const devanagariVendorId = createUuidV7();
+    const devanagari = await network.createVendor({
+      business_name: '\u0936\u0930\u094d\u092e\u093e \u0915\u093f\u0930\u093e\u0928\u093e',
+      context: context(),
+      vendor_id: devanagariVendorId,
+    });
+    check(
+      devanagari.business_name ===
+        '\u0936\u0930\u094d\u092e\u093e \u0915\u093f\u0930\u093e\u0928\u093e',
+      `A Devanagari business name was not stored as typed (${devanagari.business_name})`,
+    );
+
     await expectError(
       () =>
         network.createVendor({
-          business_name: 'Real-looking vendor',
+          business_name: 'Bad ~ name',
           context: context(),
           vendor_id: createUuidV7(),
         }),
@@ -194,6 +244,7 @@ export async function verifyVendorNetwork(connectionString: string): Promise<voi
       vendor_location_id: locationId,
     });
 
+    const coreZoneId = createUuidV7();
     version = await network.addServiceZone({
       boundary: {
         type: 'Polygon',
@@ -211,10 +262,62 @@ export async function verifyVendorNetwork(connectionString: string): Promise<voi
       expected_version: version,
       now: base,
       operating_timezone: 'Asia/Kolkata',
-      service_zone_id: createUuidV7(),
+      service_zone_id: coreZoneId,
       vendor_location_id: locationId,
       zone_name: 'SYNTH Jaipur Core Zone',
     });
+
+    // A neighbourhood that becomes undeliverable has to be closable, and
+    // reopenable, without touching the database by hand. Discovery filters on
+    // this state, so the suspension takes effect on the next customer read.
+    const suspendedVersion = await network.transitionServiceZone({
+      context: context(),
+      expected_version: 1,
+      lifecycle_state: 'INACTIVE',
+      now: base,
+      reason_code: 'WEATHER_INCIDENT',
+      service_zone_id: coreZoneId,
+    });
+    const suspended = await pool.query<{ lifecycle_state: string }>(
+      'SELECT lifecycle_state FROM marketplace.vendor_service_zones WHERE service_zone_id=$1',
+      [coreZoneId],
+    );
+    check(
+      suspended.rows[0]?.lifecycle_state === 'INACTIVE',
+      'A suspended service zone stayed active',
+    );
+    await expectError(
+      () =>
+        network.transitionServiceZone({
+          context: context(),
+          expected_version: suspendedVersion,
+          lifecycle_state: 'INACTIVE',
+          now: base,
+          reason_code: 'WEATHER_INCIDENT',
+          service_zone_id: coreZoneId,
+        }),
+      VendorNetworkTransitionError,
+    );
+    await network.transitionServiceZone({
+      context: context(),
+      expected_version: suspendedVersion,
+      lifecycle_state: 'ACTIVE',
+      now: base,
+      reason_code: 'WEATHER_INCIDENT_CLEARED',
+      service_zone_id: coreZoneId,
+    });
+    const resumed = await pool.query<{ lifecycle_state: string }>(
+      'SELECT lifecycle_state FROM marketplace.vendor_service_zones WHERE service_zone_id=$1',
+      [coreZoneId],
+    );
+    check(resumed.rows[0]?.lifecycle_state === 'ACTIVE', 'A resumed service zone stayed suspended');
+    // Closing or reopening a zone changes where the location serves, so it is
+    // recorded as a transition of the location and advances its version.
+    const afterZoneWork = await pool.query<{ version: number }>(
+      'SELECT version FROM marketplace.vendor_locations WHERE vendor_location_id=$1',
+      [locationId],
+    );
+    version = afterZoneWork.rows[0]?.version ?? version;
 
     await expectError(
       () =>

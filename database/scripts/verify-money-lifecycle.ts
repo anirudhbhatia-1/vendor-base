@@ -5,12 +5,10 @@ import {
   parseUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
+import { SYNTHETIC_FINANCIAL_POLICY } from '../src/money-policy.js';
 import { MoneyLifecycleService } from '../src/money-lifecycle.js';
 import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
-
-function check(value: unknown, message: string): asserts value {
-  if (!value) throw new Error(message);
-}
+import { check } from './verify-support.js';
 
 const TABLES = `marketplace.financial_correction_events, marketplace.financial_corrections,
   marketplace.finance_exceptions, marketplace.provider_statement_rows,
@@ -167,12 +165,17 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       successful_refunds_minor: 6_000,
       vendor_item_minor: 30_000,
       vendor_location_id: location,
+      financial_policy: SYNTHETIC_FINANCIAL_POLICY,
+      policy_version_reference: 'SYNTH-POLICY-FIN-V1-TEST0001',
       now: new Date(now.getTime() + 6_000),
     });
+    // Commission is now a rate rather than a flat fee: 500 basis points of the
+    // 24,000 the vendor actually supplied is 1,200, where the old flat fee took
+    // 500 regardless of basket size.
     check(
-      Number(settlement.vendor_payable_minor) === 23_500 &&
+      Number(settlement.vendor_payable_minor) === 22_800 &&
         Number(settlement.partner_payable_minor) === 4_900 &&
-        Number(settlement.platform_remainder_minor) === 500,
+        Number(settlement.platform_remainder_minor) === 1_200,
       'Refunded settlement did not preserve the approved policy balance',
     );
     const settlementLines = await pool.query<{ count: string }>(
@@ -183,7 +186,9 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
 
     const payoutTime = new Date(new Date(settlement.eligible_at).getTime() + 1_000);
     const vendorPayout = await service.schedulePayout({
-      amount_minor: 23_500,
+      // Matches the vendor payable above, which the commission rate reduced
+      // from 23,500 to 22,800.
+      amount_minor: 22_800,
       beneficiary_kind: 'VENDOR',
       beneficiary_reference: 'SYNTH-BENEFICIARY-VENDOR-0001',
       context: context(),
@@ -346,7 +351,9 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
           provider_state: 'SUCCEEDED',
         },
         {
-          amount_minor: 23_500,
+          // Matches the payout amount so this row isolates a status mismatch;
+          // the refund row above is the one that mismatches on amount.
+          amount_minor: 22_800,
           operation_kind: 'PAYOUT',
           provider_operation_reference: 'SYNTH-PAYOUT-VENDOR-0001',
           provider_state: 'FAILED',

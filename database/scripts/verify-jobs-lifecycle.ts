@@ -10,6 +10,11 @@ import {
   scheduleDurableJob,
 } from '../src/durable-jobs.js';
 
+/** Append-only guards must refuse with 55000, not an internal field-resolution error. */
+function isAppendOnlyRefusal(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '55000';
+}
+
 export async function verifyDurableJobs(connectionString: string): Promise<void> {
   const pool = new Pool({
     application_name: 'neighbourhood-store-test-job-verifier',
@@ -23,10 +28,11 @@ export async function verifyDurableJobs(connectionString: string): Promise<void>
   const schedule = async (
     key: string,
     options: {
+      readonly job_id?: string;
       readonly max_attempts?: number;
       readonly payload?: Record<string, boolean | number | string>;
       readonly priority?: number;
-      readonly run_at?: Date;
+      readonly run_at?: Date | 'immediate';
     } = {},
   ) => {
     const client = await pool.connect();
@@ -34,13 +40,14 @@ export async function verifyDurableJobs(connectionString: string): Promise<void>
       return await scheduleDurableJob(client, {
         correlation_id: createUuidV7(),
         idempotency_key: key,
+        ...(options.job_id === undefined ? {} : { job_id: options.job_id }),
         job_type: 'synthetic_jobs.perform',
         ...(options.max_attempts === undefined ? {} : { max_attempts: options.max_attempts }),
         payload: options.payload ?? { synthetic: true },
         ...(options.priority === undefined ? {} : { priority: options.priority }),
         queue_scope: queueScope,
         request_id: createRequestId(),
-        run_at: options.run_at ?? new Date(Date.now() - 1_000),
+        run_at: options.run_at ?? 'immediate',
       });
     } finally {
       client.release();
@@ -60,7 +67,7 @@ export async function verifyDurableJobs(connectionString: string): Promise<void>
         payload: { synthetic: true },
         queue_scope: queueScope,
         request_id: createRequestId(),
-        run_at: new Date(),
+        run_at: 'immediate',
       });
       await rollbackClient.query('ROLLBACK');
     } finally {
@@ -71,6 +78,58 @@ export async function verifyDurableJobs(connectionString: string): Promise<void>
       [rollbackJobId],
     );
     if (rolledBack.rows[0]?.exists) throw new Error('Rolled-back schedule became durable');
+
+    // A job meant to run now must be stamped by the database, not by this process.
+    // Scheduling it with `new Date()` compared the application server's clock against
+    // the claim query's `clock_timestamp()`, so any skew between the two left a
+    // supposedly-runnable job unclaimable — an intermittent failure in the mandatory
+    // `pnpm db:verify` gate rather than a reproducible one.
+    const clockScope = 'synthetic_jobs.clock';
+    const scheduleInClockScope = async (key: string, runAt: Date | 'immediate') => {
+      const jobId = createUuidV7();
+      const client = await pool.connect();
+      try {
+        await scheduleDurableJob(client, {
+          correlation_id: createUuidV7(),
+          idempotency_key: key,
+          job_id: jobId,
+          job_type: 'synthetic_jobs.perform',
+          payload: { operation: key },
+          queue_scope: clockScope,
+          request_id: createRequestId(),
+          run_at: runAt,
+        });
+      } finally {
+        client.release();
+      }
+      return jobId;
+    };
+    const immediateJobId = await scheduleInClockScope('immediate-job-0001', 'immediate');
+    const immediateRow = await pool.query<{ claimable: boolean; skew_ms: number }>(
+      `SELECT run_at <= clock_timestamp() AS claimable,
+              EXTRACT(MILLISECOND FROM (clock_timestamp() - run_at))::float8 AS skew_ms
+         FROM marketplace.scheduled_jobs
+        WHERE job_id = $1`,
+      [immediateJobId],
+    );
+    if (immediateRow.rows[0]?.claimable !== true) {
+      throw new Error('An immediate job was not claimable the instant it was scheduled');
+    }
+    // Contrast: a genuine future time must still be withheld from workers. Both live in
+    // their own queue scope — `scheduled_jobs` is append-only, so they cannot be removed,
+    // and left in the shared scope the immediate one would be claimed by a later batch.
+    const futureJobId = await scheduleInClockScope(
+      'future-job-0001',
+      new Date(Date.now() + 60 * 60 * 1_000),
+    );
+    const futureRow = await pool.query<{ claimable: boolean }>(
+      `SELECT run_at <= clock_timestamp() AS claimable
+         FROM marketplace.scheduled_jobs WHERE job_id = $1`,
+      [futureJobId],
+    );
+    if (futureRow.rows[0]?.claimable !== false) {
+      throw new Error('A job scheduled for the future was offered to workers early');
+    }
 
     const sameRunAt = new Date(Date.now() + 60 * 60 * 1_000);
     const firstSchedule = await schedule('deduplicated-job-0001', {
@@ -293,19 +352,43 @@ export async function verifyDurableJobs(connectionString: string): Promise<void>
           WHERE job_id = $1`,
         [firstSchedule.job_id],
       );
-    } catch {
-      immutableRejected = true;
+    } catch (error: unknown) {
+      immutableRejected = isAppendOnlyRefusal(error);
     }
+    // The deletion path was raising `42703 record "old" has no field "outcome"` -- the
+    // shared guard resolving a job_attempts column while firing on scheduled_jobs. A
+    // bare catch accepted that, so the documented `55000` contract was broken and the
+    // test stayed green. Migration 0066 fixed the guard; checking the code keeps it fixed.
     let deletionRejected = false;
     try {
       await pool.query(`DELETE FROM marketplace.scheduled_jobs WHERE job_id = $1`, [
         firstSchedule.job_id,
       ]);
-    } catch {
-      deletionRejected = true;
+    } catch (error: unknown) {
+      deletionRejected = isAppendOnlyRefusal(error);
     }
     if (!immutableRejected || !deletionRejected) {
-      throw new Error('Durable job identity or history accepted destructive mutation');
+      throw new Error('Durable job identity or history did not refuse with the append-only code');
+    }
+
+    // The same guard function fires for job_attempts, so both tables it serves are
+    // asserted rather than only the one whose columns it reads. This targets a row that
+    // exists: `firstSchedule` was never claimed, so deleting its attempts matches
+    // nothing, raises nothing, and would fail the assertion for want of a row rather
+    // than because the guard let anything through.
+    const existingAttempt = await pool.query<{ attempt_id: string }>(
+      `SELECT attempt_id FROM marketplace.job_attempts LIMIT 1`,
+    );
+    const attemptId = existingAttempt.rows[0]?.attempt_id;
+    if (!attemptId) throw new Error('No job attempt was recorded to test history protection');
+    let attemptDeletionRejected = false;
+    try {
+      await pool.query(`DELETE FROM marketplace.job_attempts WHERE attempt_id = $1`, [attemptId]);
+    } catch (error: unknown) {
+      attemptDeletionRejected = isAppendOnlyRefusal(error);
+    }
+    if (!attemptDeletionRejected) {
+      throw new Error('Job attempt history did not refuse deletion with the append-only code');
     }
   } finally {
     await pool.end();

@@ -44,6 +44,33 @@ services:
       retries: 30
       start_period: 10s
 
+  valkey:
+    image: valkey/valkey:8.1.9-alpine3.24@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
+    restart: 'no'
+    command: ['valkey-server', '--save', '', '--appendonly', 'no']
+    ports:
+      - '127.0.0.1:6379:6379'
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  valkey-test:
+    profiles: ['test']
+    image: valkey/valkey:8.1.9-alpine3.24@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
+    restart: 'no'
+    command: ['valkey-server', '--save', '', '--appendonly', 'no']
+    ports:
+      - '127.0.0.1:6380:6379'
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
 volumes:
   marketplace_postgres_local:
     name: neighbourhood_store_postgres_local

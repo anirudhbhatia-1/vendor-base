@@ -4,6 +4,8 @@
     "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    // Errors inside third-party declarations only (`@supabase/auth-js`); this
+    // package's own code stays fully checked. Confirmed with `tsc --skipLibCheck false`.
     "skipLibCheck": true,
     "types": ["node"]
   },

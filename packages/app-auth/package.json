@@ -1,0 +1,30 @@
+{
+  "name": "@neighbourhood-store/app-auth",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Native session helpers for the Expo shells: secure token storage, the Supabase client, and the sign-in screen.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./supabase": "./src/native-supabase.ts"
+  },
+  "scripts": {
+    "test:unit": "node --import tsx --test src/*.spec.ts",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@neighbourhood-store/contracts": "workspace:*",
+    "@neighbourhood-store/ui-tokens": "workspace:*"
+  },
+  "peerDependencies": {
+    "@supabase/supabase-js": "2.58.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "2.58.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
+  }
+}

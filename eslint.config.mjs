@@ -16,6 +16,7 @@ const ignoredPaths = [
   '**/test-results/**',
   '**/playwright-report/**',
   '**/outputs/**',
+  '**/design-handoff/**',
 ];
 
 export default tseslint.config(
@@ -45,14 +46,25 @@ export default tseslint.config(
     ],
     languageOptions: {
       globals: {
+        AbortController: 'readonly',
         AbortSignal: 'readonly',
         Buffer: 'readonly',
+        clearTimeout: 'readonly',
         console: 'readonly',
+        structuredClone: 'readonly',
         fetch: 'readonly',
         process: 'readonly',
         setTimeout: 'readonly',
         URL: 'readonly',
       },
+    },
+  },
+  {
+    // Operator command-line tools. Their output *is* the interface, so the
+    // structured-logging rule that applies to services does not apply here.
+    files: ['tooling/scripts/**', 'database/scripts/**', 'apps/*/scripts/**'],
+    rules: {
+      'no-console': 'off',
     },
   },
   {

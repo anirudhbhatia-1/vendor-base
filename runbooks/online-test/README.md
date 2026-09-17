@@ -1,6 +1,15 @@
 # Online-Test Account Setup, Deployment, and Rollback
 
-> **PAUSED:** D-12 makes local company development the only active path. Do not execute this runbook, create resources, connect credentials, apply remote migrations, or deploy until an explicit superseding decision is recorded. Existing Cloudflare snapshots and the empty Supabase baseline are non-authoritative paused resources; R2 and OCI were not activated.
+> **NOT AUTHORIZED TO EXECUTE.** D-15 supersedes D-12's local-only restriction and records the
+> approved staging direction, so the "explicit superseding decision" this runbook previously
+> waited on now exists. **Approval is not activation.** D-15 states plainly that credentials,
+> accounts, operational approvals and deployed availability are not assumed, and that spending
+> stays a separate gate. Nothing here may be executed until the account owner has approved
+> provisioning and any payment-card verification, because no compute is provisioned and OCI
+> Free Tier can still require a card.
+>
+> Current state: the Cloudflare snapshots and the empty Supabase baseline are non-authoritative
+> paused resources; object storage and OCI compute are not activated.
 
 This runbook establishes the selected free online company-test stack. It does not establish production. Use company-owned accounts, enable MFA, keep recovery codes in the company's approved password manager, and never paste passwords, OTPs, private keys, database URLs, or tokens into chat or Git.
 
@@ -18,13 +27,19 @@ Stop before continuing if a provider asks for an unexpected payment, the request
 
 Do not add deployment credentials until each target account exists. Prefer GitHub OpenID Connect or provider-scoped short-lived credentials over long-lived keys when the provider supports it.
 
-## 2. Cloudflare Pages, R2, and ingress
+## 2. Cloudflare Pages, Supabase Storage, and ingress
 
 1. Create or select the company Cloudflare account, enable MFA, and invite a second company administrator.
 2. Create four Direct Upload Pages projects using the names in `release.env.example`.
 3. Run `pnpm build:online-test:pwas`. Upload each matching `apps/<role>-pwa/out` directory to its project.
 4. Set no secrets in Pages. Only explicitly public `NEXT_PUBLIC_*` build values may enter client bundles.
-5. Create a private R2 bucket named `neighbourhood-online-test-private`. Keep public access disabled. Do not create access keys until the storage adapter is implemented.
+5. Object storage is **not** Cloudflare R2. D-15 approves Supabase Storage, and
+   `SupabaseProtectedObjectStorage` implements it. Create two private Supabase buckets — one for
+   approved catalogue assets, one for quarantined evidence — and never the same bucket for both;
+   both `loadSharedRuntimeConfig` and the adapter refuse a shared-bucket configuration. Set
+   `OBJECT_STORAGE_DRIVER=supabase` with `OBJECT_STORAGE_CATALOGUE_BUCKET` and
+   `OBJECT_STORAGE_EVIDENCE_BUCKET`. Nothing has been uploaded to a live project, so the adapter
+   is verified against contract tests only.
 6. Reserve a Cloudflare Tunnel for the OCI API. Do not publish the API port directly; the Compose file binds it to `127.0.0.1`.
 7. Enable spending/usage notifications where the account offers them and record all four HTTPS URLs and deployment IDs.
 
@@ -35,7 +50,7 @@ Cloudflare's documented static Next.js flow uses `output: 'export'` and an `out`
 1. Create a dedicated project named `neighbourhood-online-test` in the closest company-approved region. Use a generated database password and save it only in the company password manager.
 2. Record the 20-character project reference, region, and project owner. Do not record the database URL in evidence.
 3. Enable PostGIS using the reviewed migration path, not ad hoc dashboard edits.
-4. Store the direct TLS connection string in a protected local shell only for the migration session. The repository requires `sslmode=require` and verifies the project reference.
+4. Store the direct TLS connection string in a protected local shell only for the migration session. The repository requires `sslmode=verify-full` and verifies the project reference.
 5. Inspect status first. Then apply only reviewed migrations with the explicit confirmation:
 
 ```bash
@@ -56,7 +71,13 @@ pnpm db:migrate:online-test
 3. Create the smallest available Always Free Ampere VM that safely fits the skeleton. Enable automatic security updates, SSH-key access, and no password login.
 4. Keep ingress closed except SSH from the approved administrator range. The future Cloudflare Tunnel makes the outbound connection; do not expose port 3001 publicly.
 5. Install a supported rootless container runtime and Compose provider on the VM. Create an unprivileged deployment user.
-6. Create OCI Vault secrets only when an implemented server adapter consumes them. Planned values include database runtime URLs, R2 credentials, and provider keys; the current API/worker shells need none.
+6. Create OCI Vault secrets only when an implemented server adapter consumes them. The API and
+   worker now refuse to start without them: `ALLOW_SYNTHETIC_PROVIDERS`, `OTP_HASH_KEY`,
+   `SESSION_TOKEN_HASH_KEY`, `OBJECT_STORAGE_GRANT_KEY`, `PAYMENT_WEBHOOK_KEY`,
+   `PROVIDER_CLEARING_ACCOUNT_REFERENCE`, `ONLINE_TEST_DATABASE_URL`, `VALKEY_URL` and
+   `ONLINE_TEST_SUPABASE_PROJECT_REF`, each injected through `${VAR:?...}` in the Compose file.
+   Committed synthetic defaults are rejected outside local development, so a missing value stops
+   the deployment rather than silently falling back.
 7. Build API and worker images using a verified digest-pinned Node base. Push them to a private registry available to the VM and capture their immutable digests. Mutable tags such as `latest` are forbidden for releases.
 8. Copy `infrastructure/online-test/compose.yaml` and a locally created, uncommitted `release.env` to the deployment directory. Validate before applying:
 

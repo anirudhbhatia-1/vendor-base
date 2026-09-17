@@ -2,68 +2,35 @@ import {
   BadRequestException,
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Header,
-  Headers,
   HttpCode,
-  HttpException,
   Inject,
   Param,
   Post,
   Put,
-  ServiceUnavailableException,
+  Req,
   UnauthorizedException,
 } from '@nestjs/common';
 import {
   OtpIdentityService,
-  OtpInvalidError,
-  OtpRateLimitedError,
-  OtpUnavailableError,
-  OtpVerificationRejectedError,
   IdentitySessionService,
-  SessionForbiddenError,
-  SessionInputError,
-  SessionInvalidError,
-  SessionReplayDetectedError,
   type OtpProviderScenario,
 } from '@neighbourhood-store/database';
 import { currentRequestContext } from './request-context-storage.js';
 import { OTP_IDENTITY, SESSION_IDENTITY } from './tokens.js';
-import { RequireAuthorization } from './authorization.js';
-
-function objectBody(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new BadRequestException();
-  }
-  return value as Record<string, unknown>;
-}
-
-function stringField(body: Record<string, unknown>, field: string): string {
-  const value = body[field];
-  if (typeof value !== 'string') throw new BadRequestException();
-  return value;
-}
-
-function translate(error: unknown): never {
-  if (error instanceof OtpRateLimitedError) throw new HttpException('Rate limited', 429);
-  if (error instanceof OtpUnavailableError) throw new ServiceUnavailableException();
-  if (error instanceof OtpVerificationRejectedError) throw new UnauthorizedException();
-  if (error instanceof SessionInvalidError || error instanceof SessionReplayDetectedError) {
-    throw new UnauthorizedException();
-  }
-  if (error instanceof SessionForbiddenError) throw new ForbiddenException();
-  if (error instanceof SessionInputError) throw new BadRequestException();
-  if (error instanceof OtpInvalidError || error instanceof TypeError) {
-    throw new BadRequestException();
-  }
-  throw error;
-}
-
-function bearerToken(value: string | undefined): string {
-  const match = /^Bearer (nsa_[A-Za-z0-9_-]{43})$/.exec(value ?? '');
-  if (!match?.[1]) throw new UnauthorizedException();
-  return match[1];
+import {
+  AUTHENTICATED_SESSION,
+  RequireAuthorization,
+  RequireSession,
+  type AuthorizedRequest,
+} from './authorization.js';
+import { object, stringField } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
+function authenticatedSession(request: AuthorizedRequest) {
+  const principal = request[AUTHENTICATED_SESSION];
+  if (!principal) throw new UnauthorizedException();
+  return principal;
 }
 
 @Controller('auth')
@@ -87,7 +54,7 @@ export class OtpController {
   @Post('otp/request')
   @HttpCode(202)
   async request(@Body() rawBody: unknown) {
-    const body = objectBody(rawBody);
+    const body = object(rawBody);
     const scenario = body.test_scenario;
     if (
       scenario !== undefined &&
@@ -113,7 +80,8 @@ export class OtpController {
         status: result.status.toLowerCase(),
       };
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -121,10 +89,13 @@ export class OtpController {
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
   async verify(@Body() rawBody: unknown) {
-    const body = objectBody(rawBody);
+    const body = object(rawBody);
+    if (body.customer_enrolment !== undefined && typeof body.customer_enrolment !== 'boolean')
+      throw new BadRequestException();
     try {
       const result = await this.sessions.completeOtpSignIn({
         challenge_id: stringField(body, 'challenge_id'),
+        customer_enrolment: body.customer_enrolment === true,
         code: stringField(body, 'code'),
         context: currentRequestContext(),
         device_id: stringField(body, 'device_id'),
@@ -135,7 +106,8 @@ export class OtpController {
       });
       return result;
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -143,79 +115,80 @@ export class OtpController {
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
   async refresh(@Body() rawBody: unknown) {
-    const body = objectBody(rawBody);
+    const body = object(rawBody);
     try {
       return await this.sessions.refresh({
         context: currentRequestContext(),
         refresh_token: stringField(body, 'refresh_token'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
   @Get('sessions')
-  async list(@Headers('authorization') authorization: string | undefined) {
+  @RequireSession()
+  async list(@Req() request: AuthorizedRequest) {
     try {
       return {
-        sessions: await this.sessions.listSessions({
-          access_token: bearerToken(authorization),
-          context: currentRequestContext(),
+        sessions: await this.sessions.listSessionsForPrincipal({
+          current: authenticatedSession(request),
         }),
       };
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
   @Post('sessions/sign-out')
+  @RequireSession()
   @HttpCode(200)
-  async signOut(@Headers('authorization') authorization: string | undefined) {
+  async signOut(@Req() request: AuthorizedRequest) {
     try {
-      return await this.sessions.revoke({
-        access_token: bearerToken(authorization),
+      return await this.sessions.revokeForPrincipal({
+        current: authenticatedSession(request),
         context: currentRequestContext(),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
   @Post('sessions/:session_id/revoke')
+  @RequireSession()
   @HttpCode(200)
-  async revokeOther(
-    @Headers('authorization') authorization: string | undefined,
-    @Param('session_id') sessionId: string,
-  ) {
+  async revokeOther(@Req() request: AuthorizedRequest, @Param('session_id') sessionId: string) {
     try {
-      return await this.sessions.revoke({
-        access_token: bearerToken(authorization),
+      return await this.sessions.revokeForPrincipal({
+        current: authenticatedSession(request),
         context: currentRequestContext(),
         target_session_id: sessionId,
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
   @Put('devices/current/notification-token')
-  async updateNotification(
-    @Headers('authorization') authorization: string | undefined,
-    @Body() rawBody: unknown,
-  ) {
-    const body = objectBody(rawBody);
+  @RequireSession()
+  async updateNotification(@Req() request: AuthorizedRequest, @Body() rawBody: unknown) {
+    const body = object(rawBody);
     const notificationToken = body.notification_token;
     if (notificationToken !== null && typeof notificationToken !== 'string') {
       throw new BadRequestException();
     }
     try {
-      return await this.sessions.updateNotificationToken({
-        access_token: bearerToken(authorization),
-        context: currentRequestContext(),
+      return await this.sessions.updateNotificationTokenForPrincipal({
+        current: authenticatedSession(request),
         notification_token: notificationToken,
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }

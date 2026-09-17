@@ -7,28 +7,28 @@ const workspaceRoot = fileURLToPath(new URL('../../', import.meta.url));
 const clients = [
   {
     appDirectory: 'apps/customer-app/dist',
-    expected: 'Customer PWA · Internal build',
+    expected: 'Customer · Neighbourhood Store',
     filter: '@neighbourhood-store/customer-pwa',
     role: 'customer',
     url: 'http://127.0.0.1:3100',
   },
   {
     appDirectory: 'apps/vendor-app/dist',
-    expected: 'Vendor desk · Jaipur company test',
+    expected: 'Vendor · Neighbourhood Store',
     filter: '@neighbourhood-store/vendor-pwa',
     role: 'vendor',
     url: 'http://127.0.0.1:3101',
   },
   {
     appDirectory: 'apps/partner-app/dist',
-    expected: 'Delivery Partner · Internal build',
+    expected: 'Delivery Partner · Neighbourhood Store',
     filter: '@neighbourhood-store/partner-pwa',
     role: 'partner',
     url: 'http://127.0.0.1:3102',
   },
   {
     appDirectory: 'apps/admin-app/dist',
-    expected: 'Admin PWA · company test',
+    expected: 'Admin · Neighbourhood Store',
     filter: '@neighbourhood-store/admin-pwa',
     role: 'admin',
     url: 'http://127.0.0.1:3103',

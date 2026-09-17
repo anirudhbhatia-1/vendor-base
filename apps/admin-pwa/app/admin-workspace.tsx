@@ -1,0 +1,1165 @@
+'use client';
+
+import { useState } from 'react';
+import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
+import type { WhoAmI } from '@neighbourhood-store/contracts';
+import { revokeAndSignOut } from '@neighbourhood-store/pwa-auth';
+import { RequireWorkspaceRole } from '@neighbourhood-store/pwa-auth/guard';
+import { AppShell, Button, StatusPill, TopBar } from '@neighbourhood-store/ui';
+import { adminRequest, apiUrl } from './authenticated-api';
+import { FinanceQueuesPanel } from './finance-queues-panel';
+import { IncidentsPanel } from './incidents-panel';
+import { OperationsHealthPanel } from './operations-health-panel';
+import { OrderInterventionPanel } from './order-intervention-panel';
+import { PartnerExceptionsPanel } from './partner-exceptions-panel';
+import { PolicyPanel } from './policy-panel';
+import { ZoneControlsPanel } from './zone-controls-panel';
+import { VerificationPanel } from './verification-panel';
+import { ReportingPanel } from './reporting-panel';
+import { SupportPanel } from './support-panel';
+import { TrustPanel } from './trust-panel';
+import { OnboardingPanel } from './onboarding-panel';
+import { getSupabase, supabaseConfigured } from './supabase-client';
+import { LifecyclePanel } from './lifecycle-panel';
+import { AdminModuleNavigation } from './module-menu';
+
+type Publication = {
+  publication_case_id: string;
+  lifecycle_state: string;
+  version: number;
+  vendor_location_id: string;
+};
+type WorkItem = {
+  kind: string;
+  object_id: string;
+  title: string;
+  risk_minor: number;
+  created_at: string;
+  next_action: string;
+};
+type Moderation = {
+  moderation_case_id: string;
+  moderation_state: 'PENDING' | 'CLEARED' | 'CORRECTION_REQUIRED' | 'RESTRICTED';
+  product_reference: string;
+  display_name: string;
+  reason_code: string;
+  correction_reason: string | null;
+  version: number;
+};
+type Notice = { in_app_notification_id: string; template_key: string; read_at: string | null };
+
+export type AdminView =
+  | 'overview'
+  | 'finance'
+  | 'trust'
+  | 'incidents'
+  | 'vendors'
+  | 'partners'
+  | 'orders'
+  | 'catalogue'
+  | 'zones'
+  | 'support'
+  | 'access'
+  | 'onboarding'
+  | 'reporting'
+  | 'audit';
+
+/**
+ * The workspace shell is gated in the browser, not only in `proxy.ts`: the
+ * Cloudflare Pages build is a static export where no proxy runs, and the proxy
+ * never checked the caller's role in any build.
+ */
+export function AdminWorkspace({ view }: { view: AdminView }) {
+  return (
+    <RequireWorkspaceRole
+      apiUrl={apiUrl}
+      client={getSupabase()}
+      configured={supabaseConfigured()}
+      workspaceRole="admin"
+    >
+      <AdminWorkspaceContent view={view} />
+    </RequireWorkspaceRole>
+  );
+}
+
+function AdminWorkspaceContent({ view }: { view: AdminView }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const [publications, setPublications] = useState<Publication[]>([]);
+  const [work, setWork] = useState<WorkItem[]>([]);
+  const [moderation, setModeration] = useState<Moderation[]>([]);
+  const [output, setOutput] = useState('Refresh queues to load current operational work.');
+  const [refreshing, setRefreshing] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [accessUserId, setAccessUserId] = useState('');
+  const [accessRole, setAccessRole] = useState('SUPPORT_AGENT');
+  const [roleAssignmentId, setRoleAssignmentId] = useState('');
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const [configurationKey, setConfigurationKey] = useState('delivery.wait.enabled');
+  const [configurationValue, setConfigurationValue] = useState('true');
+  const [configurationVersionId, setConfigurationVersionId] = useState('');
+  const [partnerApplicationId, setPartnerApplicationId] = useState('');
+  const [partnerApplicationVersion, setPartnerApplicationVersion] = useState(1);
+  const [financeExceptions, setFinanceExceptions] = useState<Record<string, unknown>[]>([]);
+  const [payments, setPayments] = useState<Record<string, unknown>[]>([]);
+  const [ownAccess, setOwnAccess] = useState<WhoAmI | null>(null);
+  const [eligiblePartners, setEligiblePartners] = useState<Record<string, unknown>[]>([]);
+  const [dispatchPartnerId, setDispatchPartnerId] = useState('');
+  const [refundPaymentId, setRefundPaymentId] = useState('');
+  const [refundOrderReference, setRefundOrderReference] = useState('');
+  const [refundMinor, setRefundMinor] = useState('');
+  const [refundId, setRefundId] = useState('');
+  const [refundVersion, setRefundVersion] = useState(1);
+  const [ordersMonitor, setOrdersMonitor] = useState<Record<string, unknown>[]>([]);
+  const [zones, setZones] = useState<
+    readonly {
+      service_zone_id: string;
+      vendor_location_id: string;
+      zone_name: string;
+      lifecycle_state: 'ACTIVE' | 'RETIRED';
+      operating_timezone: string;
+      location_name: string;
+      location_lifecycle_state: string;
+      latitude: number;
+      longitude: number;
+    }[]
+  >([]);
+
+  async function request(path: string, init?: RequestInit) {
+    return adminRequest<unknown>(path, init);
+  }
+  async function signOut() {
+    setSigningOut(true);
+    try {
+      const client = getSupabase();
+      if (client) await revokeAndSignOut({ apiUrl, client });
+      router.replace('/login');
+      router.refresh();
+    } catch {
+      setOutput('Sign-out could not be completed. Please try again.');
+    } finally {
+      setSigningOut(false);
+    }
+  }
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      const [p, d, m] = await Promise.all([
+        request('admin/vendor-publications'),
+        request('admin/control/dashboard'),
+        request('admin/catalogue/moderation'),
+      ]);
+      setPublications((p as { cases: Publication[] }).cases ?? []);
+      setWork((d as { items: WorkItem[] }).items ?? []);
+      setModeration((m as { cases?: Moderation[] }).cases ?? []);
+      setOutput('Server queues refreshed. No local decision state is used.');
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Refresh failed.');
+    } finally {
+      setRefreshing(false);
+    }
+  }
+  async function partnerReview(action: 'start-review' | 'approve' | 'reject') {
+    if (!partnerApplicationId) {
+      setOutput('Enter a partner application ID first.');
+      return;
+    }
+    try {
+      const body =
+        action === 'approve'
+          ? {
+              expected_version: partnerApplicationVersion,
+              reviewer_note: 'Company-test review completed.',
+            }
+          : action === 'reject'
+            ? {
+                expected_version: partnerApplicationVersion,
+                reason_note: 'Company-test rejection.',
+              }
+            : { expected_version: partnerApplicationVersion };
+      await request(`admin/partner-applications/${partnerApplicationId}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      setPartnerApplicationVersion((v) => v + 1);
+      setOutput(`Partner application ${action} completed.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : `Partner ${action} failed.`);
+    }
+  }
+
+  async function publicationAction(
+    item: Publication,
+    action: 'readiness' | 'submit' | 'publish' | 'decision',
+  ) {
+    try {
+      const body =
+        action === 'decision'
+          ? {
+              expected_version: item.version,
+              decision: 'APPROVED',
+              evidence_reference: `PUBLICATION-EVIDENCE-${Date.now().toString(36).toUpperCase()}`,
+              note: 'Company-test checks reviewed.',
+              reason_code: 'COMPANY_TEST_APPROVAL',
+            }
+          : {
+              expected_version: item.version,
+              note: 'Company-test transition.',
+              reason_code: 'COMPANY_TEST_TRANSITION',
+            };
+      await request(`admin/vendor-publications/${item.publication_case_id}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      await refresh();
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Action failed.');
+    }
+  }
+  /**
+   * ADM-02. An operator who cannot see their own scope has to discover it by
+   * hitting a 403, so this reads the same `whoami` the API authorises against.
+   */
+  async function loadOwnAccess() {
+    try {
+      const result = await request('auth/whoami');
+      setOwnAccess(result as WhoAmI);
+      setOutput('Your effective roles are listed below.');
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Your access summary failed to load.');
+    }
+  }
+
+  async function grantMembership() {
+    try {
+      const result = (await request(`admin/access/users/${accessUserId}/memberships`, {
+        method: 'POST',
+        body: JSON.stringify({ role: accessRole, scope_kind: 'GLOBAL' }),
+      })) as { role_assignment_id: string };
+      setRoleAssignmentId(result.role_assignment_id);
+      setOutput(`Membership granted: ${result.role_assignment_id}`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Membership grant failed.');
+    }
+  }
+  async function revokeMembership() {
+    try {
+      await request(`admin/access/users/${accessUserId}/memberships/${roleAssignmentId}/revoke`, {
+        method: 'POST',
+        body: JSON.stringify({ reason_code: 'ADMIN_ACCESS_REVOKED' }),
+      });
+      setOutput(`Membership revoked: ${roleAssignmentId}`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Membership revoke failed.');
+    }
+  }
+  async function loadNotifications() {
+    try {
+      setNotices((await request('notifications?unread_only=true')) as Notice[]);
+      setOutput('Unread notification inbox refreshed.');
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Notification inbox failed.');
+    }
+  }
+  async function supportAction(caseId: string, action: 'RESOLVE' | 'ESCALATE') {
+    try {
+      await request(`admin/control/support/${caseId}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          reason_code: action === 'RESOLVE' ? 'ADMIN_RESOLVED' : 'ADMIN_ESCALATED',
+        }),
+      });
+      setOutput(`Support case ${caseId.slice(0, 8)}… → ${action}`);
+      await refresh();
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Support action failed.');
+    }
+  }
+
+  async function loadZones() {
+    try {
+      const result = (await request('admin/zones')) as { zones?: unknown };
+      const list = Array.isArray(result.zones) ? (result.zones as typeof zones) : [];
+      setZones(list);
+      setOutput(`Loaded ${list.length} service zone(s).`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Zones failed.');
+    }
+  }
+
+  async function loadOrdersMonitor() {
+    try {
+      const result = await request('admin/control/orders');
+      const parsed = (result ?? {}) as {
+        checkout_groups?: unknown[];
+        vendor_orders?: unknown[];
+        delivery_assignments?: unknown[];
+        orders?: unknown[];
+      };
+      const combined = [
+        ...(parsed.checkout_groups ?? []),
+        ...(parsed.vendor_orders ?? []),
+        ...(parsed.delivery_assignments ?? []),
+        ...(parsed.orders ?? []),
+      ] as Record<string, unknown>[];
+      setOrdersMonitor(combined);
+      setOutput(`Order monitor: ${combined.length} entries.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Order monitor failed.');
+    }
+  }
+
+  async function loadFinanceExceptions() {
+    try {
+      const result = await request('admin/finance/v2/exceptions');
+      const list = Array.isArray(result)
+        ? result
+        : ((result as { exceptions?: unknown[] }).exceptions ?? []);
+      setFinanceExceptions(list as Record<string, unknown>[]);
+      setOutput(`Finance exceptions loaded: ${list.length} items.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Finance exceptions failed.');
+    }
+  }
+
+  async function decideModeration(
+    item: Moderation,
+    nextState: 'CLEARED' | 'CORRECTION_REQUIRED' | 'RESTRICTED',
+  ) {
+    try {
+      await request(`admin/catalogue/moderation/${item.moderation_case_id}/decision`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          expected_version: item.version,
+          moderation_state: nextState,
+          reason_code: 'ADMIN_MODERATION_DECISION',
+          ...(nextState === 'CORRECTION_REQUIRED'
+            ? { correction_reason: 'Listing needs correction before it can be cleared.' }
+            : {}),
+        }),
+      });
+      setOutput(`Case ${item.product_reference} set to ${nextState}.`);
+      await refresh();
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Moderation decision failed.');
+    }
+  }
+
+  /**
+   * Manual dispatch (ADM-29).
+   *
+   * `POST admin/delivery/assignments/:id/offer` and the eligible-partner lookup
+   * existed with no caller, so when automatic dispatch had nobody to offer to,
+   * operations had no way to intervene.
+   */
+  async function loadEligiblePartners(vendorLocationId: string) {
+    try {
+      const result = (await request(`admin/delivery/eligible-partners/${vendorLocationId}`)) as {
+        partners?: Record<string, unknown>[];
+      };
+      const list = Array.isArray(result) ? result : (result.partners ?? []);
+      setEligiblePartners(list as Record<string, unknown>[]);
+      setOutput(`Eligible partners: ${list.length}.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Eligible partner lookup failed.');
+    }
+  }
+
+  async function offerAssignment(entry: Record<string, unknown>) {
+    if (!dispatchPartnerId) {
+      setOutput('Choose a partner to offer this assignment to.');
+      return;
+    }
+    try {
+      await request(`admin/delivery/assignments/${String(entry['delivery_assignment_id'])}/offer`, {
+        method: 'POST',
+        body: JSON.stringify({
+          command_reference: `SYNTH-CMD-MANUAL-OFFER-${Date.now().toString(36).toUpperCase()}`,
+          expected_version: Number(entry['version'] ?? 1),
+          expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          partner_user_id: dispatchPartnerId,
+          reason_code: 'ADMIN_MANUAL_DISPATCH',
+        }),
+      });
+      setOutput('Assignment offered to the selected partner.');
+      await loadOrdersMonitor();
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Manual dispatch failed.');
+    }
+  }
+
+  async function loadPayments() {
+    try {
+      const result = (await request('admin/finance/payments')) as {
+        payments?: Record<string, unknown>[];
+      };
+      const list = result.payments ?? [];
+      setPayments(list);
+      setOutput(`Payments loaded: ${list.length}.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Payment list failed.');
+    }
+  }
+
+  // A refund applies to a payment transaction, not to a vendor order: payments
+  // are keyed by checkout reference and cover the whole checkout group. The
+  // operator therefore picks the payment and states the item component; tax,
+  // delivery, tip and discount reversal are separate ledger components.
+  async function createRefund() {
+    if (!refundPaymentId || !refundOrderReference || !refundMinor) {
+      setOutput('Select a payment, then enter the order reference and item amount.');
+      return;
+    }
+    const reference = `REFUND-${Date.now().toString(36).toUpperCase()}`;
+    try {
+      const result = (await request('admin/finance/refunds', {
+        method: 'POST',
+        body: JSON.stringify({
+          command_reference: reference,
+          delivery_minor: 0,
+          discount_reversal_minor: 0,
+          item_minor: Number(refundMinor),
+          payment_transaction_id: refundPaymentId,
+          provider_operation_reference: `SYNTH-REFUND-${reference}`,
+          provider_scenario: 'SUCCESS',
+          source_order_reference: refundOrderReference,
+          tax_minor: 0,
+          tip_minor: 0,
+          trigger_code: 'PARTIAL_ITEM_REFUND',
+        }),
+      })) as { refund_id: string; version?: number };
+      setRefundId(result.refund_id);
+      setRefundVersion(result.version ?? 1);
+      setOutput(`Refund created: ${result.refund_id}`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Refund creation failed.');
+    }
+  }
+
+  async function approveRefund() {
+    if (!refundId) {
+      setOutput('Create a refund first.');
+      return;
+    }
+    try {
+      const result = (await request(`admin/finance/refunds/${refundId}/approve-submit`, {
+        method: 'POST',
+        body: JSON.stringify({
+          command_reference: `APPROVE-${Date.now().toString(36).toUpperCase()}`,
+          expected_version: refundVersion,
+        }),
+      })) as { version?: number; refund_state?: string };
+      setRefundVersion(result.version ?? refundVersion + 1);
+      setOutput(`Refund ${refundId} ${result.refund_state ?? 'approved and submitted'}.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Refund approval failed.');
+    }
+  }
+
+  async function configurationAction(action: 'draft' | 'validate' | 'approve' | 'schedule') {
+    try {
+      const path =
+        action === 'draft'
+          ? 'admin/configuration/drafts'
+          : `admin/configuration/${configurationVersionId}/${action}`;
+      const result = (await request(path, {
+        method: 'POST',
+        body: JSON.stringify(
+          action === 'draft'
+            ? {
+                configuration_key: configurationKey,
+                configuration_kind: 'FEATURE_FLAG',
+                configuration_value: configurationValue === 'true',
+                scope_kind: 'GLOBAL',
+                scope_reference: 'global',
+                reason_code: 'COMPANY_TEST_CONFIGURATION',
+              }
+            : action === 'schedule'
+              ? {
+                  effective_from: new Date(Date.now() + 2_000).toISOString(),
+                  reason_code: 'COMPANY_TEST_CONFIGURATION',
+                }
+              : { reason_code: 'COMPANY_TEST_CONFIGURATION' },
+        ),
+      })) as { configuration_version_id: string; status: string };
+      setConfigurationVersionId(result.configuration_version_id);
+      setOutput(`Configuration ${result.configuration_version_id} is ${result.status}.`);
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Configuration action failed.');
+    }
+  }
+
+  return (
+    <AppShell
+      className="admin-workbench"
+      surface="admin"
+      tabs={<AdminModuleNavigation pathname={pathname} />}
+      topBar={
+        <TopBar
+          actions={
+            <>
+              <StatusPill label="Secure session" state="AVAILABLE" />
+              <Button
+                busy={signingOut}
+                onClick={() => void signOut()}
+                size="small"
+                variant="secondary"
+              >
+                Sign out
+              </Button>
+            </>
+          }
+          brand={
+            <span className="workspace-brand">
+              <span aria-hidden="true" className="workspace-mark">
+                AO
+              </span>
+              <span>
+                <strong>Marketplace control room</strong>
+                <small>Admin operations</small>
+              </span>
+            </span>
+          }
+        />
+      }
+    >
+      {view === 'overview' && (
+        <section className="command-header">
+          <div>
+            <p className="eyebrow">ACCOUNTABLE OPERATIONS</p>
+            <h1>Act on server truth.</h1>
+            <p>
+              Publication, catalogue, support, trust, incident, finance and audit work stay
+              capability-scoped.
+            </p>
+          </div>
+        </section>
+      )}
+      <div className="admin-status-bar">
+        <p role="status" aria-live="polite">
+          {output}
+        </p>
+        <Button busy={refreshing} variant="secondary" onClick={() => void refresh()}>
+          Refresh queues
+        </Button>
+      </div>
+      {view === 'overview' && (
+        <section className="workspace" id="risk-work">
+          <aside className="queue">
+            <div className="queue-heading">
+              <strong>Risk-ranked work</strong>
+              <span>{work.length}</span>
+            </div>
+            {work.map((item) => (
+              <div className="queue-row" key={`${item.kind}-${item.object_id}`}>
+                <span>
+                  <strong>
+                    {item.kind} · {item.title}
+                  </strong>
+                  <small>
+                    {item.next_action} ·{' '}
+                    {item.risk_minor
+                      ? `₹${(item.risk_minor / 100).toFixed(2)} at risk`
+                      : 'operational risk'}
+                  </small>
+                </span>
+              </div>
+            ))}
+          </aside>
+          <article className="case-workbench">
+            <p className="eyebrow">SHIFT PRIORITY</p>
+            <h2>{work.length ? 'Open the highest-risk item' : 'No risk-ranked work loaded'}</h2>
+            <p>Safety and money risks stay ahead of routine pipeline work.</p>
+          </article>
+        </section>
+      )}
+      {view === 'onboarding' && (
+        <section className="admin-route-page" aria-labelledby="onboarding-title">
+          <div className="admin-route-heading">
+            <p className="eyebrow">ONBOARD NEW ROLES</p>
+            <h1 id="onboarding-title">Create vendors and partners with working credentials.</h1>
+            <p>
+              Provisioned accounts can sign in immediately with the one-time email and temporary
+              password issued here.
+            </p>
+          </div>
+          <OnboardingPanel />
+        </section>
+      )}
+      {view === 'vendors' && (
+        <section className="admin-route-page" aria-labelledby="vendors-title">
+          <div className="admin-route-heading">
+            <p className="eyebrow">VENDOR PIPELINE</p>
+            <h1 id="vendors-title">Move trustworthy stores toward live.</h1>
+            <p>Review readiness, evidence and publication as separate accountable decisions.</p>
+          </div>
+          <article className="case-workbench" id="vendor-publication">
+            <p className="eyebrow">VENDOR PUBLICATION</p>
+            <h2>{publications.length} persisted cases</h2>
+            {publications.map((item) => (
+              <div className="catalogue-flag" key={item.publication_case_id}>
+                <strong>
+                  {item.lifecycle_state} · v{item.version}
+                </strong>
+                <span>{item.vendor_location_id}</span>
+                <div className="actions">
+                  <button onClick={() => void publicationAction(item, 'readiness')}>
+                    Evaluate
+                  </button>
+                  <button onClick={() => void publicationAction(item, 'submit')}>Submit</button>
+                  <button onClick={() => void publicationAction(item, 'decision')}>Approve</button>
+                  <button onClick={() => void publicationAction(item, 'publish')}>Publish</button>
+                </div>
+              </div>
+            ))}
+          </article>
+          <LifecyclePanel kind="vendors" />
+        </section>
+      )}
+      {(view === 'vendors' || view === 'partners') && <VerificationPanel />}
+      {view === 'partners' && (
+        <section className="admin-route-page" aria-labelledby="partners-title">
+          <div className="admin-route-heading">
+            <p className="eyebrow">DELIVERY PARTNERS</p>
+            <h1 id="partners-title">Verify people before dispatch.</h1>
+            <p>Identity, vehicle, bank and training checks form one review trail.</p>
+          </div>
+          <article className="case-workbench" id="partner-application-review">
+            <p className="eyebrow">PARTNER APPLICATION REVIEW</p>
+            <div className="catalogue-flag">
+              <label>
+                Partner application ID
+                <input
+                  value={partnerApplicationId}
+                  onChange={(e) => setPartnerApplicationId(e.target.value)}
+                  placeholder="UUID"
+                />
+              </label>
+              <label>
+                Expected version
+                <input
+                  type="number"
+                  value={partnerApplicationVersion}
+                  onChange={(e) => setPartnerApplicationVersion(Number(e.target.value))}
+                  min={1}
+                />
+              </label>
+              <div className="actions">
+                <button onClick={() => void partnerReview('start-review')}>Start review</button>
+                <button onClick={() => void partnerReview('approve')}>Approve</button>
+                <button onClick={() => void partnerReview('reject')}>Reject</button>
+              </div>
+            </div>
+          </article>
+          <LifecyclePanel kind="partners" />
+        </section>
+      )}
+      {view === 'orders' && <PartnerExceptionsPanel />}
+      {view === 'orders' && <OperationsHealthPanel />}
+      {view === 'orders' && (
+        <section className="admin-route-page" aria-labelledby="orders-title">
+          <div className="admin-route-heading">
+            <p className="eyebrow">LIVE OPERATIONS</p>
+            <h1 id="orders-title">Keep every order moving honestly.</h1>
+            <p>Live order monitor with acceptance, custody, and delivery state.</p>
+          </div>
+          <div className="admin-card-grid">
+            <article>
+              <span>Active exceptions</span>
+              <strong>{work.filter((item) => item.kind.includes('ORDER')).length}</strong>
+              <p>Server-ranked after queue refresh.</p>
+            </article>
+            <article>
+              <span>Loaded orders</span>
+              <strong>{ordersMonitor.length}</strong>
+              <p>Refresh loads latest checkout groups and their status.</p>
+            </article>
+          </div>
+          <button onClick={() => void loadOrdersMonitor()}>Refresh order monitor</button>
+          <div className="admin-card-grid" style={{ marginTop: '1rem' }}>
+            {ordersMonitor.length === 0 && <p>No orders loaded yet. Click refresh.</p>}
+            {ordersMonitor.map((entry, idx) => (
+              <article key={idx}>
+                <span>
+                  {String(entry['lifecycle_state'] ?? entry['assignment_state'] ?? 'PENDING')}
+                </span>
+                <strong>
+                  {String(
+                    entry['order_reference'] ??
+                      entry['checkout_reference'] ??
+                      entry['delivery_assignment_id'] ??
+                      '—',
+                  )}
+                </strong>
+                <p>
+                  {typeof entry['total_minor'] === 'number' ||
+                  typeof entry['total_minor'] === 'string'
+                    ? `₹${(Number(entry['total_minor']) / 100).toFixed(2)}`
+                    : ''}
+                  {entry['vendor_location_id']
+                    ? ` · vendor ${String(entry['vendor_location_id']).slice(0, 8)}…`
+                    : ''}
+                </p>
+                {Boolean(entry['delivery_assignment_id']) &&
+                  String(entry['assignment_state'] ?? '') === 'UNASSIGNED' && (
+                    <div className="actions">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void loadEligiblePartners(String(entry['vendor_location_id'] ?? ''))
+                        }
+                      >
+                        Find partners
+                      </button>
+                      <button type="button" onClick={() => void offerAssignment(entry)}>
+                        Offer to selected partner
+                      </button>
+                    </div>
+                  )}
+              </article>
+            ))}
+          </div>
+          <section className="catalogue-oversight" style={{ marginTop: '1.5rem' }}>
+            <div>
+              <p className="eyebrow">MANUAL DISPATCH</p>
+              <h2>{eligiblePartners.length} eligible partners</h2>
+              <p>
+                Automatic dispatch retries every worker tick. Use this when an order needs a named
+                partner sooner.
+              </p>
+            </div>
+            <label>
+              Partner
+              <select
+                value={dispatchPartnerId}
+                onChange={(event) => setDispatchPartnerId(event.target.value)}
+              >
+                <option value="">Load eligible partners, then choose one</option>
+                {eligiblePartners.map((partner) => (
+                  <option
+                    key={String(partner['partner_user_id'])}
+                    value={String(partner['partner_user_id'])}
+                  >
+                    {String(partner['partner_user_id']).slice(0, 8)}… ·{' '}
+                    {String(partner['distance_meters'] ?? '?')} m
+                  </option>
+                ))}
+              </select>
+            </label>
+          </section>
+        </section>
+      )}
+      {view === 'catalogue' && (
+        <section className="catalogue-oversight" id="catalogue-moderation">
+          <div>
+            <p className="eyebrow">CATALOGUE MODERATION</p>
+            <h2>{moderation.length} live cases</h2>
+          </div>
+          {moderation.length === 0 && <p>No open moderation cases.</p>}
+          {moderation.map((item) => (
+            <div className="catalogue-flag" key={item.moderation_case_id}>
+              <strong>{item.display_name || item.product_reference}</strong>
+              <span>
+                {item.moderation_state} · {item.reason_code}
+              </span>
+              {item.correction_reason && <p>{item.correction_reason}</p>}
+              <div className="actions">
+                <button type="button" onClick={() => void decideModeration(item, 'CLEARED')}>
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void decideModeration(item, 'CORRECTION_REQUIRED')}
+                >
+                  Request correction
+                </button>
+                <button type="button" onClick={() => void decideModeration(item, 'RESTRICTED')}>
+                  Restrict
+                </button>
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+      {view === 'zones' && (
+        <>
+          <section className="catalogue-oversight" id="zones" style={{ marginBottom: '1.5rem' }}>
+            <div>
+              <p className="eyebrow">SERVICE ZONES</p>
+              <h2>
+                {zones.length} zone{zones.length === 1 ? '' : 's'} across all vendor locations
+              </h2>
+            </div>
+            <div className="actions">
+              <button type="button" onClick={() => void loadZones()}>
+                Refresh zones
+              </button>
+            </div>
+            {zones.map((z) => (
+              <div className="catalogue-flag" key={z.service_zone_id}>
+                <strong>
+                  {z.zone_name} · {z.location_name}
+                </strong>
+                <span>
+                  {z.lifecycle_state} · location {z.location_lifecycle_state} · store at{' '}
+                  {z.latitude.toFixed(4)}, {z.longitude.toFixed(4)} · {z.operating_timezone}
+                </span>
+              </div>
+            ))}
+            {zones.length === 0 && (
+              <p>
+                No zones loaded yet — refresh to fetch every service zone the server knows about.
+              </p>
+            )}
+          </section>
+          <section className="catalogue-oversight" id="configuration">
+            <div>
+              <p className="eyebrow">VERSIONED CONFIGURATION</p>
+              <h2>Maker/checker activation</h2>
+            </div>
+            <div className="catalogue-flag">
+              <label>
+                Configuration key
+                <input
+                  value={configurationKey}
+                  onChange={(event) => setConfigurationKey(event.target.value)}
+                />
+              </label>
+              <label>
+                Boolean value
+                <select
+                  value={configurationValue}
+                  onChange={(event) => setConfigurationValue(event.target.value)}
+                >
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </label>
+              <label>
+                Version UUID
+                <input
+                  value={configurationVersionId}
+                  onChange={(event) => setConfigurationVersionId(event.target.value)}
+                />
+              </label>
+              <div className="actions">
+                <button onClick={() => void configurationAction('draft')}>Create draft</button>
+                <button onClick={() => void configurationAction('validate')}>Validate</button>
+                <button onClick={() => void configurationAction('approve')}>Approve</button>
+                <button onClick={() => void configurationAction('schedule')}>Schedule</button>
+              </div>
+            </div>
+          </section>
+        </>
+      )}
+      {view === 'zones' && <ZoneControlsPanel />}
+      {view === 'zones' && <PolicyPanel />}
+      {view === 'incidents' && (
+        <>
+          <h1>Incidents</h1>
+          <IncidentsPanel />
+        </>
+      )}
+      {view === 'access' && (
+        <section className="catalogue-oversight" id="controlled-access">
+          <div>
+            <p className="eyebrow">CONTROLLED ACCESS</p>
+            <h2>Provision scoped admin memberships</h2>
+            <p>Requires CONFIG_APPROVER. Self-grants and conflicting maker/checker roles fail.</p>
+          </div>
+          <div className="catalogue-flag">
+            <label>
+              Target user UUID
+              <input
+                value={accessUserId}
+                onChange={(event) => setAccessUserId(event.target.value)}
+              />
+            </label>
+            <label>
+              Admin role
+              <select value={accessRole} onChange={(event) => setAccessRole(event.target.value)}>
+                {[
+                  'SUPPORT_AGENT',
+                  'DELIVERY_OPERATOR',
+                  'CATALOGUE_MODERATOR',
+                  'FINANCE_OPERATOR',
+                  'FINANCE_APPROVER',
+                  'TRUST_OPERATOR',
+                  'TRUST_APPROVER',
+                  'VENDOR_ONBOARDING_OPERATOR',
+                  'VENDOR_ONBOARDING_REVIEWER',
+                  'VENDOR_PUBLICATION_OPERATOR',
+                  'VENDOR_PUBLICATION_REVIEWER',
+                  'CONFIG_OPERATOR',
+                  'CONFIG_APPROVER',
+                  'INCIDENT_COMMANDER',
+                ].map((role) => (
+                  <option key={role}>{role}</option>
+                ))}
+              </select>
+            </label>
+            <button onClick={() => void grantMembership()}>Grant global membership</button>
+            <label>
+              Assignment UUID
+              <input
+                value={roleAssignmentId}
+                onChange={(event) => setRoleAssignmentId(event.target.value)}
+              />
+            </label>
+            <button onClick={() => void revokeMembership()}>Revoke membership</button>
+          </div>
+          <div className="catalogue-flag" style={{ marginTop: '1rem' }}>
+            <p className="eyebrow">YOUR OWN ACCESS</p>
+            <p>
+              What the server will actually let you do. Hidden buttons are not permissions; this is
+              read from the same roles the API enforces on every request.
+            </p>
+            <div className="actions">
+              <button onClick={() => void loadOwnAccess()}>Show my permissions</button>
+            </div>
+            {ownAccess && (
+              <>
+                <p>
+                  Signed in as {ownAccess.primary_role}
+                  {ownAccess.email ? ` · ${ownAccess.email}` : ''}
+                </p>
+                <ul>
+                  {ownAccess.roles.map((role) => (
+                    <li key={role.role_assignment_id}>
+                      {role.role_key}
+                      {role.scope_id ? ` · scope ${role.scope_id.slice(0, 8)}…` : ' · global'}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        </section>
+      )}
+      {view === 'support' && (
+        <section className="admin-route-page" aria-labelledby="support-title">
+          <div className="admin-route-heading">
+            <p className="eyebrow">SUPPORT & DISPUTES</p>
+            <h1 id="support-title">Resolve the issue. Preserve the trail.</h1>
+            <p>
+              Order, payment, quality and safety cases keep evidence and customer impact together.
+            </p>
+          </div>
+          <div className="admin-card-grid">
+            <article>
+              <span>Urgent</span>
+              <strong>
+                {
+                  work.filter(
+                    (item) =>
+                      item.kind.toLowerCase().includes('safety') ||
+                      item.kind.toLowerCase().includes('escalat'),
+                  ).length
+                }{' '}
+                safety cases
+              </strong>
+              <p>Safety work always outranks routine tickets. Refresh queues to update.</p>
+            </article>
+            <article>
+              <span>Money</span>
+              <strong>
+                {
+                  work.filter(
+                    (item) =>
+                      item.kind.toLowerCase().includes('money') ||
+                      item.kind.toLowerCase().includes('refund') ||
+                      item.kind.toLowerCase().includes('payout'),
+                  ).length
+                }{' '}
+                disputes
+              </strong>
+              <p>Refund and payout actions require controlled authority.</p>
+            </article>
+            <article>
+              <span>Routine</span>
+              <strong>
+                {work.filter((item) => item.kind.toUpperCase() === 'SUPPORT').length} support cases
+              </strong>
+              <p>Refresh queues to load SLAs and ownership from the server.</p>
+            </article>
+          </div>
+          <section
+            className="catalogue-oversight"
+            aria-label="Support case drill-in"
+            style={{ marginTop: '1.5rem' }}
+          >
+            <div>
+              <p className="eyebrow">SUPPORT CASES</p>
+              <h2>{work.filter((i) => i.kind.toUpperCase() === 'SUPPORT').length} open case(s)</h2>
+            </div>
+            {work
+              .filter((item) => item.kind.toUpperCase() === 'SUPPORT')
+              .map((item) => (
+                <div className="catalogue-flag" key={item.object_id}>
+                  <strong>{item.title}</strong>
+                  <span>
+                    Case {item.object_id.slice(0, 12)}… · {item.next_action}
+                  </span>
+                  <div className="actions">
+                    <button onClick={() => void supportAction(item.object_id, 'RESOLVE')}>
+                      Resolve
+                    </button>
+                    <button onClick={() => void supportAction(item.object_id, 'ESCALATE')}>
+                      Escalate
+                    </button>
+                  </div>
+                </div>
+              ))}
+          </section>
+          <SupportPanel />
+          <nav className="actions" aria-label="Related workspaces">
+            <Link href="/trust">Trust and safety</Link>
+            <Link href="/finance">Finance and refunds</Link>
+          </nav>
+        </section>
+      )}
+      {view === 'trust' && (
+        <section className="admin-route-page">
+          <h1>Trust and safety</h1>
+          <TrustPanel />
+        </section>
+      )}
+      {view === 'finance' && (
+        <section className="admin-route-page" aria-labelledby="finance-title">
+          <div className="admin-route-heading">
+            <p className="eyebrow">FINANCE</p>
+            <h1 id="finance-title">Exceptions, payouts and refunds</h1>
+            <p>
+              Review the affected payment and order before proposing an action. Server permissions
+              and independent approval rules apply.
+            </p>
+          </div>
+          <section
+            className="catalogue-oversight"
+            style={{ marginTop: '1.5rem' }}
+            aria-label="Finance exceptions"
+          >
+            <div>
+              <p className="eyebrow">FINANCE EXCEPTIONS</p>
+              <h2>
+                {financeExceptions.length} exception{financeExceptions.length !== 1 ? 's' : ''}
+              </h2>
+            </div>
+            <div className="actions">
+              <button type="button" onClick={() => void loadFinanceExceptions()}>
+                Load finance exceptions
+              </button>
+            </div>
+            {financeExceptions.length > 0 && (
+              <div className="catalogue-flag">
+                <pre style={{ fontSize: '11px', overflowX: 'auto' }}>
+                  {JSON.stringify(financeExceptions, null, 2)}
+                </pre>
+              </div>
+            )}
+          </section>
+          <OrderInterventionPanel />
+          <FinanceQueuesPanel />
+          <section
+            className="catalogue-oversight"
+            style={{ marginTop: '1.5rem' }}
+            aria-label="Refund maker-checker"
+          >
+            <div>
+              <p className="eyebrow">REFUND APPROVAL</p>
+              <h2>Maker/checker refund</h2>
+            </div>
+            <div className="catalogue-flag">
+              <label>
+                Payment transaction
+                <select
+                  value={refundPaymentId}
+                  onChange={(e) => setRefundPaymentId(e.target.value)}
+                >
+                  <option value="">Load payments, then choose one</option>
+                  {payments.map((payment) => (
+                    <option
+                      key={String(payment['payment_transaction_id'])}
+                      value={String(payment['payment_transaction_id'])}
+                    >
+                      {String(payment['source_checkout_reference'])} ·{' '}
+                      {String(payment['payment_state'])} · ₹
+                      {(Number(payment['amount_minor']) / 100).toFixed(2)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Order reference
+                <input
+                  list="admin-orders-list"
+                  value={refundOrderReference}
+                  onChange={(e) => setRefundOrderReference(e.target.value)}
+                  placeholder="Order reference the refund applies to"
+                />
+                <datalist id="admin-orders-list">
+                  {ordersMonitor
+                    .filter((o) => typeof o['order_reference'] === 'string')
+                    .map((o, idx) => (
+                      <option key={idx} value={String(o['order_reference'])}>
+                        {String(o['lifecycle_state'] ?? '')}
+                      </option>
+                    ))}
+                </datalist>
+              </label>
+              <label>
+                Item amount (paise)
+                <input
+                  type="number"
+                  value={refundMinor}
+                  onChange={(e) => setRefundMinor(e.target.value)}
+                  placeholder="e.g. 5000"
+                  min={1}
+                />
+              </label>
+              <div className="actions">
+                <button type="button" onClick={() => void loadPayments()}>
+                  Load payments
+                </button>
+                <button type="button" onClick={() => void loadOrdersMonitor()}>
+                  Refresh order list
+                </button>
+                <button type="button" onClick={() => void createRefund()}>
+                  Create refund
+                </button>
+                <button type="button" onClick={() => void approveRefund()} disabled={!refundId}>
+                  Approve &amp; submit
+                </button>
+              </div>
+              {refundId && (
+                <small>
+                  Refund ID: {refundId} (version {refundVersion})
+                </small>
+              )}
+            </div>
+          </section>
+        </section>
+      )}
+      {(view === 'reporting' || view === 'audit') && (
+        <>
+          <ReportingPanel view={view} />
+          <section className="catalogue-oversight" style={{ marginTop: '1.5rem' }}>
+            <div>
+              <p className="eyebrow">NOTIFICATIONS</p>
+              <h2>Operational alerts addressed to you</h2>
+            </div>
+            <div className="actions">
+              <button onClick={() => void loadNotifications()}>Unread notifications</button>
+            </div>
+            {notices.map((notice) => (
+              <p key={notice.in_app_notification_id}>{notice.template_key.replaceAll('.', ' ')}</p>
+            ))}
+            <pre>{output}</pre>
+          </section>
+        </>
+      )}
+      <p className="boundary">Authorized operations only · every sensitive action is audited</p>
+    </AppShell>
+  );
+}

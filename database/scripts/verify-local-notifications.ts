@@ -7,10 +7,8 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import { LocalNotificationService } from '../src/local-notifications.js';
+import { check } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 function context(kind: ActorKind, id: UuidV7) {
   return createRequestContext({
     actor: createAuthenticatedActor({ actor_id: id, actor_kind: kind, session_id: createUuidV7() }),
@@ -80,7 +78,10 @@ export async function verifyLocalNotifications(connectionString: string): Promis
       recipient_user_id: userId,
       notification_kind: 'SECURITY',
       template_key: 'security.session_changed',
-      channels: ['IN_APP'],
+      // A transient failure is a provider outcome, so this has to run on a
+      // channel that has a provider. IN_APP is delivered in-process and can
+      // never fail, so it could not exercise the retry this asserts.
+      channels: ['PUSH'],
       provider_scenario: 'TRANSIENT_FAILURE',
       source_kind: 'verification_event',
       source_id: createUuidV7(),

@@ -64,3 +64,50 @@ test('removes identity and session material from nested log metadata', () => {
   }
   assert.equal(serialized.includes('safe-request-reference'), true);
 });
+
+test('redacts protected fields written in camelCase, not only snake_case', () => {
+  // Only `-` was normalized, so `phoneNumber` and `accessToken` were logged in full
+  // while `phone_number` and `access_token` were redacted. Provider payloads are the
+  // obvious way in, since most arrive camelCase.
+  const redacted = redactProtectedFields({
+    accessToken: 'tok',
+    deviceToken: 'dev',
+    otpCode: '123456',
+    phoneNumber: '+919876543210',
+    refreshToken: 'ref',
+  }) as Record<string, unknown>;
+  for (const key of ['accessToken', 'deviceToken', 'otpCode', 'phoneNumber', 'refreshToken']) {
+    assert.equal(redacted[key], REDACTED_VALUE, key);
+  }
+});
+
+test('redacts the payment, bank, identity and location fields this marketplace handles', () => {
+  const redacted = redactProtectedFields({
+    aadhaar: '1234 5678 9012',
+    account_number: '123456789012',
+    ifsc: 'HDFC0001234',
+    lat: 26.9,
+    lng: 75.8,
+    mobile: '+919876543210',
+    pan: 'ABCDE1234F',
+    upi_id: 'someone@okhdfc',
+    vpa: 'someone@okhdfc',
+  }) as Record<string, unknown>;
+  for (const key of Object.keys(redacted)) {
+    assert.equal(redacted[key], REDACTED_VALUE, key);
+  }
+});
+
+test('leaves operational fields legible, so redaction does not blind the logs', () => {
+  // `latency_ms` must survive the `lat` entry, and `account_reference` and
+  // `template_payload` are non-secret identifiers the logs are read for.
+  const kept = {
+    account_reference: 'SYNTH-ACCOUNT-VENDOR-PAYABLE',
+    correlation_id: '01a0-corr',
+    latency_ms: 42,
+    planned_at: '2026-09-07T00:00:00.000Z',
+    platform: 'android',
+    vendor_location_id: '01a0-loc',
+  };
+  assert.deepEqual(redactProtectedFields(kept), kept);
+});

@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import {
   createUuidV7,
@@ -7,6 +8,7 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction as withTransaction } from './transaction.js';
 
 export type OtpProviderScenario = 'delay' | 'duplicate_callback' | 'failure' | 'success';
 export type OtpChallengeStatus =
@@ -64,7 +66,7 @@ interface ChallengeRow {
   readonly phone_lookup_hash: string;
 }
 
-const SYNTHETIC_PHONE_PATTERN = /^SYNTH-PHONE-[A-Z0-9][A-Z0-9-]{2,47}$/;
+const PHONE_PATTERN = /^(?:\+[1-9][0-9]{7,14}|SYNTH-PHONE-[A-Z0-9][A-Z0-9-]{2,47})$/;
 const REQUEST_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const CODE_PATTERN = /^[0-9]{6}$/;
 const MAX_PHONE_REQUESTS = 3;
@@ -78,10 +80,40 @@ function digest(key: string, value: string): string {
   return createHmac('sha256', key).update(value).digest('hex');
 }
 
-function requireSyntheticPhone(value: string): string {
-  const normalized = value.trim().toUpperCase();
-  if (!SYNTHETIC_PHONE_PATTERN.test(normalized)) {
-    throw new OtpInvalidError('Only fictional SYNTH-PHONE-* identifiers are accepted');
+/**
+ * Normalises a phone identifier to its canonical stored form.
+ *
+ * Exported so the separator rule is directly testable: it is the difference
+ * between every synthetic identity being able to sign in and none of them.
+ */
+export function normalisePhoneIdentifier(value: string): string {
+  const trimmed = value.trim().toUpperCase();
+  return trimmed.startsWith('SYNTH-PHONE-')
+    ? trimmed.replace(/[\s()]/g, '')
+    : trimmed.replace(/[\s()-]/g, '');
+}
+
+/**
+ * Normalises and validates a phone identifier, or throws.
+ *
+ * Exported because more than sign-in needs to turn something a person typed
+ * into the canonical identifier: staff invitations are addressed by phone,
+ * since a shopkeeper knows their picker's number and cannot possibly know
+ * their internal user id.
+ */
+export function parsePhoneIdentifier(value: string): string {
+  return requirePhone(value);
+}
+
+function requirePhone(value: string): string {
+  // Separator stripping is for E.164 only. Applied to everything it also
+  // removed the hyphens from `SYNTH-PHONE-ADMIN-001`, producing
+  // `SYNTHPHONEADMIN001`, which then failed the very pattern that admits the
+  // synthetic form — so no seeded synthetic identity could ever request an OTP,
+  // and the whole local sign-in path was unreachable.
+  const normalized = normalisePhoneIdentifier(value);
+  if (!PHONE_PATTERN.test(normalized)) {
+    throw new OtpInvalidError('Phone number must use international E.164 format');
   }
   return normalized;
 }
@@ -102,21 +134,6 @@ function constantTimeEqual(left: string, right: string): boolean {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
-async function withTransaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 export class OtpIdentityService {
   readonly #pool: Pool;
   readonly #hashKey: string;
@@ -132,7 +149,7 @@ export class OtpIdentityService {
     this.#hashKey = input.hash_key;
     this.#codeGenerator =
       input.code_generator ?? (() => randomInt(0, 1_000_000).toString().padStart(6, '0'));
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-otp-identity',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
@@ -154,7 +171,7 @@ export class OtpIdentityService {
     readonly scenario?: OtpProviderScenario;
     readonly now?: Date;
   }): Promise<OtpRequestResult> {
-    const phone = requireSyntheticPhone(input.phone_identifier);
+    const phone = requirePhone(input.phone_identifier);
     const deviceId = parseUuidV7(input.device_id);
     const requestKey = requireRequestKey(input.request_key);
     const requestId = parseRequestId(input.context.request_id);

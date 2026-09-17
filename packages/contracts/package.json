@@ -2,7 +2,21 @@
   "name": "@neighbourhood-store/contracts",
   "version": "0.0.0",
   "private": true,
-  "description": "Versioned HTTP and event contracts shared across applications.",
+  "description": "Versioned HTTP contracts and typed API client shared across all applications.",
   "license": "UNLICENSED",
-  "type": "module"
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test:unit": "node --import tsx --test src/*.spec.ts"
+  },
+  "dependencies": {
+    "@neighbourhood-store/domain-types": "workspace:*"
+  }
 }

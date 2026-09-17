@@ -165,10 +165,18 @@ export async function scheduleDurableJob(
     readonly priority?: number;
     readonly queue_scope: string;
     readonly request_id: string;
-    readonly run_at: Date;
+    /**
+     * `'immediate'` means "as soon as a worker can take it" and is stamped by the
+     * database. A caller that passes `new Date()` instead is comparing two clocks:
+     * the row carries the application server's instant while the claim query filters
+     * on `clock_timestamp()`, so any skew between them leaves a job that is supposed
+     * to be runnable briefly unclaimable. Use a Date only for a genuine future time.
+     */
+    readonly run_at: Date | 'immediate';
   },
 ): Promise<{ readonly created: boolean; readonly job_id: UuidV7 }> {
-  if (!(input.run_at instanceof Date) || !Number.isFinite(input.run_at.getTime())) {
+  const immediate = input.run_at === 'immediate';
+  if (!immediate && (!(input.run_at instanceof Date) || !Number.isFinite(input.run_at.getTime()))) {
     throw new TypeError('Job run_at must be a valid instant');
   }
   const jobId = input.job_id ? parseUuidV7(input.job_id) : createUuidV7();
@@ -190,7 +198,8 @@ export async function scheduleDurableJob(
     `INSERT INTO marketplace.scheduled_jobs
        (job_id, queue_scope, job_type, idempotency_key, payload, request_id,
         correlation_id, causation_id, priority, run_at, max_attempts)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9,
+             COALESCE($10::timestamptz, clock_timestamp()), $11)
      ON CONFLICT (queue_scope, idempotency_key) DO NOTHING
      RETURNING job_id`,
     [
@@ -203,7 +212,7 @@ export async function scheduleDurableJob(
       correlationId,
       causationId,
       priority,
-      input.run_at,
+      immediate ? null : input.run_at,
       maxAttempts,
     ],
   );
@@ -223,7 +232,9 @@ export async function scheduleDurableJob(
     canonicalRequestJson(row.payload) !== payloadJson ||
     row.priority !== priority ||
     row.max_attempts !== maxAttempts ||
-    row.run_at.getTime() !== input.run_at.getTime()
+    // An immediate job carries whatever instant the database stamped, so there is
+    // no caller-supplied value to compare it against.
+    (!immediate && row.run_at.getTime() !== (input.run_at as Date).getTime())
   ) {
     throw new JobIdempotencyConflictError();
   }

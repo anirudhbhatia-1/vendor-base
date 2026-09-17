@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -6,12 +7,16 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { transaction } from './transaction.js';
 
 export type CustomerLanguage = 'EN' | 'HI';
 export type ConsentDecision = 'GRANTED' | 'WITHDRAWN';
 export type ConsentKind = 'LOCATION' | 'MARKETING' | 'PRIVACY' | 'TERMS';
 export type ConsentSource = 'ANDROID' | 'CUSTOMER_API' | 'CUSTOMER_PWA';
-export type NotificationChannel = 'PUSH' | 'SMS';
+// IN_APP has been a deliverable channel since 0037 and gained its channel
+// policy in 0056; it was missing here, so the settings surface could not
+// describe a preference the delivery path was already writing.
+export type NotificationChannel = 'IN_APP' | 'PUSH' | 'SMS';
 export type NotificationKind = 'MARKETING' | 'ORDER_STATUS' | 'SECURITY' | 'SUPPORT';
 
 export interface CustomerProfile {
@@ -137,21 +142,6 @@ function contextIds(context: RequestContext) {
   };
 }
 
-async function transaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 async function requireActiveUser(client: PoolClient, userId: UuidV7): Promise<void> {
   const result = await client.query<{ active: boolean }>(
     `SELECT state = 'ACTIVE' AS active FROM marketplace.users WHERE user_id = $1`,
@@ -180,7 +170,7 @@ export class IdentityPreferencesService {
   readonly #pool: Pool;
 
   constructor(input: { readonly connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-identity-preferences',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
@@ -548,5 +538,54 @@ export class IdentityPreferencesService {
       this.getNotificationPreferences(userId),
     ]);
     return Object.freeze({ consents, notifications, profile: currentProfile });
+  }
+
+  async listPrivacyRequests(userId: UuidV7): Promise<readonly Record<string, unknown>[]> {
+    const result = await this.#pool.query(
+      `SELECT customer_privacy_request_id,request_kind,lifecycle_state,requested_at,
+              completed_at,export_expires_at
+         FROM marketplace.customer_privacy_requests
+        WHERE user_id=$1 ORDER BY requested_at DESC LIMIT 50`,
+      [parseUuidV7(userId)],
+    );
+    return Object.freeze(result.rows);
+  }
+
+  async requestPrivacyAction(input: {
+    readonly context: RequestContext;
+    readonly request_kind: 'ACCOUNT_DELETION' | 'DATA_EXPORT';
+    readonly user_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<Record<string, unknown>> {
+    const now = input.now ?? new Date();
+    const ids = contextIds(input.context);
+    const requestId = createUuidV7({ now_ms: now.getTime() });
+    try {
+      const result = await this.#pool.query(
+        `INSERT INTO marketplace.customer_privacy_requests
+           (customer_privacy_request_id,user_id,request_kind,lifecycle_state,requested_at,
+            request_id,correlation_id,created_at,updated_at)
+         VALUES($1,$2,$3,'REQUESTED',$4,$5,$6,$4,$4)
+         RETURNING customer_privacy_request_id,request_kind,lifecycle_state,requested_at`,
+        [
+          requestId,
+          parseUuidV7(input.user_id),
+          input.request_kind,
+          now,
+          ids.requestId,
+          ids.correlationId,
+        ],
+      );
+      return result.rows[0] as Record<string, unknown>;
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        (error as { code?: unknown }).code === '23505'
+      ) {
+        throw new PreferenceVersionConflictError('A request of this type is already active');
+      }
+      throw error;
+    }
   }
 }

@@ -1,37 +1,31 @@
-export type RuntimeEnvironment = 'local' | 'test' | 'queue-compat' | 'online-test';
+import {
+  loadSharedRuntimeConfig,
+  type RuntimeEnvironment,
+  type SharedRuntimeConfig,
+} from '@neighbourhood-store/database';
 
-export interface RuntimeConfig {
-  readonly environment: RuntimeEnvironment;
-  readonly version: string;
-  readonly dataMode: 'synthetic';
-  readonly databaseUrl: string;
+export type { RuntimeEnvironment };
+
+export interface RuntimeConfig extends SharedRuntimeConfig {
+  /**
+   * How long shutdown waits for an in-flight queue handler before giving up on it.
+   *
+   * The default stays short so a watch-mode restart is not held up by a hung job.
+   * A deployment should raise it towards, but under, its own stop grace: the
+   * online-test compose allows 30s, so abandoning work after 4s wasted 26s the
+   * orchestrator was willing to give. An abandoned job is safe — it stays claimed
+   * until it stalls and is retried, and every handler is idempotent — but it is
+   * needless latency and load.
+   */
+  readonly shutdownGraceMs: number;
 }
 
-const allowedEnvironments = new Set<RuntimeEnvironment>([
-  'local',
-  'test',
-  'queue-compat',
-  'online-test',
-]);
-
 export function loadRuntimeConfig(): RuntimeConfig {
-  const environment = process.env.APP_ENV ?? 'local';
-  if (!allowedEnvironments.has(environment as RuntimeEnvironment)) {
-    throw new Error('APP_ENV must be local, test, queue-compat, or online-test');
+  const shared = loadSharedRuntimeConfig();
+  const raw = process.env.WORKER_SHUTDOWN_GRACE_MS ?? '4000';
+  const shutdownGraceMs = Number(raw);
+  if (!Number.isInteger(shutdownGraceMs) || shutdownGraceMs < 1_000 || shutdownGraceMs > 120_000) {
+    throw new Error('WORKER_SHUTDOWN_GRACE_MS must be an integer from 1000 to 120000');
   }
-  const dataMode = process.env.DATA_MODE ?? 'synthetic';
-  if (dataMode !== 'synthetic') throw new Error('Only synthetic DATA_MODE is allowed');
-
-  const version = process.env.RELEASE_VERSION ?? '0.0.0';
-  if (environment === 'online-test' && !/^[a-f0-9]{40}$/.test(version)) {
-    throw new Error('online-test RELEASE_VERSION must be a full lowercase Git commit SHA');
-  }
-  return Object.freeze({
-    environment: environment as RuntimeEnvironment,
-    version,
-    dataMode,
-    databaseUrl:
-      process.env.DATABASE_URL ??
-      'postgresql://marketplace_local:marketplace_local_only@127.0.0.1:5432/neighbourhood_store_local',
-  });
+  return Object.freeze({ ...shared, shutdownGraceMs });
 }

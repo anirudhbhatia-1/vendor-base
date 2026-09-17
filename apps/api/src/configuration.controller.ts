@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
   Get,
   Inject,
@@ -11,10 +10,6 @@ import {
 } from '@nestjs/common';
 import {
   ConfigurationAdminService,
-  ConfigurationApprovalConflictError,
-  ConfigurationNotFoundError,
-  ConfigurationOverlapError,
-  ConfigurationTransitionConflictError,
   type ConfigurationKind,
   type ConfigurationScopeKind,
   type ConfigurationStatus,
@@ -23,20 +18,8 @@ import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { CONFIGURATION_ADMIN } from './tokens.js';
-
-function object(value: unknown) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BadRequestException();
-  return value as Record<string, unknown>;
-}
-function text(value: Record<string, unknown>, key: string) {
-  if (typeof value[key] !== 'string') throw new BadRequestException();
-  return value[key];
-}
-function date(value: Record<string, unknown>, key: string) {
-  const found = new Date(text(value, key));
-  if (!Number.isFinite(found.getTime())) throw new BadRequestException();
-  return found;
-}
+import { dateField, object, stringField } from './request-fields.js';
+import { translateDomainError } from './domain-errors.js';
 function identity() {
   const context = currentRequestContext();
   if (context.actor?.actor_kind !== 'admin') throw new BadRequestException();
@@ -45,18 +28,6 @@ function identity() {
     correlation_id: context.correlation_id,
     request_id: context.request_id,
   };
-}
-function translate(error: unknown): never {
-  if (error instanceof TypeError || error instanceof RangeError) throw new BadRequestException();
-  if (error instanceof ConfigurationNotFoundError) throw new BadRequestException();
-  if (
-    error instanceof ConfigurationTransitionConflictError ||
-    error instanceof ConfigurationApprovalConflictError ||
-    error instanceof ConfigurationOverlapError
-  ) {
-    throw new ConflictException(error.message);
-  }
-  throw error;
 }
 const propose = RequireAuthorization({
   capability: 'admin.configuration.propose',
@@ -90,17 +61,19 @@ export class ConfigurationController {
     try {
       return await this.configuration.create({
         ...identity(),
-        configuration_key: text(input, 'configuration_key'),
-        configuration_kind: text(input, 'configuration_kind') as ConfigurationKind,
+        configuration_key: stringField(input, 'configuration_key'),
+        configuration_kind: stringField(input, 'configuration_kind') as ConfigurationKind,
         configuration_value: input['configuration_value'],
-        reason_code: text(input, 'reason_code'),
+        reason_code: stringField(input, 'reason_code'),
         scope: {
-          kind: text(input, 'scope_kind') as ConfigurationScopeKind,
-          reference: text(input, 'scope_reference'),
+          kind: stringField(input, 'scope_kind') as ConfigurationScopeKind,
+          reference: stringField(input, 'scope_reference'),
         },
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof RangeError || error instanceof TypeError)
+        throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -111,11 +84,13 @@ export class ConfigurationController {
       return await this.configuration.validate({
         actor_id: identity().actor_id,
         configuration_version_id: parseUuidV7(id),
-        reason_code: text(object(raw), 'reason_code'),
+        reason_code: stringField(object(raw), 'reason_code'),
         request_id: identity().request_id,
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof RangeError || error instanceof TypeError)
+        throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -126,11 +101,13 @@ export class ConfigurationController {
       return await this.configuration.approve({
         actor_id: identity().actor_id,
         configuration_version_id: parseUuidV7(id),
-        reason_code: text(object(raw), 'reason_code'),
+        reason_code: stringField(object(raw), 'reason_code'),
         request_id: identity().request_id,
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof RangeError || error instanceof TypeError)
+        throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -142,13 +119,17 @@ export class ConfigurationController {
       return await this.configuration.schedule({
         actor_id: identity().actor_id,
         configuration_version_id: parseUuidV7(id),
-        effective_from: date(input, 'effective_from'),
-        ...(input['effective_until'] ? { effective_until: date(input, 'effective_until') } : {}),
-        reason_code: text(input, 'reason_code'),
+        effective_from: dateField(input, 'effective_from'),
+        ...(input['effective_until']
+          ? { effective_until: dateField(input, 'effective_until') }
+          : {}),
+        reason_code: stringField(input, 'reason_code'),
         request_id: identity().request_id,
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof RangeError || error instanceof TypeError)
+        throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 
@@ -160,10 +141,12 @@ export class ConfigurationController {
       return await this.configuration.rollback({
         ...identity(),
         target_version_id: parseUuidV7(id),
-        reason_code: text(input, 'reason_code'),
+        reason_code: stringField(input, 'reason_code'),
       });
     } catch (error) {
-      translate(error);
+      if (error instanceof RangeError || error instanceof TypeError)
+        throw new BadRequestException();
+      translateDomainError(error);
     }
   }
 }

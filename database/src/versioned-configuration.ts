@@ -1,3 +1,4 @@
+import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -854,7 +855,7 @@ export async function snapshotConfigurationVersions(
 export class ConfigurationAdminService {
   readonly #pool: Pool;
   constructor(input: { connection_string: string }) {
-    this.#pool = new Pool({
+    this.#pool = createDatabasePool({
       application_name: 'configuration-admin',
       connectionString: input.connection_string,
       max: 6,

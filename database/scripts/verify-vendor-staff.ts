@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import {
   createAuthenticatedActor,
   createRequestContext,
@@ -12,15 +13,14 @@ import {
 } from '../src/vendor-publication.js';
 import {
   VendorStaffAuthorizationError,
+  VendorStaffConflictError,
   VendorStaffInputError,
   VendorStaffNotFoundError,
   VendorStaffService,
 } from '../src/vendor-staff.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
+import { check, rejects, adminContext } from './verify-support.js';
 
-function check(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 function context(userId: UuidV7) {
   return createRequestContext({
     actor: createAuthenticatedActor({
@@ -30,31 +30,19 @@ function context(userId: UuidV7) {
     }),
   });
 }
-function adminContext(userId: UuidV7) {
-  return createRequestContext({
-    actor: createAuthenticatedActor({
-      actor_id: userId,
-      actor_kind: 'admin',
-      session_id: createUuidV7(),
-    }),
-  });
-}
-async function rejects(work: () => Promise<unknown>, kind: new () => Error, message: string) {
-  try {
-    await work();
-  } catch (error) {
-    check(error instanceof kind, `${message} (raised ${String(error)})`);
-    return;
-  }
-  throw new Error(message);
-}
-
 const jaipur = { latitude: 26.91, longitude: 75.81 };
+const STAFF_HASH_KEY = 'SYNTH-VENDOR-STAFF-VERIFY-KEY';
+const phoneLookupHash = (phone: string) =>
+  createHmac('sha256', STAFF_HASH_KEY).update(`phone:${phone}`).digest('hex');
 
 export async function verifyVendorStaff(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, max: 4 });
   const access = new IdentityAccessService({ connection_string: connectionString });
-  const staff = new VendorStaffService({ connection_string: connectionString, access });
+  const staff = new VendorStaffService({
+    access,
+    connection_string: connectionString,
+    hash_key: STAFF_HASH_KEY,
+  });
   const publication = new VendorPublicationService({ connection_string: connectionString });
   const now = new Date();
   try {
@@ -96,6 +84,57 @@ export async function verifyVendorStaff(connectionString: string): Promise<void>
         roster.some((row) => row.user_id === pickerId && row.role === 'VENDOR_PICKER') &&
         roster.some((row) => row.user_id === store.ownerUserId && row.role === 'VENDOR_OWNER'),
       'The staff roster did not contain the owner, manager, and picker',
+    );
+
+    // 1b. An owner invites by phone number, which is the only identifier they
+    // can actually know. Requiring a UUID here made the route unreachable from
+    // the console: every value a person could type was rejected as malformed.
+    const phonePickerId = createUuidV7();
+    // Unique per run: the identity table is globally unique on the lookup hash,
+    // so a fixed number would only be insertable once.
+    const phoneNumber = `SYNTH-PHONE-STAFF-${phonePickerId.replaceAll('-', '').slice(-10).toUpperCase()}`;
+    await pool.query(
+      "INSERT INTO marketplace.users (user_id, state, data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+      [phonePickerId],
+    );
+    await pool.query(
+      `INSERT INTO marketplace.phone_identities
+         (phone_identity_id, user_id, phone_lookup_hash, retention_review_at,
+          verified_at, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$5,$5)`,
+      [
+        createUuidV7(),
+        phonePickerId,
+        phoneLookupHash(phoneNumber),
+        new Date(now.getTime() + 86_400_000),
+        now,
+      ],
+    );
+    const invited = await staff.inviteStaff({
+      context: context(store.ownerUserId),
+      vendor_location_id: store.locationId,
+      invitee_phone: phoneNumber.toLowerCase(),
+      role: 'VENDOR_PICKER',
+      now,
+    });
+    check(
+      invited.invitee_user_id === phonePickerId,
+      'A phone-addressed invitation did not resolve to the right account',
+    );
+
+    // An unknown number is refused rather than silently creating an account:
+    // an owner must not be able to bring a user into existence.
+    await rejects(
+      () =>
+        staff.inviteStaff({
+          context: context(store.ownerUserId),
+          vendor_location_id: store.locationId,
+          invitee_phone: 'SYNTH-PHONE-STAFF-VERIFY-NOBODY',
+          role: 'VENDOR_PICKER',
+          now,
+        }),
+      VendorStaffNotFoundError,
+      'An invitation to an unknown number was accepted',
     );
 
     // 2. A manager cannot invite staff; only the owner can.
@@ -200,7 +239,7 @@ export async function verifyVendorStaff(connectionString: string): Promise<void>
       context: context(store.ownerUserId),
       vendor_location_id: store.locationId,
       zone_name: 'SYNTH Staff Extension Zone',
-      boundary_wkt: `MULTIPOLYGON(((${jaipur.longitude - 0.5} ${jaipur.latitude - 0.5}, ${jaipur.longitude - 0.3} ${jaipur.latitude - 0.5}, ${jaipur.longitude - 0.3} ${jaipur.latitude - 0.3}, ${jaipur.longitude - 0.5} ${jaipur.latitude - 0.3}, ${jaipur.longitude - 0.5} ${jaipur.latitude - 0.5})))`,
+      boundary_wkt: `POLYGON((${jaipur.longitude - 0.5} ${jaipur.latitude - 0.5}, ${jaipur.longitude - 0.3} ${jaipur.latitude - 0.5}, ${jaipur.longitude - 0.3} ${jaipur.latitude - 0.3}, ${jaipur.longitude - 0.5} ${jaipur.latitude - 0.3}, ${jaipur.longitude - 0.5} ${jaipur.latitude - 0.5}))`,
       now,
     });
     const newZone = await pool.query<{ service_zone_id: string; count: string }>(
@@ -209,6 +248,73 @@ export async function verifyVendorStaff(connectionString: string): Promise<void>
     );
     const zoneId = newZone.rows[0]?.service_zone_id;
     check(typeof zoneId === 'string', 'Adding a service zone did not create it');
+
+    // A name that is already taken must say so, and must not read as a conflict
+    // the vendor can wait out.
+    //
+    // Reported from a live session: two POSTs to the zones endpoint, both 409.
+    // The duplicate name arrived at the browser as VERSION_CONFLICT -- the only
+    // 409 code any controller could reach -- which clients render as "Something
+    // changed while you were working. Refresh and try again." So the vendor
+    // refreshed, retyped the same name, and hit the same wall.
+    let duplicateCode: string | undefined;
+    try {
+      await staff.addServiceZone({
+        context: context(store.ownerUserId),
+        vendor_location_id: store.locationId,
+        zone_name: 'SYNTH Staff Extension Zone',
+        boundary_wkt: `POLYGON((${jaipur.longitude - 0.6} ${jaipur.latitude - 0.6}, ${jaipur.longitude - 0.4} ${jaipur.latitude - 0.6}, ${jaipur.longitude - 0.4} ${jaipur.latitude - 0.4}, ${jaipur.longitude - 0.6} ${jaipur.latitude - 0.4}, ${jaipur.longitude - 0.6} ${jaipur.latitude - 0.6}))`,
+        now,
+      });
+    } catch (error: unknown) {
+      duplicateCode =
+        error instanceof VendorStaffConflictError ? error.code : `unexpected:${String(error)}`;
+    }
+    check(
+      duplicateCode === 'RESOURCE_ALREADY_EXISTS',
+      `A duplicate zone name did not report itself as an existing resource (got ${duplicateCode})`,
+    );
+    const afterDuplicate = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM marketplace.vendor_service_zones WHERE vendor_location_id=$1 AND zone_name='SYNTH Staff Extension Zone'",
+      [store.locationId],
+    );
+    check(
+      afterDuplicate.rows[0]?.count === '1',
+      'The refused duplicate still wrote a second zone row',
+    );
+
+    // The console could add a zone and deactivate one by id, but never list
+    // them — so the only way to remove a zone was to already know a UUID the
+    // product never displays anywhere.
+    const listedZones = await staff.listServiceZones({
+      context: context(store.ownerUserId),
+      vendor_location_id: store.locationId,
+    });
+    const listedZone = listedZones.find((zone) => zone.service_zone_id === zoneId);
+    check(listedZone !== undefined, 'A zone that exists was not listed');
+    check(
+      listedZone?.lifecycle_state === 'ACTIVE' && (listedZone?.area_square_metres ?? 0) > 0,
+      'A listed zone carried no usable state or area',
+    );
+    const listedClosures = await staff.listTemporaryClosures({
+      context: context(store.ownerUserId),
+      vendor_location_id: store.locationId,
+      now: new Date('2026-08-31T00:00:00.000Z'),
+    });
+    check(
+      listedClosures.some((closure) => closure.reason_code === 'SYNTH_FESTIVAL_CLOSURE'),
+      'A scheduled closure was not listed back to the store that set it',
+    );
+    // A closure that has already finished is history, not something to act on.
+    const pastClosures = await staff.listTemporaryClosures({
+      context: context(store.ownerUserId),
+      vendor_location_id: store.locationId,
+      now: new Date('2026-09-03T00:00:00.000Z'),
+    });
+    check(
+      !pastClosures.some((closure) => closure.reason_code === 'SYNTH_FESTIVAL_CLOSURE'),
+      'A finished closure was still offered as current',
+    );
     const zoneCountAfter = await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM marketplace.vendor_service_zones WHERE vendor_location_id=$1 AND lifecycle_state='ACTIVE'",
       [store.locationId],
@@ -239,9 +345,36 @@ export async function verifyVendorStaff(connectionString: string): Promise<void>
       vendor_location_id: store.locationId,
     });
     check(modes.includes('PLATFORM_DELIVERY'), 'A picker could not read fulfilment modes');
+    // Requirement 4 -- vendors must not override platform-owned fee policy -- is a
+    // statement about the whole write surface, not about two method names. Checking for
+    // `addFulfilmentMode` and `setFulfilmentMode` specifically would pass a method
+    // called `updateFulfilmentModes`, and said nothing about fees at all.
+    //
+    // An allowlist inverts that: any new mutating method on the vendor-facing service
+    // fails until it is reviewed and named here, whether it writes fulfilment modes,
+    // commission, delivery fees or anything else the platform owns.
+    const vendorWritableMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(staff) as object)
+      .filter((name) =>
+        /^(add|set|update|invite|revoke|replace|deactivate|delete|remove|create)/.test(name),
+      )
+      .sort();
+    const approvedWrites = [
+      'addServiceZone',
+      'addTemporaryClosure',
+      'deactivateServiceZone',
+      'inviteStaff',
+      'replaceOperatingHours',
+      'revokeStaff',
+      'updateOrderingSettings',
+      'updateProfile',
+    ];
     check(
-      !('addFulfilmentMode' in staff) && !('setFulfilmentMode' in staff),
-      'Vendor staff service unexpectedly exposes a fulfilment-mode write path',
+      JSON.stringify(vendorWritableMethods) === JSON.stringify(approvedWrites),
+      `Vendor staff write surface changed: ${JSON.stringify(vendorWritableMethods)}`,
+    );
+    check(
+      !vendorWritableMethods.some((name) => /fee|commission|payout|policy|fulfilment/i.test(name)),
+      'A vendor-facing write path reaches platform-owned fee or fulfilment policy',
     );
 
     // 7. Every settings change and staff action left activity history.
