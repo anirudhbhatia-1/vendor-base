@@ -506,6 +506,81 @@ async function releaseAuthorizationForEndedOrder(
   );
 }
 
+/** A pool or a checked-out client: reads that need no transaction accept either. */
+type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>;
+
+/**
+ * The vendor's view of one order, with how it leaves the shop, who is
+ * collecting it and why it ended if it did.
+ *
+ * One query, used for the list, the single read and the summary every
+ * transition returns. The list and the read used to carry this 40-line block
+ * each, verbatim, and the transitions returned a bare RETURNING projection
+ * that reported every order as a platform delivery.
+ */
+const VENDOR_ORDER_SUMMARY_SQL = `
+  SELECT o.vendor_order_id, o.order_reference, o.lifecycle_state,
+         o.total_minor::text AS total_minor,
+         o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
+         o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
+         o.pickup_otp_attempts, o.decline_reason_code,
+         method.fulfilment_method,
+         collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
+         resolution.reason_code AS resolution_reason_code,
+         resolution.actor_kind AS resolution_actor_kind,
+         resolution.occurred_at AS resolution_occurred_at
+    FROM marketplace.vendor_orders o
+    LEFT JOIN LATERAL (
+      SELECT cvg.fulfilment_method
+        FROM marketplace.checkout_groups cg
+        JOIN marketplace.checkout_quote_groups cqg
+          ON cqg.checkout_quote_id = cg.checkout_quote_id
+         AND cqg.vendor_location_id = o.vendor_location_id
+        JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+       WHERE cg.checkout_group_id = o.checkout_group_id
+       LIMIT 1
+    ) method ON true
+    LEFT JOIN LATERAL (
+      SELECT a.assignment_state, w.wait_state,
+             CASE WHEN w.ended_at IS NULL THEN w.started_at END AS partner_waiting_since
+        FROM marketplace.delivery_assignments a
+        LEFT JOIN marketplace.partner_wait_timers w
+          ON w.delivery_assignment_id = a.delivery_assignment_id
+       WHERE a.vendor_order_id = o.vendor_order_id
+       ORDER BY a.created_at DESC
+       LIMIT 1
+    ) collection ON true
+    LEFT JOIN LATERAL (
+      SELECT e.reason_code, e.actor_kind, e.occurred_at
+        FROM marketplace.vendor_order_events e
+       WHERE e.vendor_order_id = o.vendor_order_id
+         AND e.resulting_state = o.lifecycle_state
+         AND o.lifecycle_state IN ('CANCELLED', 'EXPIRED')
+       ORDER BY e.occurred_at DESC
+       LIMIT 1
+    ) resolution ON true`;
+
+async function orderSummaries(
+  db: Queryable,
+  input: { readonly where: string; readonly params: readonly unknown[]; readonly tail?: string },
+): Promise<readonly VendorOrderSummary[]> {
+  const result = await db.query(
+    `${VENDOR_ORDER_SUMMARY_SQL} WHERE ${input.where} ${input.tail ?? ''}`,
+    [...input.params],
+  );
+  return Object.freeze(result.rows.map((row) => projectSummary(row as Record<string, unknown>)));
+}
+
+/** The summary of one order, or not found. */
+async function orderSummary(db: Queryable, vendorOrderId: UuidV7): Promise<VendorOrderSummary> {
+  const [summary] = await orderSummaries(db, {
+    where: 'o.vendor_order_id=$1',
+    params: [vendorOrderId],
+  });
+  if (!summary) throw new FulfilmentNotFoundError();
+  return summary;
+}
+
 function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
   return Object.freeze({
     vendor_order_id: parseUuidV7(row['vendor_order_id'] as string),
@@ -734,15 +809,11 @@ export class VendorFulfilmentService {
         throw new FulfilmentConflictError('The response deadline has passed');
       const version = order.version + 1;
       const ids = contextIds(input.context);
-      const updated = await client.query(
+      await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='ACCEPTED', accepted_at=$2, preparation_estimate_seconds=$3,
                 version=$4, updated_at=$2
-          WHERE vendor_order_id=$1
-        RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-                  version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-                  package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-                  pickup_otp_attempts, decline_reason_code`,
+          WHERE vendor_order_id=$1`,
         [input.vendor_order_id, now, input.preparation_estimate_seconds, version],
       );
       await appendEvent(client, {
@@ -768,7 +839,7 @@ export class VendorFulfilmentService {
         to_state: 'ACCEPTED',
         vendor_order_id: input.vendor_order_id,
       });
-      return projectSummary(updated.rows[0] as Record<string, unknown>);
+      return orderSummary(client, input.vendor_order_id);
     });
   }
 
@@ -803,15 +874,11 @@ export class VendorFulfilmentService {
         throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
       const version = order.version + 1;
       const ids = contextIds(input.context);
-      const updated = await client.query(
+      await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='CANCELLED', decline_reason_code=$2, decline_note=$3,
                 version=$4, updated_at=$5
-          WHERE vendor_order_id=$1
-        RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-                  version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-                  package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-                  pickup_otp_attempts, decline_reason_code`,
+          WHERE vendor_order_id=$1`,
         [input.vendor_order_id, input.reason_code, input.note ?? null, version, now],
       );
       await this.#releaseHolds(client, input.vendor_order_id);
@@ -844,7 +911,7 @@ export class VendorFulfilmentService {
         to_state: 'CANCELLED',
         vendor_order_id: input.vendor_order_id,
       });
-      return projectSummary(updated.rows[0] as Record<string, unknown>);
+      return orderSummary(client, input.vendor_order_id);
     });
   }
 
@@ -934,14 +1001,10 @@ export class VendorFulfilmentService {
         throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
       const version = order.version + 1;
       const ids = contextIds(input.context);
-      const updated = await client.query(
+      await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='PICKING', picking_started_at=$2, version=$3, updated_at=$2
-          WHERE vendor_order_id=$1
-        RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-                  version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-                  package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-                  pickup_otp_attempts, decline_reason_code`,
+          WHERE vendor_order_id=$1`,
         [input.vendor_order_id, now, version],
       );
       await appendEvent(client, {
@@ -954,7 +1017,7 @@ export class VendorFulfilmentService {
         reason_code: 'PICKER_STARTED',
         ids,
       });
-      return projectSummary(updated.rows[0] as Record<string, unknown>);
+      return orderSummary(client, input.vendor_order_id);
     });
   }
 
@@ -1351,16 +1414,12 @@ export class VendorFulfilmentService {
         );
       const version = order.version + 1;
       const ids = contextIds(input.context);
-      const updated = await client.query(
+      await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='READY', ready_at=$2, package_count=$3,
                 package_condition_note=$4, pickup_promise_at=$5,
                 version=$6, updated_at=$2
-          WHERE vendor_order_id=$1
-        RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-                  version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-                  package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-                  pickup_otp_attempts, decline_reason_code`,
+          WHERE vendor_order_id=$1`,
         [
           input.vendor_order_id,
           now,
@@ -1380,7 +1439,7 @@ export class VendorFulfilmentService {
         reason_code: 'ORDER_READY',
         ids,
       });
-      return projectSummary(updated.rows[0] as Record<string, unknown>);
+      return orderSummary(client, input.vendor_order_id);
     });
   }
 
@@ -1682,15 +1741,11 @@ export class VendorFulfilmentService {
       const collector = await requireCollectorPresent(client, input.vendor_order_id);
       const ids = contextIds(input.context);
       const version = order.version + 1;
-      const updated = await client.query(
+      await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='PICKED_UP', picked_up_at=$2, version=$3, updated_at=$2,
                 pickup_otp_hash=NULL, pickup_otp_expires_at=NULL, pickup_otp_issued_by=NULL
-          WHERE vendor_order_id=$1
-        RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-                  version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-                  package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-                  pickup_otp_attempts, decline_reason_code`,
+          WHERE vendor_order_id=$1`,
         [input.vendor_order_id, now, version],
       );
       // Inventory commit is delegated to settleInventoryOnPickup, which the
@@ -1718,7 +1773,7 @@ export class VendorFulfilmentService {
         note: input.proof_note ?? null,
         ids,
       });
-      return projectSummary(updated.rows[0] as Record<string, unknown>);
+      return orderSummary(client, input.vendor_order_id);
     });
   }
 
@@ -2382,14 +2437,10 @@ export class VendorFulfilmentService {
         );
       }
       const version = order.version + 1;
-      const updated = await client.query(
+      await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='CANCELLED', version=$2, updated_at=$3
-          WHERE vendor_order_id=$1
-        RETURNING vendor_order_id, order_reference, lifecycle_state, total_minor::text AS total_minor,
-                  version, accept_by, accepted_at, ready_at, picked_up_at, package_count,
-                  package_condition_note, preparation_estimate_seconds, pickup_otp_expires_at,
-                  pickup_otp_attempts, decline_reason_code`,
+          WHERE vendor_order_id=$1`,
         [input.vendor_order_id, version, now],
       );
       // A cancelled order was leaving its stock held, so a sibling order in the
@@ -2423,7 +2474,7 @@ export class VendorFulfilmentService {
         to_state: 'CANCELLED',
         vendor_order_id: input.vendor_order_id,
       });
-      return projectSummary(updated.rows[0] as Record<string, unknown>);
+      return orderSummary(client, input.vendor_order_id);
     });
   }
 
@@ -2654,105 +2705,18 @@ export class VendorFulfilmentService {
   }): Promise<readonly VendorOrderSummary[]> {
     requireSystemOrVendor(input.context);
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
-    const result = await this.#pool.query(
-      `SELECT o.vendor_order_id, o.order_reference, o.lifecycle_state,
-              o.total_minor::text AS total_minor,
-              o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
-              o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
-              o.pickup_otp_attempts, o.decline_reason_code,
-              method.fulfilment_method,
-              collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
-              resolution.reason_code AS resolution_reason_code,
-              resolution.actor_kind AS resolution_actor_kind,
-              resolution.occurred_at AS resolution_occurred_at
-         FROM marketplace.vendor_orders o
-         LEFT JOIN LATERAL (
-           SELECT cvg.fulfilment_method
-             FROM marketplace.checkout_groups cg
-             JOIN marketplace.checkout_quote_groups cqg
-               ON cqg.checkout_quote_id = cg.checkout_quote_id
-              AND cqg.vendor_location_id = o.vendor_location_id
-             JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
-            WHERE cg.checkout_group_id = o.checkout_group_id
-            LIMIT 1
-         ) method ON true
-         LEFT JOIN LATERAL (
-           SELECT a.assignment_state, w.wait_state,
-                  CASE WHEN w.ended_at IS NULL THEN w.started_at END AS partner_waiting_since
-             FROM marketplace.delivery_assignments a
-             LEFT JOIN marketplace.partner_wait_timers w
-               ON w.delivery_assignment_id = a.delivery_assignment_id
-            WHERE a.vendor_order_id = o.vendor_order_id
-            ORDER BY a.created_at DESC
-            LIMIT 1
-         ) collection ON true
-         LEFT JOIN LATERAL (
-           SELECT e.reason_code, e.actor_kind, e.occurred_at
-             FROM marketplace.vendor_order_events e
-            WHERE e.vendor_order_id = o.vendor_order_id
-              AND e.resulting_state = o.lifecycle_state
-              AND o.lifecycle_state IN ('CANCELLED', 'EXPIRED')
-            ORDER BY e.occurred_at DESC
-            LIMIT 1
-         ) resolution ON true
-        WHERE o.vendor_location_id=$1
-        ORDER BY o.created_at DESC, o.vendor_order_id DESC LIMIT $2`,
-      [input.vendor_location_id, limit],
-    );
-    return Object.freeze(result.rows.map((row) => projectSummary(row as Record<string, unknown>)));
+    return orderSummaries(this.#pool, {
+      where: 'o.vendor_location_id=$1',
+      params: [input.vendor_location_id, limit],
+      tail: 'ORDER BY o.created_at DESC, o.vendor_order_id DESC LIMIT $2',
+    });
   }
 
   async getOrder(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
   }): Promise<VendorOrderSummary> {
-    const result = await this.#pool.query(
-      `SELECT o.vendor_order_id, o.order_reference, o.lifecycle_state,
-              o.total_minor::text AS total_minor,
-              o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
-              o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
-              o.pickup_otp_attempts, o.decline_reason_code,
-              method.fulfilment_method,
-              collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
-              resolution.reason_code AS resolution_reason_code,
-              resolution.actor_kind AS resolution_actor_kind,
-              resolution.occurred_at AS resolution_occurred_at
-         FROM marketplace.vendor_orders o
-         LEFT JOIN LATERAL (
-           SELECT cvg.fulfilment_method
-             FROM marketplace.checkout_groups cg
-             JOIN marketplace.checkout_quote_groups cqg
-               ON cqg.checkout_quote_id = cg.checkout_quote_id
-              AND cqg.vendor_location_id = o.vendor_location_id
-             JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
-            WHERE cg.checkout_group_id = o.checkout_group_id
-            LIMIT 1
-         ) method ON true
-         LEFT JOIN LATERAL (
-           SELECT a.assignment_state, w.wait_state,
-                  CASE WHEN w.ended_at IS NULL THEN w.started_at END AS partner_waiting_since
-             FROM marketplace.delivery_assignments a
-             LEFT JOIN marketplace.partner_wait_timers w
-               ON w.delivery_assignment_id = a.delivery_assignment_id
-            WHERE a.vendor_order_id = o.vendor_order_id
-            ORDER BY a.created_at DESC
-            LIMIT 1
-         ) collection ON true
-         LEFT JOIN LATERAL (
-           SELECT e.reason_code, e.actor_kind, e.occurred_at
-             FROM marketplace.vendor_order_events e
-            WHERE e.vendor_order_id = o.vendor_order_id
-              AND e.resulting_state = o.lifecycle_state
-              AND o.lifecycle_state IN ('CANCELLED', 'EXPIRED')
-            ORDER BY e.occurred_at DESC
-            LIMIT 1
-         ) resolution ON true
-        WHERE o.vendor_order_id=$1`,
-      [input.vendor_order_id],
-    );
-    const row = result.rows[0];
-    if (!row) throw new FulfilmentNotFoundError();
-    return projectSummary(row as Record<string, unknown>);
+    return orderSummary(this.#pool, input.vendor_order_id);
   }
 
   /**

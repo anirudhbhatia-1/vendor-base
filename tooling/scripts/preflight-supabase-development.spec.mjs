@@ -44,7 +44,7 @@ test('the supabase-dev profile requires its own project keys and not the product
   const issues = inspectDevelopmentConfig(
     {
       APP_ENV: 'supabase-dev',
-      SUPABASE_PRODUCTION_DATABASE_URL: 'postgresql://postgres:p@h:5432/d',
+      SUPABASE_PRODUCTION_DATABASE_URL: 'postgresql://postgres:synthetic@h:5432/d',
     },
     () => true,
     profiles['supabase-dev'],

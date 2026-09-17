@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import type { SecureStorageBackend } from './secure-storage.js';
+import type { SecureStorageBackend } from './secure-storage';
 
 /**
  * Supabase Auth for a native shell.
