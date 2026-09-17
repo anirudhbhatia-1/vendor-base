@@ -205,6 +205,35 @@ export async function verifyCustomerCart(connectionString: string): Promise<void
     );
     check(afterRemoval.groups.length === 2, 'Removing one group changed sibling groups');
 
+    // 5b. The removed store can be added back. Its group row survives removal as
+    // REMOVED under the (cart, location) unique key, so re-adding revives it -- this
+    // was a duplicate-key failure -- and the quantity starts over rather than
+    // adding to the removed line's last count (4).
+    const readded = await cart.addLine({
+      context: context(customerId),
+      vendor_location_id: stores1.locationId,
+      catalogue_variant_id: lineB.catalogue_variant_id,
+      quantity: 1,
+      now,
+    });
+    const revivedGroup = readded.groups.find((g) => g.vendor_location_id === stores1.locationId);
+    check(revivedGroup !== undefined, 'A removed store could not be added back to the cart');
+    check(revivedGroup.lifecycle_state === 'ACTIVE', 'A re-added store is not ACTIVE');
+    check(revivedGroup.lines.length === 1, 'A re-added store did not start with one line');
+    check(
+      revivedGroup.lines[0]?.quantity === 1,
+      `A re-added line kept the removed quantity (got ${revivedGroup.lines[0]?.quantity})`,
+    );
+    const afterRemovalAgain = await cart.removeLine({
+      context: context(customerId),
+      cart_line_id: revivedGroup.lines[0].cart_line_id,
+      now,
+    });
+    check(
+      afterRemovalAgain.groups.length === 2,
+      'Removing the re-added store changed sibling groups',
+    );
+
     // 6. A stranger cannot act on this customer's lines.
     const strangerId = createUuidV7();
     await pool.query(

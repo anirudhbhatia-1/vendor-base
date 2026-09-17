@@ -424,19 +424,30 @@ export class CustomerCartService {
         if (activeGroups.length >= limit) {
           throw new CustomerCartConflictError(`A cart may hold at most ${limit} vendor groups`);
         }
-        groupId = createUuidV7({ now_ms: now.getTime() });
-        await client.query(
+        // A store removed from the cart keeps its row as REMOVED (the unique key is
+        // cart + location), so adding it back revives that row rather than
+        // inserting a second one -- which was a duplicate-key 500 for every
+        // customer who removed a store's last line and then changed their mind.
+        const revived = await client.query<{ cart_vendor_group_id: string }>(
           `INSERT INTO marketplace.cart_vendor_groups
              (cart_vendor_group_id, cart_id, vendor_location_id, fulfilment_method, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$5)`,
+           VALUES ($1,$2,$3,$4,$5,$5)
+           ON CONFLICT (cart_id, vendor_location_id)
+           DO UPDATE SET lifecycle_state = 'ACTIVE',
+                         fulfilment_method = EXCLUDED.fulfilment_method,
+                         customer_note = NULL, tip_minor = 0,
+                         version = marketplace.cart_vendor_groups.version + 1,
+                         updated_at = EXCLUDED.updated_at
+           RETURNING cart_vendor_group_id`,
           [
-            groupId,
+            createUuidV7({ now_ms: now.getTime() }),
             cart.cart_id,
             input.vendor_location_id,
             input.fulfilment_method ?? 'PLATFORM_DELIVERY',
             now,
           ],
         );
+        groupId = parseUuidV7(revived.rows[0]!.cart_vendor_group_id);
         await recordEvent(client, {
           cart_id: cart.cart_id,
           cart_vendor_group_id: groupId,
@@ -456,7 +467,14 @@ export class CustomerCartService {
             substitution_preference, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$6)
          ON CONFLICT (cart_vendor_group_id, catalogue_variant_id)
-         DO UPDATE SET quantity = marketplace.cart_lines.quantity + EXCLUDED.quantity,
+         DO UPDATE SET quantity = CASE
+                          WHEN marketplace.cart_lines.lifecycle_state = 'REMOVED' THEN EXCLUDED.quantity
+                          ELSE marketplace.cart_lines.quantity + EXCLUDED.quantity
+                        END,
+                        substitution_preference = CASE
+                          WHEN marketplace.cart_lines.lifecycle_state = 'REMOVED' THEN EXCLUDED.substitution_preference
+                          ELSE marketplace.cart_lines.substitution_preference
+                        END,
                         lifecycle_state = 'ACTIVE', version = marketplace.cart_lines.version + 1,
                         updated_at = $6
          RETURNING cart_line_id, quantity`,
