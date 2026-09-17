@@ -10,19 +10,43 @@ export function verifyCompose(text) {
   for (const variable of [
     'API_IMAGE',
     'WORKER_IMAGE',
+    'CUSTOMER_PWA_IMAGE',
     'RELEASE_VERSION',
     // Without these the runtime would fall back to the synthetic material committed to this
-    // repository, so a deployed online-test API would verify sessions and payment webhooks
-    // against publicly readable keys.
+    // repository, so a deployed API would verify sessions and payment webhooks against
+    // publicly readable keys.
     'ALLOW_SYNTHETIC_PROVIDERS',
     'OBJECT_STORAGE_GRANT_KEY',
-    'ONLINE_TEST_DATABASE_URL',
     'OTP_HASH_KEY',
     'PAYMENT_WEBHOOK_KEY',
     'PROVIDER_CLEARING_ACCOUNT_REFERENCE',
     'SESSION_TOKEN_HASH_KEY',
+    // The selected Supabase project, its runtime login and its Auth keys.
+    'SUPABASE_PRODUCTION_PROJECT_REF',
+    'SUPABASE_PRODUCTION_DATABASE_URL',
+    'SUPABASE_PRODUCTION_RUNTIME_PASSWORD',
+    'SUPABASE_URL',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    // The deployed browser origins: the API's CORS list and the customer BFF's own origin
+    // are exact, so a deployment must name them rather than inherit a loopback default.
+    'CORS_ALLOWED_ORIGINS',
+    'CADDY_API_HOST',
+    'CADDY_SHOP_HOST',
   ]) {
     if (!text.includes(`\${${variable}:?`)) errors.push(`${variable} must fail closed`);
+  }
+  // The runtime profile is fixed: the one the marketplace is developed against, in
+  // synthetic mode. A compose file that changed either would be a different environment.
+  if (!text.includes('APP_ENV: supabase-production'))
+    errors.push('runtime profile must be supabase-production');
+  if (!text.includes('DATA_MODE: synthetic')) errors.push('data mode must be synthetic');
+  // Every literal image reference is digest-pinned; the app images arrive digest-pinned
+  // through release.env.
+  for (const match of text.matchAll(/^\s*image:\s*(\S+)/gm)) {
+    const reference = match[1];
+    if (reference.startsWith('${')) continue;
+    if (!/@sha256:[a-f0-9]{64}$/.test(reference))
+      errors.push(`image is not digest-pinned: ${reference}`);
   }
   for (const control of ['read_only: true', 'cap_drop:', 'no-new-privileges:true']) {
     if (!text.includes(control)) errors.push(`missing container control: ${control}`);
@@ -68,7 +92,9 @@ export function verifyContainerfile(text) {
 function verifyRepository() {
   const errors = [];
   const compose = read('infrastructure/online-test/compose.yaml');
-  const containerfile = read('infrastructure/online-test/Containerfile');
+  const containerfile =
+    read('infrastructure/online-test/Containerfile') +
+    read('infrastructure/online-test/Containerfile.customer-pwa');
   const containerIgnore = read('.containerignore');
   errors.push(
     ...verifyCompose(compose),
@@ -80,25 +106,45 @@ function verifyRepository() {
   if (targets.environment !== 'online-test' || targets.dataClassification !== 'synthetic-only') {
     errors.push('provider targets must be synthetic-only online-test');
   }
-  if (targets.status !== 'paused-local-primary' || targets.activeEnvironment !== 'local') {
-    errors.push('provider targets must remain paused while local is the active environment');
+  // D-16: compute is the Azure for Students VM. The inventory says whether it is live
+  // (`activeEnvironment`) so the record cannot claim a deployment that has not passed
+  // its health check.
+  if (targets.status !== 'provisioning-azure-test' && targets.status !== 'active-azure-test') {
+    errors.push('provider targets must record the D-16 Azure test environment state');
   }
-  // D-15 replaced two named targets. Both had survived in this inventory: object
-  // storage as Cloudflare R2, and all four PWAs as Cloudflare Pages static exports.
+  if (!['local', 'azure-test'].includes(targets.activeEnvironment)) {
+    errors.push('active environment must be local or azure-test');
+  }
+  if (targets.status === 'active-azure-test' && targets.activeEnvironment !== 'azure-test') {
+    errors.push('an active Azure test environment must be the active environment');
+  }
+  if (targets.runtimeProfile !== 'supabase-production') {
+    errors.push('the runtime profile in the inventory must match compose.yaml');
+  }
+  if (!/Azure/.test(targets.providers?.compute ?? '')) {
+    errors.push('compute target must be the Azure VM per D-16');
+  }
   if (targets.providers?.objectStorage !== 'Supabase Storage') {
     errors.push('object storage target must be Supabase Storage per D-15');
   }
-  if (!/Workers\/OpenNext/.test(targets.providers?.pwaAndCdn ?? '')) {
-    errors.push('the customer PWA target must name Workers/OpenNext, not a static export');
+  if (
+    !/Azure Static Web Apps/.test(targets.providers?.pwaAndCdn ?? '') ||
+    !/container/.test(targets.providers?.pwaAndCdn ?? '')
+  ) {
+    errors.push(
+      'the client target must name Azure Static Web Apps for the static shells and a container for the customer PWA',
+    );
   }
   if (
-    targets.externalResourceState?.pwaAndCdn !==
-      'provisioned-synthetic-snapshots-non-authoritative' ||
-    targets.externalResourceState?.database !== 'provisioned-empty-baseline-non-authoritative' ||
+    !['not-provisioned', 'provisioned'].includes(targets.externalResourceState?.pwaAndCdn) ||
+    targets.externalResourceState?.database !== 'provisioned-synthetic-development-project' ||
     targets.externalResourceState?.objectStorage !== 'not-activated' ||
-    targets.externalResourceState?.compute !== 'not-provisioned'
+    !['provisioning', 'provisioned'].includes(targets.externalResourceState?.compute)
   ) {
-    errors.push('paused external resource inventory is incomplete or inaccurate');
+    errors.push('external resource inventory is incomplete or inaccurate');
+  }
+  if (!fs.existsSync(path.join(repositoryRoot, 'docs/decisions/D-16.md'))) {
+    errors.push('the Azure compute decision D-16 must be recorded');
   }
 
   // D-15 splits the client targets. The vendor, partner and admin PWAs remain controlled
@@ -161,8 +207,19 @@ function runSelfTest() {
   if (targets.providers.objectStorage !== 'Supabase Storage') {
     throw new Error('the object-storage target is not the one D-15 approves');
   }
-  if (!/Workers\/OpenNext/.test(targets.providers.pwaAndCdn)) {
-    throw new Error('the client target does not name the customer PWA runtime');
+  if (!/Azure/.test(targets.providers.compute)) {
+    throw new Error('the compute target is not the one D-16 records');
+  }
+  const unpinned = compose.replace(
+    /(image: docker\.io\/valkey\/valkey:[^@\n]+)@sha256:[a-f0-9]{64}/,
+    '$1',
+  );
+  if (!verifyCompose(unpinned).some((error) => error.includes('not digest-pinned'))) {
+    throw new Error('an unpinned literal image was accepted');
+  }
+  const wrongProfile = compose.replace('APP_ENV: supabase-production', 'APP_ENV: local');
+  if (!verifyCompose(wrongProfile).some((error) => error.includes('runtime profile'))) {
+    throw new Error('a changed runtime profile was accepted');
   }
 
   const leakedSecret = compose.replaceAll(

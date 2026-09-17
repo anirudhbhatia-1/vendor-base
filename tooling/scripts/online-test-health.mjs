@@ -7,6 +7,12 @@ if (!/^[a-f0-9]{40}$/.test(releaseVersion)) {
 }
 
 const apiUrl = safeHttpsUrl('ONLINE_TEST_API_URL', required('ONLINE_TEST_API_URL'));
+// The profile the deployed API must report. The Azure test environment (D-16) runs the
+// `supabase-production` profile in synthetic mode; the staging profile stays the default.
+const expectedEnvironment = process.env.ONLINE_TEST_EXPECTED_ENVIRONMENT ?? 'online-test';
+if (!['online-test', 'supabase-production'].includes(expectedEnvironment)) {
+  throw new Error('ONLINE_TEST_EXPECTED_ENVIRONMENT must be online-test or supabase-production');
+}
 const pwaVariables = [
   'ONLINE_TEST_CUSTOMER_URL',
   'ONLINE_TEST_VENDOR_URL',
@@ -17,7 +23,7 @@ const pwaVariables = [
 const evidence = {
   checkedAt: new Date().toISOString(),
   releaseVersion,
-  environment: 'online-test',
+  environment: expectedEnvironment,
   checks: [],
 };
 
@@ -26,11 +32,13 @@ for (const endpoint of ['/health/live', '/health/ready']) {
   if (!response.ok) throw new Error(`${endpoint} returned HTTP ${response.status}`);
   const body = await response.json();
   if (
-    body.environment !== 'online-test' ||
+    body.environment !== expectedEnvironment ||
     body.data_mode !== 'synthetic' ||
     body.version !== releaseVersion
   ) {
-    throw new Error(`${endpoint} identity did not match the expected online-test release`);
+    throw new Error(
+      `${endpoint} identity did not match the expected ${expectedEnvironment} release`,
+    );
   }
   if (endpoint.endsWith('/ready') && body.production_ready !== false) {
     throw new Error('Online-test API unexpectedly claims production readiness');

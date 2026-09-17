@@ -1,39 +1,35 @@
 {
   "environment": "online-test",
   "dataClassification": "synthetic-only",
-  "status": "paused-local-primary",
+  "status": "provisioning-azure-test",
   "activeEnvironment": "local",
+  "runtimeProfile": "supabase-production",
   "providers": {
-    "sourceAndCi": "GitHub Free",
-    "pwaAndCdn": "Cloudflare Pages for the vendor, partner and admin static exports; Workers/OpenNext for the customer PWA and its same-origin BFF",
+    "sourceAndCi": "GitHub Free; container images built by GitHub Actions and stored in GHCR by digest",
+    "pwaAndCdn": "Azure Static Web Apps (Free) for the vendor, partner and admin static exports; the customer PWA and its same-origin BFF run as a container on the Azure VM behind Caddy",
     "objectStorage": "Supabase Storage",
     "database": "Supabase Free PostgreSQL/PostGIS",
-    "compute": "OCI Always Free",
-    "queue": "Valkey on OCI",
-    "malwareScanning": "ClamAV on OCI",
+    "compute": "Azure VM (Azure for Students) running podman compose: API, worker, Valkey, Caddy, customer PWA",
+    "queue": "Valkey container on the Azure VM",
+    "ingress": "Caddy on the VM with Let's Encrypt certificates for the two cloudapp.azure.com DNS labels",
+    "malwareScanning": "ClamAV on the Azure VM (deferred until an adapter exists)",
     "push": "FCM and Web Push",
     "observability": "Grafana Cloud Free",
     "analytics": "PostHog Free"
   },
-  "notYetConnected": [
-    "objectStorage",
-    "database",
-    "queue",
-    "malwareScanning",
-    "push",
-    "observability",
-    "analytics"
-  ],
+  "notYetConnected": ["objectStorage", "malwareScanning", "push", "observability", "analytics"],
   "externalResourceState": {
-    "pwaAndCdn": "provisioned-synthetic-snapshots-non-authoritative",
-    "database": "provisioned-empty-baseline-non-authoritative",
+    "pwaAndCdn": "not-provisioned",
+    "database": "provisioned-synthetic-development-project",
     "objectStorage": "not-activated",
-    "compute": "not-provisioned",
+    "compute": "provisioning",
     "remainingProviders": "not-connected"
   },
-  "credentialPolicy": "Provider credentials are stored only in provider secret stores or OCI Vault and are never committed.",
+  "credentialPolicy": "Provider credentials are stored only in provider secret stores, the company password manager and the VM's uncommitted release.env, and are never committed.",
   "supersededTargets": {
     "objectStorage": "Cloudflare R2, superseded by D-15 which approves Supabase Storage; the adapter is implemented, no bucket is provisioned",
-    "pwaAndCdn": "Cloudflare Pages for all four PWAs, superseded by D-15 which moves the customer PWA to Workers/OpenNext because a static export cannot serve its BFF routes"
+    "pwaAndCdn": "Cloudflare Pages for all four PWAs (D-12) and Workers/OpenNext for the customer PWA (D-15), superseded by D-16 which hosts the static shells on Azure Static Web Apps and the customer PWA as a container on the VM",
+    "compute": "OCI Always Free with a Cloudflare Tunnel, superseded by D-16 (Azure for Students) because OCI Free Tier requires payment-card verification and the student offer does not",
+    "queue": "Valkey on OCI, superseded by D-16"
   }
 }

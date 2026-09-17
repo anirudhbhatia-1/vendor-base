@@ -1,26 +1,75 @@
 name: neighbourhood-store-online-test
 
+# The online company-test stack on one Azure VM (D-16): Caddy terminates TLS for the
+# API and the customer PWA, Valkey backs the worker queues, and the database stays on
+# the selected Supabase project. Every private value arrives through release.env via
+# `${VAR:?...}` so a missing one stops the deployment instead of falling back to the
+# synthetic material committed to this repository. Images are digest-pinned; mutable
+# tags are rejected by `tooling/scripts/verify-online-test-deployment.mjs`.
+#
+# Runtime profile: `supabase-production` with `DATA_MODE=synthetic` -- the profile the
+# marketplace is developed against. It is a synthetic tester environment, not a launch.
+
+x-runtime-profile: &runtime-profile
+  APP_ENV: supabase-production
+  DATA_MODE: synthetic
+  RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION must be the deployed Git SHA}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Only local-only fake adapters exist for OTP and payments; the runtime refuses to
+  # start on a shared host unless the deployment acknowledges that explicitly.
+  ALLOW_SYNTHETIC_PROVIDERS: ${ALLOW_SYNTHETIC_PROVIDERS:?online-test runs only local-only fake adapters and must acknowledge them}
+  # Database: the selected Supabase project through its transaction pooler, verified
+  # against the mounted Supabase CA.
+  SUPABASE_PRODUCTION_PROJECT_REF: ${SUPABASE_PRODUCTION_PROJECT_REF:?SUPABASE_PRODUCTION_PROJECT_REF is required}
+  SUPABASE_PRODUCTION_DATABASE_URL: ${SUPABASE_PRODUCTION_DATABASE_URL:?SUPABASE_PRODUCTION_DATABASE_URL is required}
+  SUPABASE_PRODUCTION_RUNTIME_PASSWORD: ${SUPABASE_PRODUCTION_RUNTIME_PASSWORD:?SUPABASE_PRODUCTION_RUNTIME_PASSWORD is required}
+  SUPABASE_PRODUCTION_RUNTIME_CONNECTION_MODE: transaction
+  SUPABASE_PRODUCTION_SSL_ROOT_CERT: /opt/certs/prod-ca-2021.crt
+  # Supabase Auth and admin provisioning.
+  SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
+  SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?SUPABASE_ANON_KEY is required}
+  SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+  # Queue.
+  VALKEY_URL: redis://valkey:6379
+  # Object storage: the filesystem adapter on a named volume, acknowledged as synthetic.
+  OBJECT_STORAGE_DRIVER: filesystem
+  OBJECT_STORAGE_LOCAL_PATH: /var/lib/neighbourhood/objects
+  # Private key material.
+  OTP_ADAPTER: fake
+  OTP_HASH_KEY: ${OTP_HASH_KEY:?OTP_HASH_KEY is required}
+  SESSION_TOKEN_HASH_KEY: ${SESSION_TOKEN_HASH_KEY:?SESSION_TOKEN_HASH_KEY is required}
+  OBJECT_STORAGE_GRANT_KEY: ${OBJECT_STORAGE_GRANT_KEY:?OBJECT_STORAGE_GRANT_KEY is required}
+  PAYMENT_WEBHOOK_KEY: ${PAYMENT_WEBHOOK_KEY:?PAYMENT_WEBHOOK_KEY is required}
+  PROVIDER_CLEARING_ACCOUNT_REFERENCE: ${PROVIDER_CLEARING_ACCOUNT_REFERENCE:?PROVIDER_CLEARING_ACCOUNT_REFERENCE is required}
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 200
+  stop_grace_period: 30s
+
 services:
   api:
+    <<: *hardening
     image: ${API_IMAGE:?API_IMAGE must be an immutable digest-pinned image}
     environment:
-      APP_ENV: online-test
-      DATA_MODE: synthetic
-      RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION must be the deployed Git SHA}
+      <<: *runtime-profile
       API_HOST: 0.0.0.0
       API_PORT: '3001'
-      # Private material. Supplied by the host secret store through release.env; the
-      # runtime refuses the committed synthetic defaults outside local development.
-      ALLOW_SYNTHETIC_PROVIDERS: ${ALLOW_SYNTHETIC_PROVIDERS:?online-test runs only local-only fake adapters and must acknowledge them}
-      ONLINE_TEST_SUPABASE_PROJECT_REF: ${ONLINE_TEST_SUPABASE_PROJECT_REF:?ONLINE_TEST_SUPABASE_PROJECT_REF is required}
-      ONLINE_TEST_DATABASE_URL: ${ONLINE_TEST_DATABASE_URL:?ONLINE_TEST_DATABASE_URL is required}
-      VALKEY_URL: ${VALKEY_URL:?VALKEY_URL is required}
-      OTP_HASH_KEY: ${OTP_HASH_KEY:?OTP_HASH_KEY is required}
-      SESSION_TOKEN_HASH_KEY: ${SESSION_TOKEN_HASH_KEY:?SESSION_TOKEN_HASH_KEY is required}
-      OBJECT_STORAGE_GRANT_KEY: ${OBJECT_STORAGE_GRANT_KEY:?OBJECT_STORAGE_GRANT_KEY is required}
-      PAYMENT_WEBHOOK_KEY: ${PAYMENT_WEBHOOK_KEY:?PAYMENT_WEBHOOK_KEY is required}
-      PROVIDER_CLEARING_ACCOUNT_REFERENCE: ${PROVIDER_CLEARING_ACCOUNT_REFERENCE:?PROVIDER_CLEARING_ACCOUNT_REFERENCE is required}
+      # The deployed browser origins, exactly; the loopback development clients are
+      # always allowed and nothing else is.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS must list the deployed PWA origins}
+    volumes:
+      - ./prod-ca-2021.crt:/opt/certs/prod-ca-2021.crt:ro
+      - objects:/var/lib/neighbourhood/objects
     ports:
+      # Loopback only: Caddy is the only thing the internet reaches.
       - '127.0.0.1:3001:3001'
     healthcheck:
       test:
@@ -32,55 +81,124 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 200
-    stop_grace_period: 30s
+    depends_on:
+      valkey:
+        condition: service_healthy
     networks:
       - private
+      - egress
 
   worker:
+    <<: *hardening
     image: ${WORKER_IMAGE:?WORKER_IMAGE must be an immutable digest-pinned image}
     environment:
-      APP_ENV: online-test
-      DATA_MODE: synthetic
-      RELEASE_VERSION: ${RELEASE_VERSION:?RELEASE_VERSION must be the deployed Git SHA}
-      ALLOW_SYNTHETIC_PROVIDERS: ${ALLOW_SYNTHETIC_PROVIDERS:?online-test runs only local-only fake adapters and must acknowledge them}
-      # Under the 30s stop_grace_period below, leaving room for pools to close after
-      # the queues drain. The 4s default exists so a watch-mode restart is not held
-      # up locally; a deployment that allows 30s should use most of it.
+      <<: *runtime-profile
+      # Under the 30s stop_grace_period, leaving room for pools to close after the
+      # queues drain.
       WORKER_SHUTDOWN_GRACE_MS: '25000'
-      ONLINE_TEST_SUPABASE_PROJECT_REF: ${ONLINE_TEST_SUPABASE_PROJECT_REF:?ONLINE_TEST_SUPABASE_PROJECT_REF is required}
-      ONLINE_TEST_DATABASE_URL: ${ONLINE_TEST_DATABASE_URL:?ONLINE_TEST_DATABASE_URL is required}
-      VALKEY_URL: ${VALKEY_URL:?VALKEY_URL is required}
-      OBJECT_STORAGE_GRANT_KEY: ${OBJECT_STORAGE_GRANT_KEY:?OBJECT_STORAGE_GRANT_KEY is required}
-      PAYMENT_WEBHOOK_KEY: ${PAYMENT_WEBHOOK_KEY:?PAYMENT_WEBHOOK_KEY is required}
-      PROVIDER_CLEARING_ACCOUNT_REFERENCE: ${PROVIDER_CLEARING_ACCOUNT_REFERENCE:?PROVIDER_CLEARING_ACCOUNT_REFERENCE is required}
+    volumes:
+      - ./prod-ca-2021.crt:/opt/certs/prod-ca-2021.crt:ro
+      - objects:/var/lib/neighbourhood/objects
     healthcheck:
       test: [CMD, node, -e, 'process.kill(1, 0)']
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 10s
-    restart: unless-stopped
-    read_only: true
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks:
+      - private
+      - egress
+
+  customer-pwa:
+    <<: *hardening
+    image: ${CUSTOMER_PWA_IMAGE:?CUSTOMER_PWA_IMAGE must be an immutable digest-pinned image}
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: '3100'
+      # The exact browser origin of this shell; the BFF refuses mutations from any other.
+      CUSTOMER_PWA_ORIGIN: https://${CADDY_SHOP_HOST:?CADDY_SHOP_HOST is required}
+      NEXT_PUBLIC_API_URL: https://${CADDY_API_HOST:?CADDY_API_HOST is required}
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 200
-    stop_grace_period: 30s
+      - /opt/app/apps/customer-pwa/.next/cache:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3100/api/session').then(r=>{if(r.status!==401&&!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - private
+      - egress
+
+  valkey:
+    <<: *hardening
+    image: docker.io/valkey/valkey:8.1.4-alpine@sha256:e706d1213aaba6896c162bb6a3a9e1894e1a435f28f8f856d14fab2e10aa098b
+    # As the image's own unprivileged user: its entrypoint chowns /data only when it
+    # starts as root, which `cap_drop: ALL` forbids.
+    user: valkey
+    # Queues are rebuilt from the outbox; nothing here needs to survive a restart.
+    command: ['valkey-server', '--save', '', '--appendonly', 'no', '--maxmemory', '128mb']
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /data:rw,noexec,nosuid,size=160m
+    healthcheck:
+      test: [CMD, valkey-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     networks:
       - private
 
+  caddy:
+    <<: *hardening
+    image: docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    cap_add:
+      - NET_BIND_SERVICE
+    environment:
+      CADDY_API_HOST: ${CADDY_API_HOST:?CADDY_API_HOST is required}
+      CADDY_SHOP_HOST: ${CADDY_SHOP_HOST:?CADDY_SHOP_HOST is required}
+      # Let's Encrypt account contact; `internal` switches to Caddy's local CA for a
+      # laptop rehearsal.
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:?CADDY_ACME_EMAIL is required}
+      CADDY_ACME_CA: ${CADDY_ACME_CA:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - '80:80'
+      - '443:443'
+    healthcheck:
+      test: [CMD, caddy, version]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      api:
+        condition: service_healthy
+      customer-pwa:
+        condition: service_healthy
+    networks:
+      - private
+      - egress
+
 networks:
+  # Service-to-service only; Valkey lives here and nowhere else.
   private:
     internal: true
+  # Outbound to Supabase and the ACME directory; nothing is published on it.
+  egress: {}
+
+volumes:
+  objects: {}
+  caddy-data: {}
+  caddy-config: {}

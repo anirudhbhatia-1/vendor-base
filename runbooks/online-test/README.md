@@ -1,107 +1,212 @@
-# Online-Test Account Setup, Deployment, and Rollback
+# Online-Test Account Setup, Deployment, and Rollback (Azure)
 
-> **NOT AUTHORIZED TO EXECUTE.** D-15 supersedes D-12's local-only restriction and records the
-> approved staging direction, so the "explicit superseding decision" this runbook previously
-> waited on now exists. **Approval is not activation.** D-15 states plainly that credentials,
-> accounts, operational approvals and deployed availability are not assumed, and that spending
-> stays a separate gate. Nothing here may be executed until the account owner has approved
-> provisioning and any payment-card verification, because no compute is provisioned and OCI
-> Free Tier can still require a card.
+> **Scope: D-16.** This runbook provisions the synthetic company-test environment on the
+> Azure for Students offer. It does not establish production, and it activates none of the
+> D-15 gates it does not name: no real people, real money, provider credentials (MSG91,
+> Razorpay, Mappls, FCM), production domains or public launch. Use company-owned accounts,
+> enable MFA, keep recovery codes in the approved password manager, and never paste
+> passwords, OTPs, private keys, database URLs or tokens into chat or Git.
 >
-> Current state: the Cloudflare snapshots and the empty Supabase baseline are non-authoritative
-> paused resources; object storage and OCI compute are not activated.
-
-This runbook establishes the selected free online company-test stack. It does not establish production. Use company-owned accounts, enable MFA, keep recovery codes in the company's approved password manager, and never paste passwords, OTPs, private keys, database URLs, or tokens into chat or Git.
+> Current state is recorded in `infrastructure/online-test/provider-targets.json`
+> (`status` and `activeEnvironment`); update it in the same commit as any change below.
 
 ## Stop conditions
 
-Stop before continuing if a provider asks for an unexpected payment, the requested free resource is unavailable, the account is personal instead of company-owned, a region is wrong, or a secret would need to be copied into a PWA/Android bundle. OCI may require payment-card verification even for a Free Tier account; the account owner must inspect and accept that directly.
+Stop before continuing if a provider asks for a payment card or an unexpected charge, the
+requested free resource is unavailable in the region, the account is personal instead of
+company-owned, a secret would need to be copied into a PWA bundle, or the Supabase project
+in use holds anything but synthetic data.
 
-## 1. GitHub source and CI
+## 1. GitHub source, CI and images
 
-1. Sign in to the company GitHub account and enable MFA.
-2. Confirm `anirudhbhatia-1/vendor-base` is the intended private repository and review its collaborators.
-3. Push the reviewed branch. Confirm `.github/workflows/ci.yml` runs successfully.
-4. Protect the default branch and require the workflow's `quality-gate` job before merge.
-5. Record the repository URL, first successful run URL, protected branch, account owner, and date in the evidence record.
+1. Confirm `anirudhbhatia-1/vendor-base` is the intended private repository, MFA is on, and
+   `.github/workflows/ci.yml` passes on `main`.
+2. Images are built by `.github/workflows/release-images.yml` (**Actions → Release images →
+   Run workflow**, `api_url` = the public API origin, e.g.
+   `https://nsapi-<x>.centralindia.cloudapp.azure.com`). The run summary prints
+   `RELEASE_VERSION`, `API_IMAGE`, `WORKER_IMAGE` and `CUSTOMER_PWA_IMAGE` as digests.
+   Optionally store the origin as the repository variable `ONLINE_TEST_API_URL` so tag pushes
+   (`v*`) can build without the input.
+3. Images live in GHCR as private packages. Create a classic PAT with only `read:packages`
+   for the VM (name it `azure-test-vm-pull`, 90-day expiry) and store it in the password
+   manager. It is used once, in §4.6.
 
-Do not add deployment credentials until each target account exists. Prefer GitHub OpenID Connect or provider-scoped short-lived credentials over long-lived keys when the provider supports it.
+## 2. Azure subscription, budget and static shells
 
-## 2. Cloudflare Pages, Supabase Storage, and ingress
+1. Activate Azure for Students through the GitHub Student Developer Pack and sign in with the
+   company GitHub identity. Enable MFA on the Microsoft account.
+2. Install the Azure CLI and sign in:
 
-1. Create or select the company Cloudflare account, enable MFA, and invite a second company administrator.
-2. Create four Direct Upload Pages projects using the names in `release.env.example`.
-3. Run `pnpm build:online-test:pwas`. Upload each matching `apps/<role>-pwa/out` directory to its project.
-4. Set no secrets in Pages. Only explicitly public `NEXT_PUBLIC_*` build values may enter client bundles.
-5. Object storage is **not** Cloudflare R2. D-15 approves Supabase Storage, and
-   `SupabaseProtectedObjectStorage` implements it. Create two private Supabase buckets — one for
-   approved catalogue assets, one for quarantined evidence — and never the same bucket for both;
-   both `loadSharedRuntimeConfig` and the adapter refuse a shared-bucket configuration. Set
-   `OBJECT_STORAGE_DRIVER=supabase` with `OBJECT_STORAGE_CATALOGUE_BUCKET` and
-   `OBJECT_STORAGE_EVIDENCE_BUCKET`. Nothing has been uploaded to a live project, so the adapter
-   is verified against contract tests only.
-6. Reserve a Cloudflare Tunnel for the OCI API. Do not publish the API port directly; the Compose file binds it to `127.0.0.1`.
-7. Enable spending/usage notifications where the account offers them and record all four HTTPS URLs and deployment IDs.
+```bash
+az login
+az account show --query '{name:name, id:id, state:state}'
+az group create --name rg-neighbourhood-test --location centralindia
+```
 
-Cloudflare's documented static Next.js flow uses `output: 'export'` and an `out` build directory. This repository enables that only when `DEPLOYMENT_TARGET=cloudflare-pages`.
+3. Budget alerts **before** any compute exists (the portal: Cost Management → Budgets, or):
+
+```bash
+az consumption budget create --budget-name neighbourhood-test --amount 20 --category cost \
+  --time-grain monthly --start-date "$(date -u +%Y-%m-01)" --end-date 2027-09-01 \
+  --resource-group rg-neighbourhood-test
+```
+
+4. Static Web Apps (Free) for the three static shells. The names become the origins the API
+   allows, so record the URLs the commands print:
+
+```bash
+for shell in vendor partner admin; do
+  az staticwebapp create --name "neighbourhood-${shell}-test" \
+    --resource-group rg-neighbourhood-test --location centralindia --sku Free
+  az staticwebapp show --name "neighbourhood-${shell}-test" \
+    --resource-group rg-neighbourhood-test --query defaultHostname -o tsv
+done
+```
+
+5. Object storage remains the filesystem adapter on the VM volume for this environment
+   (`OBJECT_STORAGE_DRIVER=filesystem`, acknowledged by `ALLOW_SYNTHETIC_PROVIDERS`). Supabase
+   Storage buckets are a later activation, not a prerequisite.
 
 ## 3. Supabase PostgreSQL/PostGIS
 
-1. Create a dedicated project named `neighbourhood-online-test` in the closest company-approved region. Use a generated database password and save it only in the company password manager.
-2. Record the 20-character project reference, region, and project owner. Do not record the database URL in evidence.
-3. Enable PostGIS using the reviewed migration path, not ad hoc dashboard edits.
-4. Store the direct TLS connection string in a protected local shell only for the migration session. The repository requires `sslmode=verify-full` and verifies the project reference.
-5. Inspect status first. Then apply only reviewed migrations with the explicit confirmation:
+The environment uses the existing synthetic development project, exactly as
+`infrastructure/supabase-production/.env` does locally. Nothing is created here.
+
+1. Confirm the project holds only synthetic data and that every migration is applied:
 
 ```bash
-export ONLINE_TEST_SUPABASE_PROJECT_REF='replace-with-project-ref'
-export ONLINE_TEST_DATABASE_URL='retrieve-from-approved-secret-store'
-pnpm db:status:online-test
-export ONLINE_TEST_MIGRATION_CONFIRM="apply-${ONLINE_TEST_SUPABASE_PROJECT_REF}-online-test"
-pnpm db:migrate:online-test
+pnpm db:status:production
 ```
 
-6. Remove the exported values from the shell after use. Never use `supabase db reset` against the remote project.
-7. Before this environment becomes primary, create an encrypted logical backup, verify its checksum, restore it into an isolated database, and record the outcome.
+2. Apply any pending migration from your laptop with the explicit confirmation the profile
+   already requires (`SUPABASE_PRODUCTION_MIGRATION_CONFIRM`); never from the VM.
+3. Note for `release.env`: the runtime login is `marketplace_app.<ref>` through the
+   transaction pooler on **6543**, `sslmode=verify-full`, and `sslrootcert` must be the path
+   the container sees: `/opt/certs/prod-ca-2021.crt`.
+4. Supabase Free pauses the project after seven idle days. Resuming it from the dashboard is an
+   operator action; the API's `/health/ready` reports the outage until then.
 
-## 4. OCI compute, Vault, and containers
+## 4. Azure VM, ingress and containers
 
-1. Create the company OCI tenancy with MFA. Select the approved region carefully; changing home region later is not a routine operation.
-2. Create a compartment and least-privilege policies for `neighbourhood-online-test`.
-3. Create the smallest available Always Free Ampere VM that safely fits the skeleton. Enable automatic security updates, SSH-key access, and no password login.
-4. Keep ingress closed except SSH from the approved administrator range. The future Cloudflare Tunnel makes the outbound connection; do not expose port 3001 publicly.
-5. Install a supported rootless container runtime and Compose provider on the VM. Create an unprivileged deployment user.
-6. Create OCI Vault secrets only when an implemented server adapter consumes them. The API and
-   worker now refuse to start without them: `ALLOW_SYNTHETIC_PROVIDERS`, `OTP_HASH_KEY`,
-   `SESSION_TOKEN_HASH_KEY`, `OBJECT_STORAGE_GRANT_KEY`, `PAYMENT_WEBHOOK_KEY`,
-   `PROVIDER_CLEARING_ACCOUNT_REFERENCE`, `ONLINE_TEST_DATABASE_URL`, `VALKEY_URL` and
-   `ONLINE_TEST_SUPABASE_PROJECT_REF`, each injected through `${VAR:?...}` in the Compose file.
-   Committed synthetic defaults are rejected outside local development, so a missing value stops
-   the deployment rather than silently falling back.
-7. Build API and worker images using a verified digest-pinned Node base. Push them to a private registry available to the VM and capture their immutable digests. Mutable tags such as `latest` are forbidden for releases.
-8. Copy `infrastructure/online-test/compose.yaml` and a locally created, uncommitted `release.env` to the deployment directory. Validate before applying:
+1. Create the VM. Central India, Ubuntu 24.04 LTS, SSH key only, **B1ms** (2 GB). If you would
+   rather stay inside the offer's free hours use `Standard_B1s` and add the swapfile in step 4;
+   `az vm resize` moves between them later.
 
 ```bash
-podman compose --env-file release.env -f compose.yaml config
+az network public-ip create --resource-group rg-neighbourhood-test --name pip-nsapi \
+  --sku Standard --allocation-method Static --dns-name "nsapi-$(openssl rand -hex 3)"
+az network public-ip create --resource-group rg-neighbourhood-test --name pip-nsshop \
+  --sku Standard --allocation-method Static --dns-name "nsshop-$(openssl rand -hex 3)"
+az network nsg create --resource-group rg-neighbourhood-test --name nsg-neighbourhood-test
+MY_IP="$(curl -s https://api.ipify.org)"
+az network nsg rule create --resource-group rg-neighbourhood-test --nsg-name nsg-neighbourhood-test \
+  --name ssh --priority 100 --protocol Tcp --destination-port-ranges 22 --source-address-prefixes "${MY_IP}/32"
+az network nsg rule create --resource-group rg-neighbourhood-test --nsg-name nsg-neighbourhood-test \
+  --name web --priority 110 --protocol Tcp --destination-port-ranges 80 443
+az network vnet create --resource-group rg-neighbourhood-test --name vnet-neighbourhood-test \
+  --subnet-name default
+az network nic create --resource-group rg-neighbourhood-test --name nic-neighbourhood-test \
+  --vnet-name vnet-neighbourhood-test --subnet default --network-security-group nsg-neighbourhood-test \
+  --public-ip-address pip-nsapi
+az network nic ip-config create --resource-group rg-neighbourhood-test --nic-name nic-neighbourhood-test \
+  --name shop --public-ip-address pip-nsshop
+az vm create --resource-group rg-neighbourhood-test --name vm-neighbourhood-test \
+  --image Ubuntu2404 --size Standard_B1ms --nics nic-neighbourhood-test \
+  --admin-username azureuser --ssh-key-values ~/.ssh/id_ed25519.pub \
+  --os-disk-size-gb 32 --storage-sku StandardSSD_LRS
+az network public-ip show --resource-group rg-neighbourhood-test --name pip-nsapi --query dnsSettings.fqdn -o tsv
+az network public-ip show --resource-group rg-neighbourhood-test --name pip-nsshop --query dnsSettings.fqdn -o tsv
+```
+
+   Both FQDNs resolve to the VM; Caddy tells them apart by hostname. Record them as
+   `CADDY_API_HOST` and `CADDY_SHOP_HOST`.
+
+2. Harden the host (as `azureuser`):
+
+```bash
+sudo apt-get update && sudo apt-get install -y unattended-upgrades podman podman-compose
+sudo dpkg-reconfigure -plow unattended-upgrades
+sudo useradd --create-home --shell /bin/bash deploy
+sudo loginctl enable-linger deploy
+# Rootless containers may bind 80/443 only with this; the compose file publishes nothing else.
+echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/90-caddy.conf && sudo sysctl --system
+```
+
+3. SSH access for the deploy user: copy your public key into `/home/deploy/.ssh/authorized_keys`
+   (mode 600, owned by `deploy`). Password login stays disabled.
+
+4. Memory headroom (required on B1s, sensible on B1ms):
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+5. Deployment directory (as `deploy`): copy `infrastructure/online-test/compose.yaml`,
+   `infrastructure/online-test/Caddyfile` and `infrastructure/supabase-production/prod-ca-2021.crt`
+   into `/home/deploy/neighbourhood/`. Create `release.env` there from
+   `infrastructure/online-test/release.env.example` — image digests and SHA from §1.2,
+   hostnames from §4.1, the three SWA origins plus the shop origin in `CORS_ALLOWED_ORIGINS`,
+   the Supabase values from the password manager, and four fresh `openssl rand -hex 32`
+   values for the key material. `chmod 600 release.env`. The file never leaves the VM.
+
+6. Registry login and first start (as `deploy`, in that directory):
+
+```bash
+podman login ghcr.io -u <github-username>            # paste the read:packages PAT
+podman compose --env-file release.env -f compose.yaml config > /dev/null
 podman compose --env-file release.env -f compose.yaml pull
 podman compose --env-file release.env -f compose.yaml up -d
 podman compose --env-file release.env -f compose.yaml ps
+podman compose --env-file release.env -f compose.yaml logs --tail 50 api worker caddy
 ```
 
-9. Configure the Cloudflare Tunnel to reach only `http://127.0.0.1:3001`. Add company access control before sharing the hostname.
+   `config` fails on any missing `release.env` value by design. Caddy obtains the two
+   certificates on first start; both hostnames must already resolve.
 
-Valkey and ClamAV are deferred until their application adapters exist. Running unused daemons would consume scarce VM memory without testing a real integration.
+7. Keep the stack across reboots: `podman generate systemd` is deprecated in favour of
+   Quadlet, but for compose the simplest reliable path is a user service that runs
+   `podman compose up -d` after boot:
 
-## 5. FCM, Web Push, Grafana Cloud, and PostHog
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/neighbourhood.service <<'EOF'
+[Unit]
+Description=Neighbourhood online-test stack
+After=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/deploy/neighbourhood
+ExecStart=/usr/bin/podman compose --env-file release.env -f compose.yaml up -d
+ExecStop=/usr/bin/podman compose --env-file release.env -f compose.yaml down
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload && systemctl --user enable --now neighbourhood.service
+```
 
-Create these company projects only when the matching implementation step starts:
+## 5. Static shells: build and upload
 
-- FCM: one company Firebase project with separate Android app registrations. Keep service-account credentials server-side; client configuration is public but environment-specific.
-- Web Push: generate a separate online-test VAPID key pair in the approved secret store and implement consent, unsubscribe, rotation, and token deletion first.
-- Grafana Cloud: create a free stack, scoped ingestion credential, retention/quota alert, and redaction test before exporting logs or traces.
-- PostHog: select the approved region, enable only allowlisted synthetic events, and prove that phone, address, OTP, payment, document, and precise-location fields are rejected.
+From your laptop, with the API origin from §4.1 and the public Supabase values (never the
+service-role key):
 
-No setup screen or API key can substitute for the missing provider-neutral adapters.
+```bash
+export NEXT_PUBLIC_API_URL='https://<CADDY_API_HOST>'
+export NEXT_PUBLIC_SUPABASE_URL='https://<ref>.supabase.co'
+export NEXT_PUBLIC_SUPABASE_ANON_KEY='<anon key>'
+pnpm build:online-test:pwas
+for shell in vendor partner admin; do
+  token="$(az staticwebapp secrets list --name "neighbourhood-${shell}-test" \
+    --resource-group rg-neighbourhood-test --query properties.apiKey -o tsv)"
+  npx --yes @azure/static-web-apps-cli@2 deploy "apps/${shell}-pwa/out" \
+    --deployment-token "$token" --env production
+done
+```
+
+Each export carries a generated `staticwebapp.config.json` (route rewrites for Next's
+`<route>.html` files, 404 handling, security headers). Deployment tokens are read into the
+shell for the command and never written down.
 
 ## 6. Release health and evidence
 
@@ -109,32 +214,52 @@ Set only credential-free HTTPS endpoints and the deployed Git SHA, then run:
 
 ```bash
 export RELEASE_VERSION='full-lowercase-40-character-git-sha'
-export ONLINE_TEST_API_URL='https://approved-api-host/'
-export ONLINE_TEST_CUSTOMER_URL='https://customer-project.pages.dev/'
-export ONLINE_TEST_VENDOR_URL='https://vendor-project.pages.dev/'
-export ONLINE_TEST_PARTNER_URL='https://partner-project.pages.dev/'
-export ONLINE_TEST_ADMIN_URL='https://admin-project.pages.dev/'
+export ONLINE_TEST_EXPECTED_ENVIRONMENT='supabase-production'
+export ONLINE_TEST_API_URL='https://<CADDY_API_HOST>/'
+export ONLINE_TEST_CUSTOMER_URL='https://<CADDY_SHOP_HOST>/'
+export ONLINE_TEST_VENDOR_URL='https://neighbourhood-vendor-test.azurestaticapps.net/'
+export ONLINE_TEST_PARTNER_URL='https://neighbourhood-partner-test.azurestaticapps.net/'
+export ONLINE_TEST_ADMIN_URL='https://neighbourhood-admin-test.azurestaticapps.net/'
 pnpm online-test:health
 ```
 
-Attach the generated safe JSON, CI URL, Cloudflare deployment IDs, image digests, Supabase migration output, and OCI Compose status to the company release record. Do not attach raw environment output.
+Then a manual pass: customer sign-in with a synthetic phone (read the code with
+`pnpm --filter @neighbourhood-store/database otp:read:supabase-production`),
+vendor email sign-in and catalogue load, admin console load. Attach the generated safe JSON,
+the Actions run URL, the three digests and `podman compose ps` output to the release record
+(`release-record.example.json`). Do not attach raw environment output.
 
-## 7. Rollback rehearsal
+When health passes, set `status: active-azure-test` and `activeEnvironment: azure-test` in
+`provider-targets.json` in a follow-up commit.
 
-Keep the last known-good `release.env` as a protected deployment record. A rollback changes only `API_IMAGE`, `WORKER_IMAGE`, and `RELEASE_VERSION` back to the prior immutable values, validates the rendered Compose configuration, applies it, and reruns the full health command. Do not roll database migrations back automatically; use the reviewed paired migration and backup/restore decision for the specific schema change.
+## 7. FCM, Web Push, Grafana Cloud, and PostHog
 
-Rollback passes only when all four PWAs, API liveness/readiness, release identity, worker health, and synthetic-data boundary pass. Record start time, end time, operator, reason, old/new image digests, and outcome.
+Unchanged from D-15: create these only when the matching adapter exists. No setup screen or
+API key substitutes for the missing provider-neutral adapters.
 
-## 8. Gate for making online-test primary
+## 8. Rollback rehearsal
+
+Keep the last known-good `release.env` as a protected deployment record. A rollback changes
+only `API_IMAGE`, `WORKER_IMAGE`, `CUSTOMER_PWA_IMAGE` and `RELEASE_VERSION` back to the prior
+immutable values, validates the rendered Compose configuration, applies it, and reruns the
+health command. Do not roll database migrations back automatically; use the reviewed paired
+migration and backup/restore decision for the specific schema change.
+
+Rollback passes only when all four PWAs, API liveness/readiness, release identity, worker
+health, and synthetic-data boundary pass. Record start time, end time, operator, reason,
+old/new image digests, and outcome.
+
+## 9. Gate for making the Azure environment primary
 
 Local can stop being the daily shared environment only after:
 
-- all provider accounts are company-owned with MFA and two administrators;
-- the external CI quality gate is enforced;
+- the Azure subscription and GitHub organisation are company-owned with MFA and two administrators;
+- the external CI quality gate is enforced on `main`;
 - two consecutive versioned deployments and one rollback rehearsal pass;
 - an encrypted database backup is restored successfully into isolation;
-- quotas and alerts are configured;
+- budget alerts and Supabase usage alerts are configured;
 - no real customer/vendor/partner data is present;
 - an Engineering Lead signs the evidence record.
 
-Keep the local files in Git as a disabled recovery and deterministic-test path. Removing them provides no scalability benefit and would weaken disaster recovery. Production remains a separate funded decision.
+Keep the local files in Git as a disabled recovery and deterministic-test path. Production
+remains a separate funded decision.

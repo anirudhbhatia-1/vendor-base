@@ -1,0 +1,41 @@
+# TLS termination for the online company-test VM. Two hostnames, two upstreams,
+# nothing else reachable from the internet. Hostnames and the ACME contact come from
+# release.env through the compose environment; CADDY_ACME_CA is empty for Let's
+# Encrypt and `internal` for a laptop rehearsal with Caddy's local CA.
+{
+	email {$CADDY_ACME_EMAIL}
+	admin off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+(hardened) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	encode zstd gzip
+	log {
+		output stderr
+		format json
+	}
+}
+
+{$CADDY_API_HOST} {
+	import hardened
+	tls {
+		issuer {$CADDY_ACME_CA:acme}
+	}
+	reverse_proxy api:3001
+}
+
+{$CADDY_SHOP_HOST} {
+	import hardened
+	tls {
+		issuer {$CADDY_ACME_CA:acme}
+	}
+	reverse_proxy customer-pwa:3100
+}

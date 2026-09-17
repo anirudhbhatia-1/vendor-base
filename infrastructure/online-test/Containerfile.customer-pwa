@@ -1,0 +1,39 @@
+# Customer PWA image for the online company-test environment.
+#
+# The customer shell is not a static export: its cookie BFF (`app/api/**`) and the
+# session proxy run on a server, so it ships as `next start` behind Caddy. Only
+# explicitly public `NEXT_PUBLIC_*` values enter the bundle; `CUSTOMER_PWA_ORIGIN`
+# is read at request time and comes from the compose environment.
+#
+# Build with a digest-pinned Node image matching the workspace's `engines` pin:
+#   --build-arg NODE_IMAGE=docker.io/library/node:24.19.0-bookworm-slim@sha256:<verified-digest>
+#   --build-arg NEXT_PUBLIC_API_URL=https://<api-host>
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE} AS builder
+
+ARG NEXT_PUBLIC_API_URL
+RUN test -n "${NEXT_PUBLIC_API_URL}"
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV CI=true
+WORKDIR /workspace
+COPY . .
+# Same shape as the API image: build the closure, then a fresh filtered production
+# install from the offline store so the runtime tree carries no dev tooling.
+RUN corepack enable \
+  && corepack prepare pnpm@11.19.0 --activate \
+  && pnpm install --frozen-lockfile \
+  && pnpm --filter "@neighbourhood-store/customer-pwa..." build \
+  && find . -maxdepth 3 -name node_modules -not -path "*/node_modules/*" -exec rm -rf {} + \
+  && pnpm install --frozen-lockfile --prod --offline --filter "@neighbourhood-store/customer-pwa..." \
+  && rm -rf apps/customer-pwa/.next/cache /root/.local/share/pnpm /root/.cache
+
+ARG NODE_IMAGE
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /opt/app
+COPY --from=builder --chown=node:node /workspace/ ./
+WORKDIR /opt/app/apps/customer-pwa
+USER node
+CMD ["node_modules/.bin/next", "start", "--hostname", "0.0.0.0", "--port", "3100"]

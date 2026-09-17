@@ -1,0 +1,122 @@
+name: Release images
+
+# Builds the API, worker and customer PWA images for the online company-test
+# environment (D-16) and pushes them to GHCR. The job summary lists the immutable
+# digests that go into the VM's release.env; `latest`-style tags are never the
+# deployment reference. Nothing here deploys: the VM pulls by digest under the
+# operator's control (runbooks/online-test/README.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'Public API origin baked into the customer PWA (https://<api-host>)'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # node:24.19.0-bookworm-slim, the workspace's exact `engines` pin, by manifest digest.
+  NODE_IMAGE: docker.io/library/node:24.19.0-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/neighbourhood
+
+jobs:
+  images:
+    name: Build and push by digest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      DOCKER_BUILDKIT: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the customer API origin
+        id: origin
+        run: |
+          set -euo pipefail
+          origin='${{ inputs.api_url }}'
+          if [ -z "$origin" ]; then origin='${{ vars.ONLINE_TEST_API_URL }}'; fi
+          case "$origin" in
+            https://*) ;;
+            *) echo "The customer API origin must be an https:// URL (got '${origin}')" >&2; exit 1 ;;
+          esac
+          echo "api_url=${origin%/}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login "$REGISTRY" -u '${{ github.actor }}' --password-stdin
+
+      - name: Build and push the API image
+        id: api
+        run: |
+          set -euo pipefail
+          image="${IMAGE_PREFIX}-api"
+          docker build \
+            --file infrastructure/online-test/Containerfile \
+            --build-arg NODE_IMAGE="$NODE_IMAGE" \
+            --build-arg APP_PACKAGE=@neighbourhood-store/api \
+            --build-arg APP_DIRECTORY=apps/api \
+            --tag "${image}:${GITHUB_SHA}" \
+            .
+          docker push "${image}:${GITHUB_SHA}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:${GITHUB_SHA}")"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the worker image
+        id: worker
+        run: |
+          set -euo pipefail
+          image="${IMAGE_PREFIX}-worker"
+          docker build \
+            --file infrastructure/online-test/Containerfile \
+            --build-arg NODE_IMAGE="$NODE_IMAGE" \
+            --build-arg APP_PACKAGE=@neighbourhood-store/worker \
+            --build-arg APP_DIRECTORY=apps/worker \
+            --tag "${image}:${GITHUB_SHA}" \
+            .
+          docker push "${image}:${GITHUB_SHA}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:${GITHUB_SHA}")"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the customer PWA image
+        id: customer
+        run: |
+          set -euo pipefail
+          image="${IMAGE_PREFIX}-customer-pwa"
+          docker build \
+            --file infrastructure/online-test/Containerfile.customer-pwa \
+            --build-arg NODE_IMAGE="$NODE_IMAGE" \
+            --build-arg NEXT_PUBLIC_API_URL='${{ steps.origin.outputs.api_url }}' \
+            --tag "${image}:${GITHUB_SHA}" \
+            .
+          docker push "${image}:${GITHUB_SHA}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${image}:${GITHUB_SHA}")"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Record the release identity
+        run: |
+          {
+            echo '## Release images'
+            echo
+            echo 'Copy these into `release.env` on the VM. Tags are informational; deploy by digest.'
+            echo
+            echo '```'
+            echo "RELEASE_VERSION=${GITHUB_SHA}"
+            echo "API_IMAGE=${{ steps.api.outputs.digest }}"
+            echo "WORKER_IMAGE=${{ steps.worker.outputs.digest }}"
+            echo "CUSTOMER_PWA_IMAGE=${{ steps.customer.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Customer PWA built for API origin: ${{ steps.origin.outputs.api_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

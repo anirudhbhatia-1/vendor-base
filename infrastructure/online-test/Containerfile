@@ -1,22 +1,42 @@
-# Build with a digest-pinned Node image, for example:
-# --build-arg NODE_IMAGE=node:24-bookworm-slim@sha256:<verified-digest>
+# API and worker image for the online company-test environment.
+#
+# Build with a digest-pinned Node image that matches the workspace's exact `engines`
+# pin (24.19.0), for example:
+#   --build-arg NODE_IMAGE=docker.io/library/node:24.19.0-bookworm-slim@sha256:<verified-digest>
+#   --build-arg APP_PACKAGE=@neighbourhood-store/api
+#   --build-arg APP_DIRECTORY=apps/api
 ARG NODE_IMAGE
 FROM ${NODE_IMAGE} AS builder
 
 ARG APP_PACKAGE
-RUN test -n "${APP_PACKAGE}"
+ARG APP_DIRECTORY
+RUN test -n "${APP_PACKAGE}" && test -n "${APP_DIRECTORY}"
+# Non-interactive pnpm: never prompt to purge modules between the two installs.
+ENV CI=true
 WORKDIR /workspace
 COPY . .
+# The app imports its workspace packages at runtime through their `dist/` builds
+# (`@neighbourhood-store/database` resolves to `dist/index.js`), so the dependency
+# closure `<app>...` is built, not just the app. The runtime tree is then a fresh,
+# filtered production install from the offline store: `pnpm deploy` symlinks
+# workspace packages back into the build context, and an in-place `--prod` install
+# does not prune what the full install brought in.
 RUN corepack enable \
   && corepack prepare pnpm@11.19.0 --activate \
   && pnpm install --frozen-lockfile \
-  && pnpm --filter "${APP_PACKAGE}" build \
-  && pnpm --filter "${APP_PACKAGE}" deploy --prod /opt/release
+  && pnpm --filter "${APP_PACKAGE}..." build \
+  && find . -maxdepth 3 -name node_modules -not -path "*/node_modules/*" -exec rm -rf {} + \
+  && pnpm install --frozen-lockfile --prod --offline --filter "${APP_PACKAGE}..." \
+  && rm -rf /root/.local/share/pnpm /root/.cache
 
 ARG NODE_IMAGE
 FROM ${NODE_IMAGE} AS runtime
+ARG APP_DIRECTORY
 ENV NODE_ENV=production
 WORKDIR /opt/app
-COPY --from=builder --chown=node:node /opt/release/ ./
+# The whole workspace tree, so pnpm's relative links between the app, its workspace
+# packages and the root store stay valid.
+COPY --from=builder --chown=node:node /workspace/ ./
+WORKDIR /opt/app/${APP_DIRECTORY}
 USER node
 CMD ["node", "dist/main.js"]
