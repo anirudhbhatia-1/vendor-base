@@ -447,7 +447,9 @@ export class CustomerCartService {
             now,
           ],
         );
-        groupId = parseUuidV7(revived.rows[0]!.cart_vendor_group_id);
+        const revivedRow = revived.rows[0];
+        if (!revivedRow) throw new CustomerCartConflictError('Vendor group could not be added');
+        groupId = parseUuidV7(revivedRow.cart_vendor_group_id);
         await recordEvent(client, {
           cart_id: cart.cart_id,
           cart_vendor_group_id: groupId,
