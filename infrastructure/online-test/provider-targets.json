@@ -1,8 +1,8 @@
 {
   "environment": "online-test",
   "dataClassification": "synthetic-only",
-  "status": "provisioning-azure-test",
-  "activeEnvironment": "local",
+  "status": "active-azure-test",
+  "activeEnvironment": "azure-test",
   "runtimeProfile": "supabase-production",
   "providers": {
     "sourceAndCi": "GitHub Free; container images built by GitHub Actions and stored in GHCR by digest",
@@ -22,7 +22,7 @@
     "pwaAndCdn": "provisioned",
     "database": "provisioned-synthetic-development-project",
     "objectStorage": "not-activated",
-    "compute": "provisioning",
+    "compute": "provisioned",
     "remainingProviders": "not-connected"
   },
   "credentialPolicy": "Provider credentials are stored only in provider secret stores, the company password manager and the VM's uncommitted release.env, and are never committed.",

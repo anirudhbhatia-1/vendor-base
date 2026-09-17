@@ -1,4 +1,4 @@
-# Online-Test Account Setup, Deployment, and Rollback (Azure)
+# Online-Test Account Setup, Deployment, and Rollback (Azure Container Apps)
 
 > **Scope: D-16.** This runbook provisions the synthetic company-test environment on the
 > Azure for Students offer. It does not establish production, and it activates none of the
@@ -28,8 +28,8 @@ in use holds anything but synthetic data.
    Optionally store the origin as the repository variable `ONLINE_TEST_API_URL` so tag pushes
    (`v*`) can build without the input.
 3. Images live in GHCR as private packages. Create a classic PAT with only `read:packages`
-   for the VM (name it `azure-test-vm-pull`, 90-day expiry) and store it in the password
-   manager. It is used once, in §4.6.
+   for Container Apps (name it `azure-test-aca-pull`, 90-day expiry) and store it in the
+   password manager and the 0600 file named by `GHCR_READ_TOKEN_FILE` (§4.2).
 
 ## 2. Azure subscription, budget and static shells
 
@@ -51,19 +51,23 @@ az consumption budget create --budget-name neighbourhood-test --amount 20 --cate
   --resource-group rg-neighbourhood-test
 ```
 
-4. Static Web Apps (Free) for the three static shells. The names become the origins the API
-   allows, so record the URLs the commands print:
+4. Static hosting for the three shells. Static Web Apps cannot be created in the regions the
+   student subscription allows, so each shell gets a small storage account with static-website
+   hosting (HTTPS endpoint included; cost is pennies). The endpoints become the origins the API
+   allows, so record what the last command prints:
 
 ```bash
 for shell in vendor partner admin; do
-  az staticwebapp create --name "neighbourhood-${shell}-test" \
-    --resource-group rg-neighbourhood-test --location centralindia --sku Free
-  az staticwebapp show --name "neighbourhood-${shell}-test" \
-    --resource-group rg-neighbourhood-test --query defaultHostname -o tsv
+  az storage account create --name "nbhd${shell}test" --resource-group rg-neighbourhood-test \
+    --location centralindia --sku Standard_LRS --kind StorageV2 --https-only true --min-tls-version TLS1_2
+  az storage blob service-properties update --account-name "nbhd${shell}test" \
+    --static-website --index-document index.html --404-document 404.html
+  az storage account show --name "nbhd${shell}test" --resource-group rg-neighbourhood-test \
+    --query primaryEndpoints.web -o tsv
 done
 ```
 
-5. Object storage remains the filesystem adapter on the VM volume for this environment
+5. Object storage remains the filesystem adapter on each replica's ephemeral storage for this environment
    (`OBJECT_STORAGE_DRIVER=filesystem`, acknowledged by `ALLOW_SYNTHETIC_PROVIDERS`). Supabase
    Storage buckets are a later activation, not a prerequisite.
 
@@ -79,112 +83,62 @@ pnpm db:status:production
 ```
 
 2. Apply any pending migration from your laptop with the explicit confirmation the profile
-   already requires (`SUPABASE_PRODUCTION_MIGRATION_CONFIRM`); never from the VM.
+   already requires (`SUPABASE_PRODUCTION_MIGRATION_CONFIRM`); never from a deployed container.
 3. Note for `release.env`: the runtime login is `marketplace_app.<ref>` through the
    transaction pooler on **6543**, `sslmode=verify-full`, and `sslrootcert` must be the path
    the container sees: `/opt/certs/prod-ca-2021.crt`.
 4. Supabase Free pauses the project after seven idle days. Resuming it from the dashboard is an
    operator action; the API's `/health/ready` reports the outage until then.
 
-## 4. Azure VM, ingress and containers
+## 4. Container Apps environment and apps
 
-1. Create the VM. Central India, Ubuntu 24.04 LTS, SSH key only, **B1ms** (2 GB). If you would
-   rather stay inside the offer's free hours use `Standard_B1s` and add the swapfile in step 4;
-   `az vm resize` moves between them later.
+No VM: the subscription offers no B-series size in its allowed regions and the smallest VM
+costs about $54/month. Container Apps (consumption) in Central India runs the four apps —
+`valkey` (internal TCP ingress), `worker`, `api` and `shop` (public HTTPS ingress) — with the
+API and shop allowed to scale to zero.
 
-```bash
-az network public-ip create --resource-group rg-neighbourhood-test --name pip-nsapi \
-  --sku Standard --allocation-method Static --dns-name "nsapi-$(openssl rand -hex 3)"
-az network public-ip create --resource-group rg-neighbourhood-test --name pip-nsshop \
-  --sku Standard --allocation-method Static --dns-name "nsshop-$(openssl rand -hex 3)"
-az network nsg create --resource-group rg-neighbourhood-test --name nsg-neighbourhood-test
-MY_IP="$(curl -s https://api.ipify.org)"
-az network nsg rule create --resource-group rg-neighbourhood-test --nsg-name nsg-neighbourhood-test \
-  --name ssh --priority 100 --protocol Tcp --destination-port-ranges 22 --source-address-prefixes "${MY_IP}/32"
-az network nsg rule create --resource-group rg-neighbourhood-test --nsg-name nsg-neighbourhood-test \
-  --name web --priority 110 --protocol Tcp --destination-port-ranges 80 443
-az network vnet create --resource-group rg-neighbourhood-test --name vnet-neighbourhood-test \
-  --subnet-name default
-az network nic create --resource-group rg-neighbourhood-test --name nic-neighbourhood-test \
-  --vnet-name vnet-neighbourhood-test --subnet default --network-security-group nsg-neighbourhood-test \
-  --public-ip-address pip-nsapi
-az network nic ip-config create --resource-group rg-neighbourhood-test --nic-name nic-neighbourhood-test \
-  --name shop --public-ip-address pip-nsshop
-az vm create --resource-group rg-neighbourhood-test --name vm-neighbourhood-test \
-  --image Ubuntu2404 --size Standard_B1ms --nics nic-neighbourhood-test \
-  --admin-username azureuser --ssh-key-values ~/.ssh/id_ed25519.pub \
-  --os-disk-size-gb 32 --storage-sku StandardSSD_LRS
-az network public-ip show --resource-group rg-neighbourhood-test --name pip-nsapi --query dnsSettings.fqdn -o tsv
-az network public-ip show --resource-group rg-neighbourhood-test --name pip-nsshop --query dnsSettings.fqdn -o tsv
-```
-
-   Both FQDNs resolve to the VM; Caddy tells them apart by hostname. Record them as
-   `CADDY_API_HOST` and `CADDY_SHOP_HOST`.
-
-2. Harden the host (as `azureuser`):
+1. Environment (no Log Analytics workspace; console logs stay readable with `az containerapp logs`):
 
 ```bash
-sudo apt-get update && sudo apt-get install -y unattended-upgrades podman podman-compose
-sudo dpkg-reconfigure -plow unattended-upgrades
-sudo useradd --create-home --shell /bin/bash deploy
-sudo loginctl enable-linger deploy
-# Rootless containers may bind 80/443 only with this; the compose file publishes nothing else.
-echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/90-caddy.conf && sudo sysctl --system
+az extension add --name containerapp --upgrade
+az containerapp env create --name cae-neighbourhood-test --resource-group rg-neighbourhood-test \
+  --location centralindia --logs-destination none
+az containerapp env show --name cae-neighbourhood-test --resource-group rg-neighbourhood-test \
+  --query properties.defaultDomain -o tsv
 ```
 
-3. SSH access for the deploy user: copy your public key into `/home/deploy/.ssh/authorized_keys`
-   (mode 600, owned by `deploy`). Password login stays disabled.
+   The default domain fixes every hostname before anything is deployed: the API is
+   `https://api.<domain>` and the shop `https://shop.<domain>`. Build the images (§1.2) with
+   that API origin.
 
-4. Memory headroom (required on B1s, sensible on B1ms):
+2. Registry credentials: save the `read:packages` PAT from §1.3 into a 0600 file that only
+   `release.env` names (`GHCR_READ_TOKEN_FILE`). It is sent to Container Apps as a secret and
+   never printed.
+
+3. `release.env` (mode 600, never committed) from `infrastructure/online-test/release.env.example`:
+   image digests and SHA from §1.2, `API_HOST`/`SHOP_HOST` from the domain above,
+   `VALKEY_HOST=valkey` (TCP apps are reached by app name inside an environment), the three
+   storage endpoints plus the shop origin in `CORS_ALLOWED_ORIGINS`, the Supabase values from
+   the password manager, and four fresh `openssl rand -hex 32` values for the key material.
+
+4. Deploy. The script renders `infrastructure/online-test/aca/*.json`, applies each app with
+   `az containerapp create|update --yaml`, and removes the rendered files:
 
 ```bash
-sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+node tooling/scripts/deploy-azure-test.mjs --env ~/.config/neighbourhood/release.env
+az containerapp revision list --name api --resource-group rg-neighbourhood-test \
+  --query '[].{name:name, healthy:properties.healthState, running:properties.runningState}' -o table
+az containerapp logs show --name api --resource-group rg-neighbourhood-test --type console --tail 50
 ```
 
-5. Deployment directory (as `deploy`): copy `infrastructure/online-test/compose.yaml`,
-   `infrastructure/online-test/Caddyfile` and `infrastructure/supabase-production/prod-ca-2021.crt`
-   into `/home/deploy/neighbourhood/`. Create `release.env` there from
-   `infrastructure/online-test/release.env.example` — image digests and SHA from §1.2,
-   hostnames from §4.1, the three SWA origins plus the shop origin in `CORS_ALLOWED_ORIGINS`,
-   the Supabase values from the password manager, and four fresh `openssl rand -hex 32`
-   values for the key material. `chmod 600 release.env`. The file never leaves the VM.
+   `--only api,shop` redeploys a subset. The API runs with `INGRESS_REQUEST_ID_MODE=replace`
+   because the platform ingress stamps a v4 `x-request-id` on every request.
 
-6. Registry login and first start (as `deploy`, in that directory):
-
-```bash
-podman login ghcr.io -u <github-username>            # paste the read:packages PAT
-podman compose --env-file release.env -f compose.yaml config > /dev/null
-podman compose --env-file release.env -f compose.yaml pull
-podman compose --env-file release.env -f compose.yaml up -d
-podman compose --env-file release.env -f compose.yaml ps
-podman compose --env-file release.env -f compose.yaml logs --tail 50 api worker caddy
-```
-
-   `config` fails on any missing `release.env` value by design. Caddy obtains the two
-   certificates on first start; both hostnames must already resolve.
-
-7. Keep the stack across reboots: `podman generate systemd` is deprecated in favour of
-   Quadlet, but for compose the simplest reliable path is a user service that runs
-   `podman compose up -d` after boot:
-
-```bash
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/neighbourhood.service <<'EOF'
-[Unit]
-Description=Neighbourhood online-test stack
-After=network-online.target
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=/home/deploy/neighbourhood
-ExecStart=/usr/bin/podman compose --env-file release.env -f compose.yaml up -d
-ExecStop=/usr/bin/podman compose --env-file release.env -f compose.yaml down
-[Install]
-WantedBy=default.target
-EOF
-systemctl --user daemon-reload && systemctl --user enable --now neighbourhood.service
-```
+5. Costs: the worker and Valkey are always on (one replica each at 0.25 vCPU / 0.5 GiB); the
+   API and shop scale to zero unless `API_MIN_REPLICAS` / `SHOP_MIN_REPLICAS` are raised.
+   Expect roughly $15–20/month against the credit after the free grant. The filesystem
+   object store lives in each replica's ephemeral storage: uploads do not survive a restart
+   in this environment.
 
 ## 5. Static shells: build and upload
 
@@ -192,21 +146,19 @@ From your laptop, with the API origin from §4.1 and the public Supabase values 
 service-role key):
 
 ```bash
-export NEXT_PUBLIC_API_URL='https://<CADDY_API_HOST>'
+export NEXT_PUBLIC_API_URL='https://api.<domain>'
 export NEXT_PUBLIC_SUPABASE_URL='https://<ref>.supabase.co'
 export NEXT_PUBLIC_SUPABASE_ANON_KEY='<anon key>'
 pnpm build:online-test:pwas
 for shell in vendor partner admin; do
-  token="$(az staticwebapp secrets list --name "neighbourhood-${shell}-test" \
-    --resource-group rg-neighbourhood-test --query properties.apiKey -o tsv)"
-  npx --yes @azure/static-web-apps-cli@2 deploy "apps/${shell}-pwa/out" \
-    --deployment-token "$token" --env production
+  az storage blob upload-batch --account-name "nbhd${shell}test" --destination '$web' \
+    --source "apps/${shell}-pwa/out" --overwrite --only-show-errors -o none
 done
 ```
 
-Each export carries a generated `staticwebapp.config.json` (route rewrites for Next's
-`<route>.html` files, 404 handling, security headers). Deployment tokens are read into the
-shell for the command and never written down.
+The exports use directory indexes (`catalogue/index.html`), which is what a static host
+answers `/catalogue/` from. Uploading with the account key is fine here: the accounts hold
+only public bundles.
 
 ## 6. Release health and evidence
 
@@ -215,18 +167,18 @@ Set only credential-free HTTPS endpoints and the deployed Git SHA, then run:
 ```bash
 export RELEASE_VERSION='full-lowercase-40-character-git-sha'
 export ONLINE_TEST_EXPECTED_ENVIRONMENT='supabase-production'
-export ONLINE_TEST_API_URL='https://<CADDY_API_HOST>/'
-export ONLINE_TEST_CUSTOMER_URL='https://<CADDY_SHOP_HOST>/'
-export ONLINE_TEST_VENDOR_URL='https://neighbourhood-vendor-test.azurestaticapps.net/'
-export ONLINE_TEST_PARTNER_URL='https://neighbourhood-partner-test.azurestaticapps.net/'
-export ONLINE_TEST_ADMIN_URL='https://neighbourhood-admin-test.azurestaticapps.net/'
+export ONLINE_TEST_API_URL='https://api.<domain>/'
+export ONLINE_TEST_CUSTOMER_URL='https://shop.<domain>/'
+export ONLINE_TEST_VENDOR_URL='https://nbhdvendortest.z29.web.core.windows.net/'
+export ONLINE_TEST_PARTNER_URL='https://nbhdpartnertest.z29.web.core.windows.net/'
+export ONLINE_TEST_ADMIN_URL='https://nbhdadmintest.z29.web.core.windows.net/'
 pnpm online-test:health
 ```
 
 Then a manual pass: customer sign-in with a synthetic phone (read the code with
 `pnpm --filter @neighbourhood-store/database otp:read:supabase-production`),
 vendor email sign-in and catalogue load, admin console load. Attach the generated safe JSON,
-the Actions run URL, the three digests and `podman compose ps` output to the release record
+the Actions run URL, the three digests and the `az containerapp revision list` output to the release record
 (`release-record.example.json`). Do not attach raw environment output.
 
 When health passes, set `status: active-azure-test` and `activeEnvironment: azure-test` in
@@ -241,8 +193,8 @@ API key substitutes for the missing provider-neutral adapters.
 
 Keep the last known-good `release.env` as a protected deployment record. A rollback changes
 only `API_IMAGE`, `WORKER_IMAGE`, `CUSTOMER_PWA_IMAGE` and `RELEASE_VERSION` back to the prior
-immutable values, validates the rendered Compose configuration, applies it, and reruns the
-health command. Do not roll database migrations back automatically; use the reviewed paired
+immutable values, runs the deploy script again, and reruns the health command. Container Apps
+keeps the previous revisions; `az containerapp revision activate` is the emergency path. Do not roll database migrations back automatically; use the reviewed paired
 migration and backup/restore decision for the specific schema change.
 
 Rollback passes only when all four PWAs, API liveness/readiness, release identity, worker
