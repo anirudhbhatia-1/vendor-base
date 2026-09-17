@@ -128,12 +128,18 @@ function verifyRepository() {
     errors.push('object storage target must be Supabase Storage per D-15');
   }
   if (
-    !/Azure Static Web Apps/.test(targets.providers?.pwaAndCdn ?? '') ||
-    !/container/.test(targets.providers?.pwaAndCdn ?? '')
+    !/Azure Storage static websites/.test(targets.providers?.pwaAndCdn ?? '') ||
+    !/Container App/.test(targets.providers?.pwaAndCdn ?? '')
   ) {
     errors.push(
-      'the client target must name Azure Static Web Apps for the static shells and a container for the customer PWA',
+      'the client target must name Azure Storage static websites for the static shells and a container app for the customer PWA',
     );
+  }
+  // The Container Apps definitions exist for every app the inventory names.
+  for (const app of ['valkey', 'worker', 'api', 'shop']) {
+    if (!fs.existsSync(path.join(repositoryRoot, `infrastructure/online-test/aca/${app}.json`))) {
+      errors.push(`missing Container Apps definition for ${app}`);
+    }
   }
   if (
     !['not-provisioned', 'provisioned'].includes(targets.externalResourceState?.pwaAndCdn) ||

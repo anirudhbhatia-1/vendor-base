@@ -9,7 +9,10 @@ if (deploymentTarget !== undefined && deploymentTarget !== 'cloudflare-pages') {
 const nextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
-  ...(deploymentTarget === 'cloudflare-pages' ? { output: 'export' } : {}),
+  // The static export is hosted where a request for `/catalogue` is only ever served
+  // from `catalogue/index.html` (Azure Storage static websites, Cloudflare Pages), so
+  // the export writes directory indexes and links with trailing slashes.
+  ...(deploymentTarget === 'cloudflare-pages' ? { output: 'export', trailingSlash: true } : {}),
 };
 
 export default nextConfig;

@@ -6,20 +6,20 @@
   "runtimeProfile": "supabase-production",
   "providers": {
     "sourceAndCi": "GitHub Free; container images built by GitHub Actions and stored in GHCR by digest",
-    "pwaAndCdn": "Azure Static Web Apps (Free) for the vendor, partner and admin static exports; the customer PWA and its same-origin BFF run as a container on the Azure VM behind Caddy",
+    "pwaAndCdn": "Azure Storage static websites (one account per shell) for the vendor, partner and admin static exports; the customer PWA and its same-origin BFF run as an Azure Container App",
     "objectStorage": "Supabase Storage",
     "database": "Supabase Free PostgreSQL/PostGIS",
-    "compute": "Azure VM (Azure for Students) running podman compose: API, worker, Valkey, Caddy, customer PWA",
-    "queue": "Valkey container on the Azure VM",
-    "ingress": "Caddy on the VM with Let's Encrypt certificates for the two cloudapp.azure.com DNS labels",
-    "malwareScanning": "ClamAV on the Azure VM (deferred until an adapter exists)",
+    "compute": "Azure Container Apps (consumption, Azure for Students) in Central India: api, shop and worker apps plus a Valkey app with internal TCP ingress",
+    "queue": "Valkey container app with internal TCP ingress in the same Container Apps environment",
+    "ingress": "Container Apps managed HTTPS ingress on the environment's azurecontainerapps.io domain; static shells on the storage accounts' HTTPS web endpoints",
+    "malwareScanning": "ClamAV (deferred until an adapter exists)",
     "push": "FCM and Web Push",
     "observability": "Grafana Cloud Free",
     "analytics": "PostHog Free"
   },
   "notYetConnected": ["objectStorage", "malwareScanning", "push", "observability", "analytics"],
   "externalResourceState": {
-    "pwaAndCdn": "not-provisioned",
+    "pwaAndCdn": "provisioned",
     "database": "provisioned-synthetic-development-project",
     "objectStorage": "not-activated",
     "compute": "provisioning",
@@ -28,8 +28,8 @@
   "credentialPolicy": "Provider credentials are stored only in provider secret stores, the company password manager and the VM's uncommitted release.env, and are never committed.",
   "supersededTargets": {
     "objectStorage": "Cloudflare R2, superseded by D-15 which approves Supabase Storage; the adapter is implemented, no bucket is provisioned",
-    "pwaAndCdn": "Cloudflare Pages for all four PWAs (D-12) and Workers/OpenNext for the customer PWA (D-15), superseded by D-16 which hosts the static shells on Azure Static Web Apps and the customer PWA as a container on the VM",
-    "compute": "OCI Always Free with a Cloudflare Tunnel, superseded by D-16 (Azure for Students) because OCI Free Tier requires payment-card verification and the student offer does not",
-    "queue": "Valkey on OCI, superseded by D-16"
+    "pwaAndCdn": "Cloudflare Pages for all four PWAs (D-12), Workers/OpenNext for the customer PWA (D-15) and Azure Static Web Apps (D-16 first draft: not creatable in the subscription's allowed regions), superseded by Azure Storage static websites for the shells and a container app for the customer PWA",
+    "compute": "OCI Always Free with a Cloudflare Tunnel (D-15 inventory) and an Azure VM (D-16 first draft: no B-series size is offered to the subscription, the smallest VM costs about $54/month), superseded by Azure Container Apps",
+    "queue": "Valkey on OCI, then on the Azure VM, superseded by a Valkey container app"
   }
 }

@@ -1,0 +1,82 @@
+{
+  "location": "${ACA_LOCATION}",
+  "name": "worker",
+  "type": "Microsoft.App/containerApps",
+  "properties": {
+    "managedEnvironmentId": "${ACA_ENVIRONMENT_ID}",
+    "configuration": {
+      "activeRevisionsMode": "Single",
+      "registries": [
+        {
+          "server": "ghcr.io",
+          "username": "${GHCR_USERNAME}",
+          "passwordSecretRef": "ghcr-read-token"
+        }
+      ],
+      "secrets": [
+        { "name": "ghcr-read-token", "value": "${GHCR_READ_TOKEN}" },
+        { "name": "supabase-ca", "value": "${SUPABASE_CA_PEM}" },
+        { "name": "supabase-database-url", "value": "${SUPABASE_PRODUCTION_DATABASE_URL}" },
+        { "name": "supabase-runtime-password", "value": "${SUPABASE_PRODUCTION_RUNTIME_PASSWORD}" },
+        { "name": "supabase-anon-key", "value": "${SUPABASE_ANON_KEY}" },
+        { "name": "supabase-service-role-key", "value": "${SUPABASE_SERVICE_ROLE_KEY}" },
+        { "name": "otp-hash-key", "value": "${OTP_HASH_KEY}" },
+        { "name": "session-token-hash-key", "value": "${SESSION_TOKEN_HASH_KEY}" },
+        { "name": "object-storage-grant-key", "value": "${OBJECT_STORAGE_GRANT_KEY}" },
+        { "name": "payment-webhook-key", "value": "${PAYMENT_WEBHOOK_KEY}" }
+      ]
+    },
+    "template": {
+      "containers": [
+        {
+          "name": "worker",
+          "image": "${WORKER_IMAGE}",
+          "resources": { "cpu": 0.25, "memory": "0.5Gi" },
+          "env": [
+            { "name": "APP_ENV", "value": "supabase-production" },
+            { "name": "DATA_MODE", "value": "synthetic" },
+            { "name": "RELEASE_VERSION", "value": "${RELEASE_VERSION}" },
+            { "name": "LOG_LEVEL", "value": "${LOG_LEVEL}" },
+            { "name": "ALLOW_SYNTHETIC_PROVIDERS", "value": "${ALLOW_SYNTHETIC_PROVIDERS}" },
+            { "name": "WORKER_SHUTDOWN_GRACE_MS", "value": "25000" },
+            {
+              "name": "SUPABASE_PRODUCTION_PROJECT_REF",
+              "value": "${SUPABASE_PRODUCTION_PROJECT_REF}"
+            },
+            { "name": "SUPABASE_PRODUCTION_DATABASE_URL", "secretRef": "supabase-database-url" },
+            {
+              "name": "SUPABASE_PRODUCTION_RUNTIME_PASSWORD",
+              "secretRef": "supabase-runtime-password"
+            },
+            { "name": "SUPABASE_PRODUCTION_RUNTIME_CONNECTION_MODE", "value": "transaction" },
+            { "name": "SUPABASE_PRODUCTION_SSL_ROOT_CERT", "value": "/opt/certs/prod-ca-2021.crt" },
+            { "name": "SUPABASE_URL", "value": "${SUPABASE_URL}" },
+            { "name": "SUPABASE_ANON_KEY", "secretRef": "supabase-anon-key" },
+            { "name": "SUPABASE_SERVICE_ROLE_KEY", "secretRef": "supabase-service-role-key" },
+            { "name": "VALKEY_URL", "value": "redis://${VALKEY_HOST}:6379" },
+            { "name": "OBJECT_STORAGE_DRIVER", "value": "filesystem" },
+            { "name": "OBJECT_STORAGE_LOCAL_PATH", "value": "/tmp/neighbourhood/objects" },
+            { "name": "OTP_ADAPTER", "value": "fake" },
+            { "name": "OTP_HASH_KEY", "secretRef": "otp-hash-key" },
+            { "name": "SESSION_TOKEN_HASH_KEY", "secretRef": "session-token-hash-key" },
+            { "name": "OBJECT_STORAGE_GRANT_KEY", "secretRef": "object-storage-grant-key" },
+            { "name": "PAYMENT_WEBHOOK_KEY", "secretRef": "payment-webhook-key" },
+            {
+              "name": "PROVIDER_CLEARING_ACCOUNT_REFERENCE",
+              "value": "${PROVIDER_CLEARING_ACCOUNT_REFERENCE}"
+            }
+          ],
+          "volumeMounts": [{ "volumeName": "certs", "mountPath": "/opt/certs" }]
+        }
+      ],
+      "volumes": [
+        {
+          "name": "certs",
+          "storageType": "Secret",
+          "secrets": [{ "secretRef": "supabase-ca", "path": "prod-ca-2021.crt" }]
+        }
+      ],
+      "scale": { "minReplicas": 1, "maxReplicas": 1 }
+    }
+  }
+}

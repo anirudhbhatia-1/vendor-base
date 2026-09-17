@@ -1,0 +1,55 @@
+{
+  "location": "${ACA_LOCATION}",
+  "name": "shop",
+  "type": "Microsoft.App/containerApps",
+  "properties": {
+    "managedEnvironmentId": "${ACA_ENVIRONMENT_ID}",
+    "configuration": {
+      "activeRevisionsMode": "Single",
+      "ingress": {
+        "external": true,
+        "transport": "http",
+        "targetPort": 3100,
+        "allowInsecure": false
+      },
+      "registries": [
+        {
+          "server": "ghcr.io",
+          "username": "${GHCR_USERNAME}",
+          "passwordSecretRef": "ghcr-read-token"
+        }
+      ],
+      "secrets": [{ "name": "ghcr-read-token", "value": "${GHCR_READ_TOKEN}" }]
+    },
+    "template": {
+      "containers": [
+        {
+          "name": "shop",
+          "image": "${CUSTOMER_PWA_IMAGE}",
+          "resources": { "cpu": 0.25, "memory": "0.5Gi" },
+          "env": [
+            { "name": "NODE_ENV", "value": "production" },
+            { "name": "HOSTNAME", "value": "0.0.0.0" },
+            { "name": "PORT", "value": "3100" },
+            { "name": "CUSTOMER_PWA_ORIGIN", "value": "https://${SHOP_HOST}" },
+            { "name": "NEXT_PUBLIC_API_URL", "value": "https://${API_HOST}" }
+          ],
+          "probes": [
+            {
+              "type": "Startup",
+              "httpGet": { "path": "/login", "port": 3100, "scheme": "HTTP" },
+              "initialDelaySeconds": 3,
+              "periodSeconds": 5,
+              "failureThreshold": 24
+            }
+          ]
+        }
+      ],
+      "scale": {
+        "minReplicas": "${SHOP_MIN_REPLICAS}",
+        "maxReplicas": 1,
+        "rules": [{ "name": "http", "http": { "metadata": { "concurrentRequests": "50" } } }]
+      }
+    }
+  }
+}

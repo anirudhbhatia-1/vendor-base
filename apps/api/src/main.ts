@@ -9,8 +9,11 @@ import { RUNTIME_CONFIG, type RuntimeConfig } from './runtime-config.js';
 
 async function bootstrap(): Promise<void> {
   const adapter = new FastifyAdapter({ bodyLimit: 7 * 1024 * 1024, logger: false });
-  const { installRequestContextHook } = await import('./request-context-hook.js');
-  installRequestContextHook(adapter.getInstance());
+  const { installRequestContextHook, parseIngressRequestIdMode } =
+    await import('./request-context-hook.js');
+  installRequestContextHook(adapter.getInstance(), {
+    ingressRequestIdMode: parseIngressRequestIdMode(process.env.INGRESS_REQUEST_ID_MODE),
+  });
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, {
     logger: apiLogger,
   });
