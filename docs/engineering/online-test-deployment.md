@@ -1,22 +1,36 @@
-# Online-Test Deployment Skeleton
+# Online-Test Deployment
 
-**Environment:** `online-test` only
+**Environment:** the synthetic company-test environment under [D-16](../decisions/D-16.md)
 **Data:** synthetic only
 **Production approval:** none
-**Current state:** paused by D-12; reference and verification controls only
+**Current state:** live on Azure Container Apps since 17 September 2026; `provider-targets.json` records `status: active-azure-test`
 
-> Do not provision, migrate, deploy, connect credentials, or run online health commands while D-12 is active. Four static Cloudflare snapshots and an empty Supabase/PostGIS baseline may remain externally, but they are not the active application. Local entry points are the working environment.
+> This environment runs the `supabase-production` profile with `DATA_MODE=synthetic` and
+> `ALLOW_SYNTHETIC_PROVIDERS=synthetic-testing-only`: the fake OTP adapter is the only phone
+> sign-in and object storage is each replica's ephemeral filesystem. Nobody outside the company is
+> invited. The `online-test` profile — which refuses a fake adapter — remains the future staging
+> profile and is not activated. D-12's pause was superseded by D-15 and D-16; the runbook is
+> authorized to execute within D-16's boundaries, and nothing beyond them.
 
-## What is deployable now
+## What is deployed
 
-- Four Next.js shells can be exported as static `out/` directories for separate Cloudflare Pages projects.
-- The API and worker can be built as separate non-root container images from one digest-pinned `Containerfile`.
-- The OCI Compose definition keeps the API on host loopback for a future authenticated Cloudflare Tunnel and gives API and worker an internal-only network.
-- API and worker refuse `production`, refuse non-synthetic data, and require a full Git SHA in `online-test`.
-- Remote migrations accept only the selected Supabase project, require TLS, and require a project-specific typed confirmation.
-- The external health verifier checks four HTTPS clients plus API identity and records non-secret evidence outside Git.
+- The API, the worker and the customer PWA with its same-origin BFF run as three Azure Container
+  Apps (consumption) in Central India, built from one digest-pinned `Containerfile` and
+  `Containerfile.customer-pwa` by `.github/workflows/release-images.yml`, stored in GHCR and
+  deployed by digest through `tooling/scripts/deploy-azure-test.mjs` rendering
+  `infrastructure/online-test/aca/*.json`.
+- Valkey runs as a fourth container app with internal TCP ingress only.
+- The vendor, partner and admin PWAs are static exports on one Azure Storage static-website
+  account each; the customer PWA is not a static export because its BFF routes need a server.
+- The database is the existing synthetic Supabase development project, reached through the
+  transaction pooler as `marketplace_app` with `sslmode=verify-full`.
+- API and worker refuse `production`, refuse non-synthetic data, require every private key to be
+  injected explicitly (a committed default or placeholder fails startup), and require a full Git SHA.
+- `infrastructure/online-test/compose.yaml` remains the laptop rehearsal of the same images.
 
-The API and worker are still shells. Database, queue, R2, ClamAV, notifications, analytics, and observability are intentionally marked `notYetConnected` in `provider-targets.json`. Creating an account does not make an adapter implemented.
+Object storage (the Supabase Storage adapter exists but no bucket is provisioned), malware
+scanning, push, observability and analytics are `notYetConnected` in `provider-targets.json`.
+Creating an account does not make an adapter implemented.
 
 ## Repository commands
 
@@ -26,14 +40,20 @@ pnpm build:online-test:pwas
 pnpm test:controls
 ```
 
-After resources exist, use the environment variables documented in the runbook and run:
+With the deployed URLs and the deployed Git SHA in the environment (never credentials):
 
 ```bash
 pnpm online-test:health
 ```
 
-The safe evidence file is written to `.online-test-evidence/<git-sha>.json`, which is ignored by Git.
+The safe evidence file is written to `.online-test-evidence/<git-sha>.json`, which is ignored by
+Git; the file for the current head records all six health checks passing.
 
 ## Promotion boundary
 
-`online-test` cannot be renamed or configured as production. A production environment needs a new approval, real-provider adapters, real-data controls, recovery evidence, capacity testing, budget approval, and a separately reviewed deployment definition.
+This environment is not staging and cannot be renamed or configured as production. Staging needs
+the D-15 adapters implemented and configured; production needs a new approval, real-provider
+adapters, real-data controls, a separate paid database project (D-14), recovery evidence, capacity
+testing, budget approval, and a separately reviewed deployment definition. The
+[runbook](../../runbooks/online-test/README.md) §9 lists what must hold before this environment
+becomes the daily shared one instead of local.

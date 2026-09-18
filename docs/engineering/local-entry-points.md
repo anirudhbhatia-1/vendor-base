@@ -40,9 +40,14 @@ The default address is `http://127.0.0.1:3001`.
 | `GET /health/ready` | The process completed bootstrap and dependency checks | Current local database/queue readiness, always with `production_ready: false` |
 
 Readiness does not mean production readiness. It means the local process can serve and its
-configured company-test dependencies are reachable. `APP_ENV` accepts `local`, `test` or
-`queue-compat`; `API_PORT` must be an integer from 1 through 65535. Invalid values fail startup
-with a structured error and a non-zero exit.
+configured company-test dependencies are reachable: `checks.database` (a live connection, 503 when
+unreachable), `checks.job_schema` (the job tables exist), `async_processing.broker` (a real Valkey
+`PING`), `async_processing.workers` (a durable heartbeat within 90 s) and the oldest pending job
+age. `APP_ENV` accepts `local`, `test`, `queue-compat`, `supabase-dev`, `supabase-production` or
+`online-test`; only the first three may run the fake adapters without
+`ALLOW_SYNTHETIC_PROVIDERS=synthetic-testing-only` or fall back to committed key material.
+`API_PORT` must be an integer from 1 through 65535. Invalid values fail startup with a structured
+error and a non-zero exit.
 
 ## Worker
 
@@ -52,11 +57,14 @@ Start the worker process with:
 pnpm --filter @neighbourhood-store/worker dev
 ```
 
-The worker starts a NestJS application context, logs a structured `worker.ready` event, installs
-SIGINT/SIGTERM shutdown hooks, and logs `worker.stopped` after cleanup. PostgreSQL-backed durable
-jobs own inventory/quote/offer/document/decision expiry, partner wait thresholds, configuration
-activation, local notification delivery and outbox dispatch. Valkey/BullMQ remains an optional
-scale adapter; it is not required for correctness in the approved local environment.
+The worker starts a NestJS application context, logs a structured `worker.ready` event, writes a
+durable heartbeat the API's readiness reads, installs SIGINT/SIGTERM shutdown hooks with a
+configurable drain grace (`WORKER_SHUTDOWN_GRACE_MS`), and logs `worker.stopped` after cleanup.
+PostgreSQL-backed durable jobs and the transactional outbox are the authority for
+inventory/quote/offer/document/decision expiry, partner wait thresholds, configuration activation,
+local notification delivery and dispatch; BullMQ over Valkey (`VALKEY_URL`, required) is the
+wake-up and distribution layer, so `pnpm db:up` provides Valkey alongside PostgreSQL. The domain
+event routing lives in `apps/worker/src/domain-event-handler.ts` and is unit-tested per branch.
 
 ## Database and PostGIS
 
@@ -114,8 +122,12 @@ pnpm dev:supabase-development
 
 That runs the API, worker and all four PWAs with `APP_ENV=supabase-dev`, against the separate
 Supabase development project. The `supabase-production` counterpart runs the same local processes
-with the same synthetic providers against the **production** database, which is why its preflight
-banner names the database it is about to write to:
+with the same synthetic providers against the second Supabase project — provisioned to D-14's
+least-privilege design (separate migration and `marketplace_app` runtime identities,
+`sslmode=verify-full`) but holding only synthetic data, and the project the Azure company-test
+environment shares under D-16. Despite the profile's name it is not a production system; the name
+is a recorded hazard (repair plan R0.2), which is why the preflight banner names the database it is
+about to write to:
 
 ```sh
 pnpm dev:supabase-production

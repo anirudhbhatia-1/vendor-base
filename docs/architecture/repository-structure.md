@@ -1,6 +1,6 @@
 # Repository Structure and Import Boundaries
 
-**Status:** Phases 3–4 and Phase 5.1–5.5 complete; Phase 5.6 synthetic-money foundation implemented within repository/local scope
+**Status:** Phases 2–11 built within the local synthetic scope; the workspace map below is enforced by `tooling/scripts/check-directory-ownership.mjs` and the import rules by `check-boundaries.mjs`
 
 **Production authority:** None
 
@@ -21,9 +21,12 @@ apps/
 
 packages/
 ├── domain-types/       Framework-free shared names and value shapes
-├── contracts/          Versioned HTTP and event contracts
+├── contracts/          Versioned HTTP and event contracts and the typed client
 ├── i18n/               Shared translation keys and catalogues
+├── ui/                 Shared accessible web components (imports ui-tokens only)
 ├── ui-tokens/          Basic cross-platform design tokens
+├── pwa-auth/           Browser session helpers shared by the four PWAs
+├── app-auth/           Native session helpers shared by the four Expo shells
 └── test-data/          Deterministic synthetic builders for tests only
 
 database/               Reviewed migrations, PostGIS, Drizzle metadata and synthetic seed lifecycle

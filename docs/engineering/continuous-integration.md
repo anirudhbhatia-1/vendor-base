@@ -1,6 +1,6 @@
 # Continuous Integration
 
-**Status:** Step 2.5 repository configuration complete; external GitHub execution not yet evidenced
+**Status:** Step 2.5 repository configuration complete; first green hosted execution on 18 September 2026 ([run 35329095886](https://github.com/anirudhbhatia-1/vendor-base/actions/runs/35329095886), dispatched on a branch); branch protection on `main` not yet enabled
 **Provider:** GitHub Actions on GitHub Free
 **Data mode:** Synthetic only
 **Production authority:** None
@@ -65,7 +65,7 @@ Repository files cannot prove an external runner or branch rule. After an author
 7. configure Actions minute/storage budget alerts and retention; and
 8. record the run URL, commit, branch-rule evidence, owner and review date without copying credentials into Git.
 
-Until this evidence exists, the workflow is repository-complete but external enforcement remains unproven. No push, repository-setting change, account creation, billing change, or workflow run is authorized by this document.
+Steps 1–4 have evidence: the gate ran on the hosted runner and passed every mandatory step, including the disposable database lifecycle and cleanup. Between 18 August and 17 September every push to `main` and `start` had failed on unit tests that imported a shared package's `dist/` before anything built it (repair batch 10, B10-01); `main` itself has not had a green run since that fix landed on a branch. Steps 5–8 — the branch rule, the bypass policy, budget alerts and the recorded evidence — remain repository settings and records that only the owner can produce. No push, repository-setting change, account creation, billing change, or workflow run is authorized by this document.
 
 ## Local equivalent
 

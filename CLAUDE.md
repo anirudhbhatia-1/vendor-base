@@ -3,7 +3,7 @@
 ## 1. Core Architecture & Quality Invariants (Work Perfectly)
 
 - **Language & Types:** Strict TypeScript. Never use `any` unless absolutely forced. Use domain types from `@neighbourhood-store/domain-types` (e.g. `UuidV7`, `RequestContext`, `MoneyMinor`).
-- **Database & Schema:** PostgreSQL + PostGIS via Drizzle ORM (`database/schema.ts`). Direct `drizzle-kit push` is strictly prohibited; all schema modifications must use paired, reviewed SQL migrations in `database/migrations/`.
+- **Database & Schema:** PostgreSQL + PostGIS. The paired, reviewed SQL migrations in `database/migrations/` are the only schema authority; the runtime is raw SQL through `pg`. `database/schema.ts` is a Drizzle mirror that `verify-static.ts` ratchets (new tables must be declared there; 78 older ones are recorded debt) — it is not consulted at runtime, and whether to finish or remove it is an open owner decision (tech-debt item 7). Direct `drizzle-kit push` is strictly prohibited.
 - **Financial Invariants:** Always use integer minor units (paise/INR). Money movements must use append-only double-entry ledger records. Floating-point money math is strictly prohibited.
 - **Concurrency & Messaging:** Always enforce idempotency keys, aggregate version transitions, and transactional outbox patterns (`outbox_events`).
 - **Authorization:** Enforce server-side role and capability checks using `authorization.guard.ts`. Hiding UI buttons is never considered security.

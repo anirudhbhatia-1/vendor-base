@@ -1,7 +1,7 @@
 # Internal environment topology
 
-**Status:** Local topology executable; Supabase database-only development active under D-13;
-broader online company-test work paused by D-12
+**Status:** Local topology executable; Supabase database-only development active under D-13; the
+synthetic company-test environment runs on Azure Container Apps under D-16 (17 September 2026)
 
 **External exposure:** Prohibited by default
 
@@ -38,21 +38,26 @@ The Step 2.3 API and worker still report `production_ready: false`; Step 2.4 doe
 | `test` | Automated isolated verification | Ephemeral synthetic fixtures; fake providers only |
 | `queue-compat` | BullMQ compatibility verification | Synthetic jobs; Valkey and Redis profiles tested separately |
 | `supabase-dev` | Locally run API/worker using a Supabase-hosted database | Synthetic data; local filesystem; fake providers only |
-| `online_test` | Paused future private company online testing using the D-11 provider set | No active execution; synthetic data only if D-12 is later superseded |
+| `supabase-production` | The profile the marketplace is developed and company-tested against: separate migration and least-privilege runtime identities through the pooler with `sslmode=verify-full`. Despite the name it holds only synthetic data and runs the fake adapters, and it is the profile the Azure company-test environment runs with `DATA_MODE=synthetic` and `ALLOW_SYNTHETIC_PROVIDERS` | Synthetic data; fake providers acknowledged at startup; filesystem object storage |
+| `online-test` | The future staging profile: requires the approved integration/sandbox adapters and fails startup on a fake one | Not activated; D-15's adapters are unimplemented |
 
-`supabase-dev` is database-only: clients never connect directly to Supabase, while API and worker
-continue running on the developer workstation. `online_test` is still paused. `staging` and
-`production` remain undefined as deployable environments. Naming a configuration, provider, or
-external snapshot does not activate an environment.
+`supabase-dev` and `supabase-production` are database targets: clients never connect directly to
+Supabase, while API and worker run on the developer workstation or, under D-16, as Azure Container
+Apps. The name `supabase-production` predates D-16 and is a hazard the repair plan (R0.2) records:
+it is the shared synthetic test database, not a production system, and D-14 requires production to
+be a separate paid project. `staging` and `production` remain undefined as deployable environments.
+Naming a configuration, provider, or external snapshot does not activate an environment.
 
-## Selected online company-test target
+## Company-test environment (D-16)
 
-Per [ADR-003](ADR-003-free-online-company-test-stack.md), the paused future `online_test` topology researched Cloudflare for the four PWAs/CDN/R2, Supabase Free for PostgreSQL/PostGIS, OCI Always Free for the API/worker/Valkey/ClamAV, FCM/Web Push for notifications, Grafana Cloud and PostHog for telemetry, and GitHub Free for source hosting and future CI.
-
-Four synthetic Cloudflare Pages snapshots and a Supabase/PostGIS baseline were created before the
-pause. D-13 now permits the selected Supabase project to act as a synthetic development database
-for locally run API and worker processes. R2, OCI and the remaining online adapters are not active.
-The ignored Supabase environment file is separate from normal local configuration.
+Per [D-16](../decisions/D-16.md), the synthetic company-test environment runs on Azure Container
+Apps in Central India — one app each for the API, the worker, the customer PWA with its BFF, and
+Valkey with internal TCP ingress — with the vendor, partner and admin static exports on Azure
+Storage static websites, images built by GitHub Actions and deployed by digest, and the existing
+synthetic Supabase development project as its database. `infrastructure/online-test/provider-targets.json`
+records the current state; object storage, malware scanning, push, observability and analytics
+remain `notYetConnected`. The OCI and Cloudflare targets researched under D-11/ADR-003 are recorded
+there as superseded. Nothing measured on this environment is a capacity result for D-15's targets.
 
 ## Network and credential rules
 
@@ -71,8 +76,10 @@ The ignored Supabase environment file is separate from normal local configuratio
 
 ## Future gate
 
-[D-13](../decisions/D-13.md) narrowly resumes Supabase database use and requires rotation of the
-previously exposed credential. D-12 continues to block every broader online-test component. D-11
-and ADR-003 still require company-owned accounts, identity, secrets, encryption, network isolation,
-observability, backup, restore, rollback, quota, regional and capacity evidence. D-10 separately
-governs recovery objectives. Production provider selection remains blocked.
+[D-13](../decisions/D-13.md) narrowly resumed Supabase database use and required rotation of the
+previously exposed credential; [D-16](../decisions/D-16.md) provisioned the Azure company-test
+environment. The runbook's gate for making it the daily shared environment (company-owned accounts
+with MFA and two administrators, the CI gate enforced on `main`, two versioned deployments and a
+rollback rehearsal, an isolated backup restore, budget alerts) is still open. D-15's approved
+adapters remain unimplemented, D-10 separately governs recovery objectives, and production provider
+selection remains blocked.

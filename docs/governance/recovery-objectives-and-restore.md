@@ -1,6 +1,6 @@
 # Recovery objectives, backup, and restore
 
-These are company-test targets, not production commitments.
+These are company-test targets for the local and synthetic environments, not production commitments. The production *design* targets are the tiered RPO/RTO in [D-10](../decisions/D-10.md) (5 minutes / 1 hour for orders, money and custody; 1 hour / 4 hours for identity, vendor, catalogue, inventory, support and configuration; 24 hours for rebuildable projections); the looser numbers below apply only to the synthetic drills and are not a relaxation of D-10.
 
 - PostgreSQL/PostGIS: RPO 15 minutes, RTO 2 hours.
 - Protected local object storage: RPO 24 hours, RTO 4 hours.
