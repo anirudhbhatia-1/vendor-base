@@ -48,6 +48,9 @@ type QuoteLineRow = {
 type GroupRow = {
   cart_vendor_group_id: string;
   vendor_location_id: string;
+  fulfilment_method: 'CUSTOMER_PICKUP' | 'PLATFORM_DELIVERY' | 'VENDOR_DELIVERY';
+  /** Whether the store still offers `fulfilment_method`; false blocks the group. */
+  method_offered: boolean;
   tip_minor: string;
   minimum_order_minor: string;
   route_metres: string;
@@ -108,6 +111,7 @@ type QuoteGroupProjection = Record<string, unknown> & {
   readonly location_name: string;
   readonly tip_minor: string | number;
   readonly total_minor: string | number;
+  readonly vendor_location_id: string;
 };
 type BlockedGroupProjection = {
   readonly cart_vendor_group_id: string;
@@ -202,8 +206,12 @@ export class GroupedCheckoutService {
       if (activeQuote.rows[0])
         return this.#projectQuote(client, activeQuote.rows[0].checkout_quote_id);
       const groups = await client.query<GroupRow>(
-        `SELECT g.cart_vendor_group_id,g.vendor_location_id,g.tip_minor::text,l.minimum_order_minor::text,
+        `SELECT g.cart_vendor_group_id,g.vendor_location_id,g.fulfilment_method,g.tip_minor::text,l.minimum_order_minor::text,
           ST_Distance(l.coordinates,a.coordinates)::bigint::text route_metres,
+          EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes m
+                   WHERE m.vendor_location_id=g.vendor_location_id
+                     AND m.fulfilment_mode=g.fulfilment_method
+                     AND m.approval_state='APPROVED') method_offered,
           json_agg(json_build_object('cart_line_id',cl.cart_line_id,'catalogue_variant_id',v.catalogue_variant_id,
             'inventory_item_id',i.inventory_item_id,'product_title',p.title,'variant_title',v.variant_title,
             'quantity',cl.quantity,'unit_price_minor',price.price_minor,'product_version',p.version,
@@ -220,7 +228,7 @@ export class GroupedCheckoutService {
         JOIN marketplace.inventory_items i ON i.vendor_location_id=g.vendor_location_id AND i.product_reference=p.product_reference
         WHERE c.cart_id=$1 AND c.user_id=$2 AND g.lifecycle_state='ACTIVE' AND l.lifecycle_state='ACTIVE' AND vendor.lifecycle_state='ACTIVE'
           AND EXISTS (SELECT 1 FROM marketplace.vendor_service_zones z WHERE z.vendor_location_id=l.vendor_location_id AND z.lifecycle_state='ACTIVE' AND ST_Covers(z.boundary,a.coordinates))
-        GROUP BY g.cart_vendor_group_id,l.minimum_order_minor,l.coordinates,a.coordinates ORDER BY g.vendor_location_id`,
+        GROUP BY g.cart_vendor_group_id,g.fulfilment_method,l.minimum_order_minor,l.coordinates,a.coordinates ORDER BY g.vendor_location_id`,
         [input.cart_id, userId],
       );
       if (!groups.rows.length) throw new CheckoutConflictError('No cart group can be quoted');
@@ -229,8 +237,12 @@ export class GroupedCheckoutService {
           (sum, line) => sum + Number(line.unit_price_minor) * line.quantity,
           0,
         );
-        const reason =
-          subtotal < Number(group.minimum_order_minor)
+        // CUS-33: a group asking for a method the store does not offer is blocked
+        // with a stable reason, ahead of minimum and stock, because it is the one
+        // the customer can repair without changing what they are buying.
+        const reason = !group.method_offered
+          ? 'FULFILMENT_METHOD_UNAVAILABLE'
+          : subtotal < Number(group.minimum_order_minor)
             ? 'MINIMUM_NOT_MET'
             : group.lines.some(
                   (line) =>
@@ -249,6 +261,7 @@ export class GroupedCheckoutService {
       const pricing = calculateCheckoutPricing(
         valid.map((group) => ({
           vendor_location_id: group.vendor_location_id,
+          fulfilment_method: group.fulfilment_method,
           item_subtotal_minor: group.lines.reduce(
             (sum, line) => sum + Number(line.unit_price_minor) * line.quantity,
             0,

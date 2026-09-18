@@ -82,6 +82,10 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           location_name: `SYNTH Fulfilment Store ${suffix}`,
           latitude: 26.911 + index * 0.001,
           longitude: 75.811,
+          // Store P has one order delivered by a partner and another collected
+          // at the counter, so it must offer both; the cart now refuses a
+          // collection group at a store that only delivers (CUS-33).
+          fulfilment_modes: ['PLATFORM_DELIVERY', 'CUSTOMER_PICKUP'],
         }),
       ),
     );

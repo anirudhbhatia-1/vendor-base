@@ -60,8 +60,10 @@ function declaredCode(exception: unknown, status: number): StableErrorCode | nul
  * `available_quantity` is how many units are actually left; `missing_checks` is
  * which publication checks are outstanding. Both were attached to their
  * exceptions and thrown away, leaving "That is not allowed in the current state".
+ * `offered_modes` is how a store can get an order to the customer, for a group
+ * that asked for a way it cannot.
  */
-const ALLOWED_DETAIL_KEYS = new Set(['available_quantity', 'missing_checks']);
+const ALLOWED_DETAIL_KEYS = new Set(['available_quantity', 'missing_checks', 'offered_modes']);
 
 function declaredDetails(exception: unknown): Readonly<Record<string, ErrorDetailValue>> {
   if (!(exception instanceof HttpException)) return {};

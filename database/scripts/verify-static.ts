@@ -151,6 +151,7 @@ assert(
       '0076_handover_error_codes',
       '0077_assignment_event_partner',
       '0078_partner_presence',
+      '0079_fulfilment_method_unavailable',
     ]),
   'Unexpected reviewed migrations',
 );

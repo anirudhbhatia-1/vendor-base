@@ -41,6 +41,7 @@ import {
   CustomerAddressNotFoundError,
   CustomerCartAuthorizationError,
   CustomerCartConflictError,
+  CustomerCartFulfilmentMethodError,
   CustomerCartInputError,
   CustomerCartNotFoundError,
   CustomerDiscoveryAuthorizationError,
@@ -211,6 +212,16 @@ export const DOMAIN_ERROR_TRANSLATIONS: ReadonlyArray<readonly [ErrorClass, Tran
   [CustomerCartInputError, { status: 'bad_request' }],
   [CustomerCartNotFoundError, { status: 'not_found' }],
   [CustomerCartConflictError, { status: 'conflict', code: 'ORDER_STATE_CONFLICT' }],
+  [
+    CustomerCartFulfilmentMethodError,
+    {
+      status: 'unprocessable',
+      code: 'FULFILMENT_METHOD_UNAVAILABLE',
+      details: (error) => ({
+        offered_modes: (error as CustomerCartFulfilmentMethodError).offered_modes,
+      }),
+    },
+  ],
   [CustomerCartAuthorizationError, { status: 'forbidden' }],
   [CustomerDiscoveryInputError, { status: 'bad_request' }],
   [CustomerDiscoveryNotFoundError, { status: 'not_found' }],

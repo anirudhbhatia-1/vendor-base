@@ -129,6 +129,16 @@ export const ERROR_DEFINITIONS = {
     message_key: 'delivery.otp_exhausted',
     retryable: false,
   },
+  /**
+   * The store does not offer the way the customer asked to receive the order.
+   * Carries the modes it does offer, because the fix is to choose one of them;
+   * a generic rule violation would leave the customer guessing which.
+   */
+  FULFILMENT_METHOD_UNAVAILABLE: {
+    http_status: 422,
+    message_key: 'cart.fulfilment_method_unavailable',
+    retryable: false,
+  },
   BUSINESS_RULE_VIOLATION: {
     http_status: 422,
     message_key: 'common.business_rule_violation',
@@ -184,6 +194,8 @@ export const ERROR_MESSAGES_EN: Readonly<Record<StableErrorCode, string>> = Obje
   DELIVERY_OTP_EXPIRED: 'That delivery code has expired. Ask the customer to open a fresh one.',
   DELIVERY_OTP_EXHAUSTED:
     'Too many wrong attempts. Ask the customer to open a fresh delivery code.',
+  FULFILMENT_METHOD_UNAVAILABLE:
+    'This store does not offer that option. Choose one of the ways it can get the order to you.',
   BUSINESS_RULE_VIOLATION: 'That is not allowed in the current state.',
   RATE_LIMITED: 'Too many attempts. Wait a moment and try again.',
   SERVICE_UNAVAILABLE: 'That service is briefly unavailable. Try again shortly.',

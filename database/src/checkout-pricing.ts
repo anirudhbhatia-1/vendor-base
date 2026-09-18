@@ -1,7 +1,17 @@
 import type { ResolvedFinancialPolicy } from './financial-policy.js';
 import { calculateDistanceAmount } from './money-policy.js';
 
+export type CheckoutFulfilmentMethod = 'CUSTOMER_PICKUP' | 'PLATFORM_DELIVERY' | 'VENDOR_DELIVERY';
+
 export interface CheckoutPricingGroupInput {
+  /**
+   * How the customer receives this group. A collected order travels no route,
+   * so it carries no delivery fee (design 7.8: "delivery fee/pickup ₹0"); until
+   * this was an input, every group was charged the distance fee, pickup included.
+   * Vendor delivery is still charged the same distance fee as platform delivery;
+   * who that fee settles to is a D-05 policy question this module does not decide.
+   */
+  readonly fulfilment_method: CheckoutFulfilmentMethod;
   readonly item_subtotal_minor: number;
   readonly route_metres: number;
   readonly tip_minor: number;
@@ -51,7 +61,10 @@ export function calculateCheckoutPricing(
     if (!group.vendor_location_id) throw new TypeError('Vendor location is required');
     const itemSubtotal = minor(group.item_subtotal_minor, 'Item subtotal');
     const tip = minor(group.tip_minor, 'Tip');
-    const delivery = calculateDistanceAmount(group.route_metres, resolved.policy);
+    const delivery =
+      group.fulfilment_method === 'CUSTOMER_PICKUP'
+        ? 0
+        : calculateDistanceAmount(group.route_metres, resolved.policy);
     const total = minor(itemSubtotal + delivery + tip, 'Group total');
     return Object.freeze({
       delivery_minor: delivery,

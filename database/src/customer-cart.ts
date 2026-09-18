@@ -13,11 +13,46 @@ export class CustomerCartInputError extends Error {}
 export class CustomerCartNotFoundError extends Error {}
 export class CustomerCartConflictError extends Error {}
 export class CustomerCartAuthorizationError extends Error {}
+/**
+ * The customer asked to receive a group in a way the store does not offer.
+ * Carries the modes it does offer, which is what the customer needs to fix it.
+ */
+export class CustomerCartFulfilmentMethodError extends Error {
+  readonly code = 'FULFILMENT_METHOD_UNAVAILABLE';
+  constructor(readonly offered_modes: readonly FulfilmentMethod[]) {
+    super('This store does not offer that fulfilment method');
+  }
+}
 
 /** Applied when no active `customer_cart_group_limit` configuration exists. */
 export const DEFAULT_CART_GROUP_LIMIT = 3;
 
 export type FulfilmentMethod = 'CUSTOMER_PICKUP' | 'PLATFORM_DELIVERY' | 'VENDOR_DELIVERY';
+
+/**
+ * The method a new store group starts with when the customer has not chosen
+ * one: platform delivery where the store offers it, otherwise the first of
+ * these it does offer. A group used to start as PLATFORM_DELIVERY regardless,
+ * so a pickup-only shop's group was born with a method it could never fulfil.
+ */
+const DEFAULT_METHOD_PREFERENCE: readonly FulfilmentMethod[] = [
+  'PLATFORM_DELIVERY',
+  'VENDOR_DELIVERY',
+  'CUSTOMER_PICKUP',
+];
+
+async function approvedFulfilmentModes(
+  client: Pick<PoolClient, 'query'>,
+  vendorLocationId: string,
+): Promise<readonly FulfilmentMethod[]> {
+  const modes = await client.query<{ fulfilment_mode: FulfilmentMethod }>(
+    `SELECT fulfilment_mode FROM marketplace.vendor_location_fulfilment_modes
+      WHERE vendor_location_id = $1 AND approval_state = 'APPROVED'
+      ORDER BY fulfilment_mode`,
+    [vendorLocationId],
+  );
+  return Object.freeze(modes.rows.map((row) => row.fulfilment_mode));
+}
 export type SubstitutionPreference = 'ALLOW_SAME_STORE' | 'ASK_CUSTOMER' | 'NO_SUBSTITUTION';
 
 export interface CartLine {
@@ -69,6 +104,12 @@ export interface CartVendorGroup {
   readonly subtotal_minor: number | null;
   readonly minimum_met: boolean;
   readonly fulfilment_modes: readonly string[];
+  /**
+   * Whether the store currently offers `fulfilment_method`. False only when a
+   * mode was withdrawn after the group chose it; the quote blocks such a group,
+   * and the customer's repair is to choose one of `fulfilment_modes`.
+   */
+  readonly fulfilment_method_offered: boolean;
 }
 
 export interface Cart {
@@ -234,6 +275,7 @@ async function loadCart(client: PoolClient, cartId: string): Promise<Cart> {
           subtotal_minor: subtotal,
           minimum_met: subtotal !== null && subtotal >= minimum,
           fulfilment_modes: Object.freeze([...group.fulfilment_modes]),
+          fulfilment_method_offered: group.fulfilment_modes.includes(group.fulfilment_method),
         });
       }),
     ),
@@ -424,6 +466,18 @@ export class CustomerCartService {
         if (activeGroups.length >= limit) {
           throw new CustomerCartConflictError(`A cart may hold at most ${limit} vendor groups`);
         }
+        // CUS-33: the group receives its order in a way the store actually offers.
+        // A requested method the store lacks is refused with the modes it has; no
+        // request means the first offered mode in the default preference order.
+        const offered = await approvedFulfilmentModes(client, input.vendor_location_id);
+        if (offered.length === 0)
+          throw new CustomerCartConflictError('This store is not taking orders');
+        if (input.fulfilment_method !== undefined && !offered.includes(input.fulfilment_method))
+          throw new CustomerCartFulfilmentMethodError(offered);
+        const method =
+          input.fulfilment_method ??
+          DEFAULT_METHOD_PREFERENCE.find((candidate) => offered.includes(candidate)) ??
+          offered[0];
         // A store removed from the cart keeps its row as REMOVED (the unique key is
         // cart + location), so adding it back revives that row rather than
         // inserting a second one -- which was a duplicate-key 500 for every
@@ -443,7 +497,7 @@ export class CustomerCartService {
             createUuidV7({ now_ms: now.getTime() }),
             cart.cart_id,
             input.vendor_location_id,
-            input.fulfilment_method ?? 'PLATFORM_DELIVERY',
+            method,
             now,
           ],
         );
@@ -648,6 +702,22 @@ export class CustomerCartService {
       correlation: parseUuidV7(input.context.correlation_id),
     };
     return tx(this.#pool, async (client) => {
+      // Resolve the store first, scoped to this customer so a stranger's group
+      // id is concealed as not-found rather than answered with the store's modes.
+      const owned = await client.query<{ vendor_location_id: string }>(
+        `SELECT g.vendor_location_id
+           FROM marketplace.cart_vendor_groups g
+           JOIN marketplace.carts c ON c.cart_id = g.cart_id
+          WHERE g.cart_vendor_group_id = $1 AND c.user_id = $2 AND g.lifecycle_state = 'ACTIVE'
+          FOR UPDATE OF g`,
+        [input.cart_vendor_group_id, userId],
+      );
+      const ownedRow = owned.rows[0];
+      if (!ownedRow) throw new CustomerCartNotFoundError();
+      // CUS-33: a method the store does not offer is refused, not recorded.
+      const offered = await approvedFulfilmentModes(client, ownedRow.vendor_location_id);
+      if (!offered.includes(input.fulfilment_method))
+        throw new CustomerCartFulfilmentMethodError(offered);
       const updated = await client.query<{ cart_id: string }>(
         `UPDATE marketplace.cart_vendor_groups g SET fulfilment_method=$3, customer_note=$4,
                 version=g.version+1, updated_at=$5

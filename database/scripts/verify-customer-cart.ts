@@ -8,6 +8,7 @@ import { Pool } from 'pg';
 import { CatalogueProductService } from '../src/catalogue-products.js';
 import {
   CustomerCartConflictError,
+  CustomerCartFulfilmentMethodError,
   CustomerCartNotFoundError,
   CustomerCartService,
   DEFAULT_CART_GROUP_LIMIT,
@@ -310,6 +311,120 @@ export async function verifyCustomerCart(connectionString: string): Promise<void
     check(
       Number(events.rows[0]?.count ?? '0') >= 6,
       'Cart mutations did not leave sufficient audit evidence',
+    );
+
+    // 10. CUS-33: a group receives its order in a way the store offers. A
+    // fresh customer, so the group limit and the invalidated store above cannot
+    // interfere. Store E collects only; store D (index 3) delivers only.
+    const collectorId = createUuidV7();
+    await pool.query(
+      "INSERT INTO marketplace.users (user_id, state, data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+      [collectorId],
+    );
+    const pickupOnly = await createDiscoverableStoreFixture(pool, {
+      location_name: 'SYNTH Cart Store E Pickup Only',
+      latitude: jaipur.latitude + 0.004,
+      longitude: jaipur.longitude,
+      fulfilment_modes: ['CUSTOMER_PICKUP'],
+    });
+    const pickupProduct = await makeProduct(
+      catalogue,
+      pickupOnly.ownerUserId,
+      pickupOnly.locationId,
+      'E',
+      now,
+    );
+    const deliveryOnly = stores[3];
+    const deliveryProduct = products[3];
+    check(
+      deliveryOnly !== undefined && deliveryProduct !== undefined,
+      'Delivery-only fixture store missing',
+    );
+
+    // a. No method asked for: the group starts with one the store offers, not
+    // PLATFORM_DELIVERY regardless.
+    const collected = await cart.addLine({
+      context: context(collectorId),
+      vendor_location_id: pickupOnly.locationId,
+      catalogue_variant_id: pickupProduct.catalogue_variant_id,
+      quantity: 1,
+      now,
+    });
+    const pickupGroup = collected.groups.find(
+      (g) => g.vendor_location_id === pickupOnly.locationId,
+    );
+    check(
+      pickupGroup?.fulfilment_method === 'CUSTOMER_PICKUP' &&
+        pickupGroup.fulfilment_method_offered === true,
+      `A pickup-only store's group did not default to collection (got ${String(pickupGroup?.fulfilment_method)})`,
+    );
+
+    // b. Asking that store for delivery is refused, with the modes it does offer,
+    // and the group is left exactly as it was.
+    let refusal: unknown;
+    try {
+      await cart.setGroupFulfilmentMethod({
+        context: context(collectorId),
+        cart_vendor_group_id: pickupGroup.cart_vendor_group_id,
+        expected_version: pickupGroup.version,
+        fulfilment_method: 'PLATFORM_DELIVERY',
+        now,
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    check(
+      refusal instanceof CustomerCartFulfilmentMethodError &&
+        refusal.code === 'FULFILMENT_METHOD_UNAVAILABLE' &&
+        refusal.offered_modes.length === 1 &&
+        refusal.offered_modes[0] === 'CUSTOMER_PICKUP',
+      `Delivery from a pickup-only store was not refused as FULFILMENT_METHOD_UNAVAILABLE (raised ${String(refusal)})`,
+    );
+    const unchanged = (await cart.currentCart({ context: context(collectorId), now })).groups.find(
+      (g) => g.vendor_location_id === pickupOnly.locationId,
+    );
+    check(
+      unchanged?.fulfilment_method === 'CUSTOMER_PICKUP' &&
+        unchanged.version === pickupGroup.version,
+      'A refused fulfilment method still changed the group',
+    );
+
+    // c. Asking for collection while creating a group at a delivery-only store
+    // is refused before any group exists.
+    await rejects(
+      () =>
+        cart.addLine({
+          context: context(collectorId),
+          vendor_location_id: deliveryOnly.locationId,
+          catalogue_variant_id: deliveryProduct.catalogue_variant_id,
+          quantity: 1,
+          fulfilment_method: 'CUSTOMER_PICKUP',
+          now,
+        }),
+      CustomerCartFulfilmentMethodError,
+      'Collection from a delivery-only store was accepted at group creation',
+    );
+    const afterRefusedAdd = await cart.currentCart({ context: context(collectorId), now });
+    check(
+      afterRefusedAdd.groups.every((g) => g.vendor_location_id !== deliveryOnly.locationId),
+      'A refused add still created a vendor group',
+    );
+
+    // d. A mode withdrawn after the group chose it is reported, not hidden: the
+    // projection says the method is no longer offered so the customer can repair
+    // it, and the quote (verify-grouped-checkout) blocks the group meanwhile.
+    await pool.query(
+      `DELETE FROM marketplace.vendor_location_fulfilment_modes
+        WHERE vendor_location_id=$1 AND fulfilment_mode='CUSTOMER_PICKUP'`,
+      [pickupOnly.locationId],
+    );
+    const withdrawn = (await cart.currentCart({ context: context(collectorId), now })).groups.find(
+      (g) => g.vendor_location_id === pickupOnly.locationId,
+    );
+    check(
+      withdrawn?.fulfilment_method_offered === false &&
+        !withdrawn.fulfilment_modes.includes('CUSTOMER_PICKUP'),
+      'A withdrawn fulfilment mode was still reported as offered',
     );
   } finally {
     await cart.close();

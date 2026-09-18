@@ -233,6 +233,142 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       now: new Date(now.getTime() + 2_000),
     });
     check(webhookReplay.replayed === true, 'Webhook replay was not suppressed');
+
+    // CUS-33 at the quote. A collected group carries no delivery fee, and a
+    // group whose store no longer offers its method is blocked with a stable
+    // reason rather than quoted into an order the store cannot fulfil.
+    const collectorId = createUuidV7();
+    await pool.query(
+      "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+      [collectorId],
+    );
+    const methodStores = await Promise.all(
+      (
+        [
+          ['P', ['PLATFORM_DELIVERY', 'CUSTOMER_PICKUP']],
+          ['W', ['CUSTOMER_PICKUP']],
+        ] as const
+      ).map(([suffix, modes], index) =>
+        createDiscoverableStoreFixture(pool, {
+          location_name: `SYNTH Checkout Method Store ${suffix}`,
+          latitude: 26.91 + index * 0.001,
+          longitude: 75.81,
+          fulfilment_modes: modes,
+        }),
+      ),
+    );
+    const [deliveringStore, collectingStore] = methodStores;
+    check(
+      deliveringStore !== undefined && collectingStore !== undefined,
+      'Fulfilment-method fixture stores missing',
+    );
+    const methodProducts = [];
+    for (const [index, store] of methodStores.entries()) {
+      const suffix = `${Date.now()}M${index}`;
+      methodProducts.push(
+        await catalogue.createProduct({
+          context: vendorContext(store.ownerUserId),
+          vendor_location_id: store.locationId,
+          product_reference: `SYNTH-PROD-COM${suffix}`,
+          title: `SYNTH Checkout Method Product ${index}`,
+          category: 'FRUIT_VEGETABLE',
+          unit_label: 'EACH',
+          tax_basis: 'EXEMPT',
+          variable_weight: false,
+          sku: `SYNTH-SKU-COM${suffix}`,
+          variant_title: `SYNTH Checkout Method Variant ${index}`,
+          price_minor: 10_000,
+          initial_stock_quantity: 5,
+          low_stock_threshold: 1,
+          now,
+        }),
+      );
+    }
+    const [deliveringProduct, collectingProduct] = methodProducts;
+    check(
+      deliveringProduct !== undefined && collectingProduct !== undefined,
+      'Fulfilment-method fixture products missing',
+    );
+    const collectorAddressId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.customer_addresses
+        (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
+       VALUES ($1,$2,'SYNTH-ADDRESS-CHECKOUT-METHOD','SYNTH Checkout Method Home','302020',
+         ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
+      [collectorAddressId, collectorId, createUuidV7()],
+    );
+    const methodCart = await carts.currentCart({ context: customerContext(collectorId), now });
+    await carts.setCartAddress({
+      context: customerContext(collectorId),
+      customer_address_id: collectorAddressId,
+      now,
+    });
+    await carts.addLine({
+      context: customerContext(collectorId),
+      vendor_location_id: deliveringStore.locationId,
+      catalogue_variant_id: deliveringProduct.catalogue_variant_id,
+      quantity: 1,
+      now,
+    });
+    await carts.addLine({
+      context: customerContext(collectorId),
+      vendor_location_id: collectingStore.locationId,
+      catalogue_variant_id: collectingProduct.catalogue_variant_id,
+      quantity: 1,
+      now,
+    });
+    const methodQuote = await checkout.createQuote({
+      context: customerContext(collectorId),
+      cart_id: methodCart.cart_id,
+      now,
+    });
+    const quotedDelivery = methodQuote.groups.find(
+      (group) => group.vendor_location_id === deliveringStore.locationId,
+    );
+    const quotedCollection = methodQuote.groups.find(
+      (group) => group.vendor_location_id === collectingStore.locationId,
+    );
+    check(
+      quotedCollection?.fulfilment_method === 'CUSTOMER_PICKUP' &&
+        quotedCollection.delivery_minor === 0 &&
+        quotedCollection.total_minor === quotedCollection.item_minor + quotedCollection.tip_minor,
+      `A collected group was charged a delivery fee (delivery ${String(quotedCollection?.delivery_minor)})`,
+    );
+    check(
+      quotedDelivery?.fulfilment_method === 'PLATFORM_DELIVERY' &&
+        quotedDelivery.delivery_minor > 0,
+      'A delivered group at the same distance carried no delivery fee',
+    );
+    check(methodQuote.blocked_groups.length === 0, 'A group with an offered method was blocked');
+
+    // The store withdraws collection after the group chose it. The next quote
+    // (after the first expires) blocks that group and only that group.
+    await pool.query(
+      `DELETE FROM marketplace.vendor_location_fulfilment_modes
+        WHERE vendor_location_id=$1 AND fulfilment_mode='CUSTOMER_PICKUP'`,
+      [collectingStore.locationId],
+    );
+    const afterExpiry = new Date(now.getTime() + 301_000);
+    const withdrawnQuote = await checkout.createQuote({
+      context: customerContext(collectorId),
+      cart_id: methodCart.cart_id,
+      now: afterExpiry,
+    });
+    check(
+      withdrawnQuote.checkout_quote_id !== methodQuote.checkout_quote_id,
+      'The expired quote was replayed instead of re-quoting',
+    );
+    check(
+      withdrawnQuote.blocked_groups.length === 1 &&
+        withdrawnQuote.blocked_groups[0]?.vendor_location_id === collectingStore.locationId &&
+        withdrawnQuote.blocked_groups[0].reason_code === 'FULFILMENT_METHOD_UNAVAILABLE',
+      `A group whose method the store withdrew was not blocked as FULFILMENT_METHOD_UNAVAILABLE (got ${JSON.stringify(withdrawnQuote.blocked_groups)})`,
+    );
+    check(
+      withdrawnQuote.groups.length === 1 &&
+        withdrawnQuote.groups[0]?.vendor_location_id === deliveringStore.locationId,
+      'Blocking the withdrawn group also dropped its healthy sibling',
+    );
   } finally {
     await Promise.all([checkout.close(), inventory.close(), catalogue.close(), carts.close()]);
     await pool.end();

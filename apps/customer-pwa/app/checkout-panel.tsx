@@ -151,6 +151,14 @@ function GroupCard({ group }: { readonly group: CartVendorGroup }) {
 
       <div className="basket-group__options">
         <SelectField
+          error={
+            group.fulfilment_method_offered
+              ? null
+              : t(
+                  'customer.cart.fulfilment.unavailable',
+                  'This store no longer offers that option. Choose another way to get this order.',
+                )
+          }
           label={t('customer.cart.fulfilment', 'How you want this order')}
           onChange={(event) =>
             void setGroupFulfilment({
@@ -162,6 +170,16 @@ function GroupCard({ group }: { readonly group: CartVendorGroup }) {
           }
           value={group.fulfilment_method}
         >
+          {/* The bound value must be listed, or the browser shows the first
+              option while the server still holds a method the store withdrew. */}
+          {!group.fulfilment_method_offered && (
+            <option disabled value={group.fulfilment_method}>
+              {t(
+                `customer.fulfilment.${group.fulfilment_method.toLowerCase()}`,
+                FULFILMENT_LABEL[group.fulfilment_method] ?? group.fulfilment_method,
+              )}
+            </option>
+          )}
           {group.fulfilment_modes.map((mode) => (
             <option key={mode} value={mode}>
               {t(

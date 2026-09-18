@@ -1070,7 +1070,7 @@
       "name": "Per-store fulfilment selection",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Fulfilment method per line",
+      "notes": "Per-store method validated against the store's approved modes: a new group defaults to a mode the store offers, an unoffered method is refused with FULFILMENT_METHOD_UNAVAILABLE and the offered modes, and the quote blocks a group whose mode was withdrawn (batch 10)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1085,7 +1085,8 @@
       "verified_by": [
         "apps/api/src/customer-cart.controller.spec.ts",
         "apps/customer-pwa/app/customer-panels.spec.ts",
-        "database/scripts/verify-customer-cart.ts"
+        "database/scripts/verify-customer-cart.ts",
+        "database/scripts/verify-grouped-checkout.ts"
       ]
     },
     {
@@ -1165,7 +1166,7 @@
       "name": "Multi-store quote",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Per-group totals, fulfilment, promise",
+      "notes": "Per-group totals, fulfilment, promise; a collected group carries no delivery fee (batch 10)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {

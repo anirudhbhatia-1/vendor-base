@@ -192,6 +192,11 @@ export type CartVendorGroup = {
   subtotal_minor: number | null;
   minimum_met: boolean;
   fulfilment_modes: string[];
+  /**
+   * False only when the store withdrew `fulfilment_method` after this group
+   * chose it. The quote blocks such a group; the repair is one of `fulfilment_modes`.
+   */
+  fulfilment_method_offered: boolean;
 };
 
 export type Cart = {

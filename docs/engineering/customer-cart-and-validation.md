@@ -32,6 +32,14 @@ never represented as reserved inventory — nothing here touches `inventory_rese
   never counts against it.
 - **Removing the last line in a group removes the group.** An empty store never lingers as a silent
   extra delivery fee explanation.
+- **A group receives its order in a way the store offers (CUS-33).** A new group starts with
+  platform delivery where the store offers it, otherwise the first of vendor delivery or collection
+  it does offer; a requested method the store lacks is refused with `FULFILMENT_METHOD_UNAVAILABLE`
+  and the modes it has, at both group creation and `PUT groups/:id/fulfilment-method`. A mode
+  withdrawn after the group chose it is reported as `fulfilment_method_offered: false` on the
+  projection so the customer can choose another; the quote blocks the group meanwhile. Until
+  batch 10 nothing checked this and every new group started as `PLATFORM_DELIVERY`, so a
+  pickup-only shop could take a delivery order it had no way to fulfil.
 - **Revalidation isolates failure to one group.** `revalidate()` re-checks every `ACTIVE` group
   against the vendor location's lifecycle state, its `PUBLISHED` publication case, and — when the
   cart carries an address — live service-zone coverage and marks a failing group `INVALID` with a
