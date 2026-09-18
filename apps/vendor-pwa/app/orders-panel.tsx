@@ -31,6 +31,9 @@ type Order = {
   package_count: number | null;
   /** CUSTOMER_PICKUP, VENDOR_DELIVERY or PLATFORM_DELIVERY. */
   fulfilment_method: string;
+  /** When the shop's own staff left with a self-delivered order (VEN-37). */
+  out_for_delivery_at: string | null;
+  delivery_otp_attempts: number;
   collection: {
     readonly assignment_state: string;
     readonly partner_waiting_since: string | null;
@@ -176,6 +179,18 @@ const ACTIVE_STATES = new Set([
   'AWAITING_CUSTOMER_DECISION',
   'READY',
 ]);
+
+/**
+ * Whether the shop still has something to do with this order. A collected or
+ * partner-delivered order is finished for the shop at PICKED_UP; a self-delivered
+ * one is not -- its own staff are on the road and the door is still to come.
+ */
+function isActiveForShop(order: Order): boolean {
+  return (
+    ACTIVE_STATES.has(order.lifecycle_state) ||
+    (order.lifecycle_state === 'PICKED_UP' && order.fulfilment_method === 'VENDOR_DELIVERY')
+  );
+}
 
 /** One order, with everything that can be done to it in its current state. */
 function OrderCard({
@@ -398,12 +413,66 @@ function OrderCard({
         ) : null}
 
         {order.lifecycle_state === 'READY' && order.fulfilment_method === 'VENDOR_DELIVERY' ? (
-          // The self-delivery leg (workflow 6.7) has no dispatch or delivery
-          // step to record yet. Saying so beats offering a code nobody holds.
-          <Notice tone="information">
-            This order is delivered by your own staff. Recording its dispatch and delivery is not
-            available yet.
-          </Notice>
+          // The self-delivery leg (workflow 6.7, VEN-37): the shop's own staff
+          // leave with the order. Nothing is validated at the counter -- the
+          // customer's code is for the door.
+          <>
+            <Notice tone="information">
+              This order is delivered by your own staff. Start the delivery when it leaves the shop;
+              the customer will show a delivery code at the door.
+            </Notice>
+            <Button
+              busy={busy}
+              onClick={() =>
+                void act(
+                  'self-delivery/start',
+                  { expected_version: order.version, proof_note: 'Left with store staff.' },
+                  'delivery start',
+                )
+              }
+            >
+              Start delivery
+            </Button>
+          </>
+        ) : null}
+
+        {order.lifecycle_state === 'PICKED_UP' && order.fulfilment_method === 'VENDOR_DELIVERY' ? (
+          // At the door. The customer opens their delivery code (CUS-56) once the
+          // order is on its way; staff type it here and the server ends the order.
+          <>
+            <Notice live="polite" tone="information">
+              Out for delivery
+              {order.out_for_delivery_at
+                ? ` since ${new Date(order.out_for_delivery_at).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}`
+                : ''}
+              . Ask the customer for their delivery code at the door.
+            </Notice>
+            <Field
+              className="order-card__prep"
+              hint="Ask the customer to read it from their order screen."
+              inputMode="numeric"
+              label="Customer’s delivery code"
+              maxLength={6}
+              onChange={(event) => setOtpEntry(event.target.value.replace(/\D/g, '').slice(0, 6))}
+              value={otpEntry}
+            />
+            <Button
+              busy={busy}
+              disabled={!/^\d{6}$/.test(otpEntry)}
+              onClick={() =>
+                void act(
+                  'self-delivery/complete',
+                  { otp: otpEntry, proof_note: 'Delivered by store staff.' },
+                  'delivery',
+                )
+              }
+            >
+              Mark delivered
+            </Button>
+          </>
         ) : null}
 
         {order.lifecycle_state === 'READY' &&
@@ -918,8 +987,8 @@ export function OrdersPanel({ vendorLocationId }: { readonly vendorLocationId: s
   // "2 active orders" above a wall of twenty finished ones. Splitting them keeps
   // the handed-off and cancelled history — a shopkeeper needs to see that an
   // order was cancelled and why — without burying the work in front of them.
-  const active = orders.filter((order) => ACTIVE_STATES.has(order.lifecycle_state));
-  const finished = orders.filter((order) => !ACTIVE_STATES.has(order.lifecycle_state));
+  const active = orders.filter((order) => isActiveForShop(order));
+  const finished = orders.filter((order) => !isActiveForShop(order));
 
   return (
     <Panel

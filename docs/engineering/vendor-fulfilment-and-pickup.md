@@ -71,31 +71,60 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   smallest affected object"; today the smallest addressable object a customer support workflow
   can act on is the vendor_order. Line-level support scoping is a later refinement.
 
-## Modules (16 September 2026)
+## Modules
 
 `VendorFulfilmentService` (`database/src/vendor-fulfilment.ts`) is the one object the API and the
-worker construct; since the tech-debt audit's Phase D the work is in five modules, by who acts and
-on what, with what they share in `vendor-order-core.ts` (errors, shapes, lock, event, holds
-release, authorization release, the one order-summary query):
+worker construct, and it is still one module. The tech-debt audit's Phase D proposed splitting it
+by actor and concern (`vendor-order-transitions`, `order-picking`, `order-handover`,
+`customer-orders`, `vendor-order-views`), and a `vendor-order-core` split was begun; commit
+`f0e646e` dropped it as abandoned, and the earlier version of this section describing it as done
+was wrong. What survived the attempt: `grouped-checkout` writes the shop's response deadline
+(`accept_by`) at placement — before, only the verifier ever set one, so no real order carried a
+countdown and none ever expired — and the pick list is scoped to the route's location, so a member
+of one store can no longer read another store's picks by order id. `vendor-order-completion.ts`
+holds the ending shared with `assignment-custody` (`completeVendorOrder`); the split itself remains
+tech-debt item 5.
 
-| Module | Concern |
-| --- | --- |
-| `vendor-order-transitions.ts` | accept, decline, start picking, mark ready; the system's expiry of an unanswered order |
-| `order-picking.ts` | lines found / missing / substitution / weight; the customer's decision and its timeout; the pick list |
-| `order-handover.ts` | the three collection-code issuers, who must be at the counter, `completePickup`, inventory settlement |
-| `customer-orders.ts` | history, receipt, tracking, cancellation, rating, support cases |
-| `vendor-order-views.ts` | the board, one order, the store's numbers and open cases |
+## Vendor self-delivery (VEN-37, workflow 6.7)
 
-Two behaviours changed with the split. The shop's response deadline (`accept_by`) is written by
-checkout at placement — before, only the verifier ever set one, so no real order carried a
-countdown and none ever expired. And the pick list is scoped to the route's location, so a member
-of one store can no longer read another store's picks by order id.
+The store's own staff carry the order (batch 10). A `VENDOR_DELIVERY` order reuses the order's
+states rather than inventing a parallel machine:
+
+- `POST …/orders/:id/self-delivery/start` (`vendor.order.fulfil`, `expected_version`): READY →
+  PICKED_UP with `out_for_delivery_at` and `vendor_delivery_by_user_id`, reason
+  `VENDOR_DELIVERY_STARTED`. It emits the same `vendor_order.picked_up` event a counter handover
+  does, so inventory settles and the customer's card reads "on the way". A collected or
+  platform-delivered order is refused here; a self-delivered order is refused at the counter
+  (`complete-pickup` and the vendor fallback code), which it used to accept.
+- `POST customer/orders/:id/delivery-otp` mints the customer's delivery code (CUS-56) on the
+  order once it is PICKED_UP — the partner's door keeps this code on the delivery assignment, which
+  a self-delivery never has. Same lifetime and attempt ceiling as every other code.
+- `POST …/orders/:id/self-delivery/complete` (`otp`): validates the code with the two-transaction
+  pattern `complete-pickup` uses (a wrong attempt is counted even though the caller's error unwinds
+  them), spends it, and ends the order through `completeVendorOrder` as DELIVERED with reason
+  `VENDOR_DELIVERY_COMPLETED` — the same `vendor_order.delivered` event a partner delivery emits, so
+  settlement runs with no partner earning. The four door refusals carry the `DELIVERY_OTP_*` codes
+  the partner's door uses.
+
+Who the customer's delivery fee settles to on a self-delivery is a D-05 question; today it rests
+with the platform, as the pricing module says.
+
+## Settlement of a collected order
+
+`createSettlement` was called only from `recordDeliveryEarnings`, which ran only on
+`vendor_order.delivered`. A collected order ends at PICKED_UP, so it was never settled and the shop
+was never paid for it, although §13.2 scenario 1 ("one-store pickup completes and settles exactly
+once") was recorded as covered — the verifier had asserted inventory settlement, not money. The
+worker's `vendor_order.picked_up` handler (`apps/worker/src/domain-event-handler.ts`) now settles
+when the method is `CUSTOMER_PICKUP`; the ladder asserts a settlement paying the shop for both the
+collected and the self-delivered order and no partner earning for either.
 
 ## API
 
 - **`vendor/locations/:vendor_location_id/orders`** (`vendor.order.fulfil`): `accept`, `decline`,
   `start-picking`, `lines/:id/found`, `lines/:id/missing`, `lines/:id/propose-substitution`,
-  `lines/:id/propose-weight`, `ready`, `pickup-otp`, `complete-pickup`, `picks` (list).
+  `lines/:id/propose-weight`, `ready`, `pickup-otp`, `complete-pickup`, `self-delivery/start`,
+  `self-delivery/complete`, `picks` (list).
 - **`customer/decisions/:decision_id/answer`** (`customer.order.decide`).
 - **`customer/orders`** (`customer.order.read`): list groups + vendor_orders; `receipt`; and,
   behind distinct capabilities, `rating` (`customer.order.rate`) and `support`

@@ -46,6 +46,8 @@ const vendorRoutes = [
   'markReady',
   'issueOtp',
   'completePickup',
+  'startVendorDelivery',
+  'completeVendorDelivery',
   'listPicks',
 ] as const;
 

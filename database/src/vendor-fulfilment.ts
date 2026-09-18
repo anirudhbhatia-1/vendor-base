@@ -9,7 +9,7 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import { InventoryReservationService } from './inventory-reservations.js';
-import { publishVendorOrderTransition } from './vendor-order-completion.js';
+import { completeVendorOrder, publishVendorOrderTransition } from './vendor-order-completion.js';
 import { transaction as tx } from './transaction.js';
 
 export class FulfilmentInputError extends Error {}
@@ -56,6 +56,16 @@ export class PickupOtpMissingError extends Error {}
 export class PickupOtpMismatchError extends Error {}
 export class PickupOtpExhaustedError extends Error {}
 export class PickupOtpExpiredError extends Error {}
+/**
+ * The door's four outcomes on a vendor self-delivery, one class each, mapped
+ * to the same stable codes the partner's door uses (DELIVERY_OTP_*). The
+ * customer holds the code and the shop's own staff validate it, so the
+ * refusals belong to this module rather than to assignment-custody.
+ */
+export class VendorDeliveryOtpMissingError extends Error {}
+export class VendorDeliveryOtpMismatchError extends Error {}
+export class VendorDeliveryOtpExhaustedError extends Error {}
+export class VendorDeliveryOtpExpiredError extends Error {}
 
 /**
  * How long a customer has to answer a substitution/weight proposal before the
@@ -116,6 +126,14 @@ export interface VendorOrderSummary {
   readonly preparation_estimate_seconds: number | null;
   readonly pickup_otp_expires_at: Date | null;
   readonly pickup_otp_attempts: number;
+  /**
+   * The self-delivery leg (VEN-37): when the shop's own staff left with the
+   * order, and the state of the customer's delivery code the door validates.
+   * Null / zero on any other method.
+   */
+  readonly out_for_delivery_at: Date | null;
+  readonly delivery_otp_expires_at: Date | null;
+  readonly delivery_otp_attempts: number;
   readonly decline_reason_code: string | null;
   /**
    * How this order leaves the shop: CUSTOMER_PICKUP, VENDOR_DELIVERY or
@@ -275,12 +293,16 @@ async function lockOrder(
   readonly pickup_otp_expires_at: Date | null;
   readonly pickup_otp_attempts: number;
   readonly pickup_otp_issued_by: string | null;
+  readonly delivery_otp_hash: string | null;
+  readonly delivery_otp_expires_at: Date | null;
+  readonly delivery_otp_attempts: number;
   readonly total_minor: string;
 }> {
   const result = await client.query(
     `SELECT vendor_order_id, vendor_location_id, checkout_group_id, lifecycle_state, version,
             accept_by, pickup_otp_hash, pickup_otp_expires_at, pickup_otp_attempts,
-            pickup_otp_issued_by, total_minor::text AS total_minor
+            pickup_otp_issued_by, delivery_otp_hash, delivery_otp_expires_at,
+            delivery_otp_attempts, total_minor::text AS total_minor
        FROM marketplace.vendor_orders WHERE vendor_order_id=$1 FOR UPDATE`,
     [vendorOrderId],
   );
@@ -300,14 +322,15 @@ async function lockOrder(
  * cannot interleave. A pickup or vendor-delivery order has no partner to wait
  * for.
  */
-async function requireCollectorPresent(
-  client: PoolClient,
+/**
+ * How an order leaves the shop, read from the cart group it was quoted from.
+ * An order whose group cannot be joined is treated as a platform delivery, the
+ * same default the summary and dispatch apply.
+ */
+export async function orderFulfilmentMethod(
+  client: Pick<PoolClient, 'query'>,
   vendorOrderId: UuidV7,
-): Promise<{
-  readonly fulfilment_method: string;
-  readonly delivery_assignment_id: string | null;
-  readonly assignment_state: string | null;
-}> {
+): Promise<string> {
   const method = await client.query<{ fulfilment_method: string | null }>(
     `SELECT cvg.fulfilment_method
        FROM marketplace.vendor_orders o
@@ -319,7 +342,26 @@ async function requireCollectorPresent(
       WHERE o.vendor_order_id = $1`,
     [vendorOrderId],
   );
-  const fulfilmentMethod = method.rows[0]?.fulfilment_method ?? 'PLATFORM_DELIVERY';
+  return method.rows[0]?.fulfilment_method ?? 'PLATFORM_DELIVERY';
+}
+
+async function requireCollectorPresent(
+  client: PoolClient,
+  vendorOrderId: UuidV7,
+): Promise<{
+  readonly fulfilment_method: string;
+  readonly delivery_assignment_id: string | null;
+  readonly assignment_state: string | null;
+}> {
+  const fulfilmentMethod = await orderFulfilmentMethod(client, vendorOrderId);
+  // A self-delivery leaves the shop through `startVendorDelivery`, not the
+  // counter: accepting a fallback collection code here recorded the handover as
+  // a customer collection on an order nobody collected.
+  if (fulfilmentMethod === 'VENDOR_DELIVERY') {
+    throw new FulfilmentConflictError(
+      'A self-delivered order leaves the shop when your staff start the delivery, not at the counter',
+    );
+  }
   if (fulfilmentMethod !== 'PLATFORM_DELIVERY') {
     return {
       fulfilment_method: fulfilmentMethod,
@@ -523,7 +565,8 @@ const VENDOR_ORDER_SUMMARY_SQL = `
          o.total_minor::text AS total_minor,
          o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
          o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
-         o.pickup_otp_attempts, o.decline_reason_code,
+         o.pickup_otp_attempts, o.out_for_delivery_at, o.delivery_otp_expires_at,
+         o.delivery_otp_attempts, o.decline_reason_code,
          method.fulfilment_method,
          collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
          resolution.reason_code AS resolution_reason_code,
@@ -597,6 +640,9 @@ function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
     preparation_estimate_seconds: (row['preparation_estimate_seconds'] as number | null) ?? null,
     pickup_otp_expires_at: (row['pickup_otp_expires_at'] as Date | null) ?? null,
     pickup_otp_attempts: row['pickup_otp_attempts'] as number,
+    out_for_delivery_at: (row['out_for_delivery_at'] as Date | null) ?? null,
+    delivery_otp_expires_at: (row['delivery_otp_expires_at'] as Date | null) ?? null,
+    delivery_otp_attempts: (row['delivery_otp_attempts'] as number | null) ?? 0,
     decline_reason_code: (row['decline_reason_code'] as string | null) ?? null,
     // The same default `customerTracking` and dispatch apply: an order whose
     // checkout group cannot be joined is treated as a platform delivery.
@@ -1772,6 +1818,224 @@ export class VendorFulfilmentService {
         reason_code: reasonCode,
         note: input.proof_note ?? null,
         ids,
+      });
+      return orderSummary(client, input.vendor_order_id);
+    });
+  }
+
+  /** How an order leaves the shop, for callers holding no transaction. */
+  async fulfilmentMethod(vendorOrderId: UuidV7): Promise<string> {
+    return orderFulfilmentMethod(this.#pool, vendorOrderId);
+  }
+
+  /**
+   * The shop's own staff leave with the order (VEN-37, workflow 6.7 "vendor
+   * self-delivery").
+   *
+   * READY -> PICKED_UP, the same state a partner handover reaches, because the
+   * goods have left the shop either way and everything downstream -- inventory
+   * settlement, the customer's "on the way" card, the delivery code becoming
+   * available -- keys on that. What differs is recorded: who carried it, when,
+   * and a reason that says a self-delivery started rather than a collection.
+   */
+  async startVendorDelivery(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly vendor_location_id: UuidV7;
+    readonly expected_version: number;
+    readonly proof_note?: string;
+    readonly now?: Date;
+  }): Promise<VendorOrderSummary> {
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const { userId } = await requireVendorMember(client, input.context, input.vendor_location_id);
+      const order = await lockOrder(client, input.vendor_order_id);
+      if (order.vendor_location_id !== input.vendor_location_id)
+        throw new FulfilmentNotFoundError();
+      if (order.lifecycle_state !== 'READY')
+        throw new FulfilmentConflictError('Only a ready order can go out for delivery');
+      if (order.version !== input.expected_version)
+        throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
+      const method = await orderFulfilmentMethod(client, input.vendor_order_id);
+      if (method !== 'VENDOR_DELIVERY') {
+        throw new FulfilmentConflictError(
+          'Only an order the store delivers itself can go out with your staff',
+        );
+      }
+      const ids = contextIds(input.context);
+      const version = order.version + 1;
+      await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET lifecycle_state='PICKED_UP', picked_up_at=$2, out_for_delivery_at=$2,
+                vendor_delivery_by_user_id=$3, version=$4, updated_at=$2,
+                pickup_otp_hash=NULL, pickup_otp_expires_at=NULL, pickup_otp_issued_by=NULL
+          WHERE vendor_order_id=$1`,
+        [input.vendor_order_id, now, userId, version],
+      );
+      await this.#publishPickedUp(client, {
+        context: input.context,
+        now,
+        reason_code: 'VENDOR_DELIVERY_STARTED',
+        vendor_order_id: input.vendor_order_id,
+      });
+      await appendEvent(client, {
+        vendor_order_id: input.vendor_order_id,
+        event_type: 'PICKED_UP',
+        actor_id: userId,
+        actor_kind: 'vendor_staff',
+        previous_state: 'READY',
+        resulting_state: 'PICKED_UP',
+        reason_code: 'VENDOR_DELIVERY_STARTED',
+        note: input.proof_note ?? null,
+        ids,
+      });
+      return orderSummary(client, input.vendor_order_id);
+    });
+  }
+
+  /**
+   * The customer's delivery code for a self-delivered order (CUS-56).
+   *
+   * The partner's door keeps this code on the delivery assignment; a
+   * self-delivery has no assignment, so the code lives on the order. Same
+   * lifetime and attempt ceiling as every other code, and available only while
+   * the goods are on their way -- before that it proves nothing, after delivery
+   * it would re-open a closed handoff.
+   */
+  async issueVendorDeliveryOtp(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<{ readonly plaintext_otp: string; readonly expires_at: Date }> {
+    const customerId = requireCustomer(input.context);
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const owned = await client.query<{ customer_user_id: string }>(
+        `SELECT g.customer_user_id
+           FROM marketplace.vendor_orders o
+           JOIN marketplace.checkout_groups g ON g.checkout_group_id = o.checkout_group_id
+          WHERE o.vendor_order_id = $1`,
+        [input.vendor_order_id],
+      );
+      if (owned.rows[0]?.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
+      const method = await orderFulfilmentMethod(client, input.vendor_order_id);
+      if (method !== 'VENDOR_DELIVERY') {
+        throw new FulfilmentConflictError(
+          'This delivery code applies to an order the store delivers itself',
+        );
+      }
+      const order = await lockOrder(client, input.vendor_order_id);
+      if (order.lifecycle_state !== 'PICKED_UP') {
+        throw new FulfilmentConflictError(
+          'A delivery code applies only while the order is on its way',
+        );
+      }
+      const otp = String(randomInt(100000, 1000000));
+      const hash = createHash('sha256').update(otp).digest('hex');
+      const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
+      await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET delivery_otp_hash=$2, delivery_otp_expires_at=$3, delivery_otp_attempts=0,
+                updated_at=$4
+          WHERE vendor_order_id=$1`,
+        [input.vendor_order_id, hash, expiresAt, now],
+      );
+      await appendEvent(client, {
+        vendor_order_id: input.vendor_order_id,
+        event_type: 'DELIVERY_OTP_ISSUED',
+        actor_id: customerId,
+        actor_kind: 'customer',
+        previous_state: 'PICKED_UP',
+        resulting_state: 'PICKED_UP',
+        reason_code: 'CUSTOMER_DELIVERY_OTP_ISSUED',
+        ids: contextIds(input.context),
+      });
+      return { plaintext_otp: otp, expires_at: expiresAt };
+    });
+  }
+
+  /**
+   * The shop's staff complete a self-delivery at the customer's door against
+   * the customer's code. Mirrors `completePickup`: the validation commits on
+   * its own so a wrong attempt is counted even though the caller-facing error
+   * unwinds them, and the order ends through `completeVendorOrder` so the
+   * outbox event that settles the money is the same one a partner delivery
+   * emits.
+   */
+  async completeVendorDelivery(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly vendor_location_id: UuidV7;
+    readonly otp: string;
+    readonly proof_note?: string;
+    readonly now?: Date;
+  }): Promise<VendorOrderSummary> {
+    if (!/^[0-9]{6}$/.test(input.otp))
+      throw new FulfilmentInputError('The delivery code must be exactly six digits');
+    const now = input.now ?? new Date();
+    const validation = await tx(this.#pool, async (client) => {
+      const { userId } = await requireVendorMember(client, input.context, input.vendor_location_id);
+      const order = await lockOrder(client, input.vendor_order_id);
+      if (order.vendor_location_id !== input.vendor_location_id)
+        throw new FulfilmentNotFoundError();
+      if (order.lifecycle_state !== 'PICKED_UP')
+        throw new FulfilmentConflictError('Only an order on its way can be delivered');
+      const method = await orderFulfilmentMethod(client, input.vendor_order_id);
+      if (method !== 'VENDOR_DELIVERY') {
+        throw new FulfilmentConflictError(
+          'A platform delivery is completed by its partner, not at the store',
+        );
+      }
+      if (!order.delivery_otp_hash || !order.delivery_otp_expires_at)
+        throw new VendorDeliveryOtpMissingError('Ask the customer to show their delivery code');
+      if (order.delivery_otp_attempts >= PICKUP_OTP_MAX_ATTEMPTS)
+        throw new VendorDeliveryOtpExhaustedError();
+      if (order.delivery_otp_expires_at <= now) throw new VendorDeliveryOtpExpiredError();
+      const attempted = createHash('sha256').update(input.otp).digest('hex');
+      if (attempted !== order.delivery_otp_hash) {
+        await client.query(
+          `UPDATE marketplace.vendor_orders
+              SET delivery_otp_attempts=delivery_otp_attempts+1, updated_at=$2
+            WHERE vendor_order_id=$1`,
+          [input.vendor_order_id, now],
+        );
+        await appendEvent(client, {
+          vendor_order_id: input.vendor_order_id,
+          event_type: 'DELIVERY_OTP_ATTEMPTED',
+          actor_id: userId,
+          actor_kind: 'vendor_staff',
+          previous_state: 'PICKED_UP',
+          resulting_state: 'PICKED_UP',
+          reason_code: 'DELIVERY_OTP_MISMATCH',
+          ids: contextIds(input.context),
+        });
+        return { mismatched: true as const };
+      }
+      return { mismatched: false as const };
+    });
+    if (validation.mismatched) throw new VendorDeliveryOtpMismatchError();
+    return tx(this.#pool, async (client) => {
+      await requireVendorMember(client, input.context, input.vendor_location_id);
+      const order = await lockOrder(client, input.vendor_order_id);
+      if (order.vendor_location_id !== input.vendor_location_id)
+        throw new FulfilmentNotFoundError();
+      if (order.lifecycle_state !== 'PICKED_UP')
+        throw new FulfilmentConflictError('Only an order on its way can be delivered');
+      // The code is spent on success, so it cannot be replayed against a later
+      // re-issue or a re-opened handoff.
+      await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET delivery_otp_hash=NULL, delivery_otp_expires_at=NULL, updated_at=$2
+          WHERE vendor_order_id=$1`,
+        [input.vendor_order_id, now],
+      );
+      await completeVendorOrder(client, {
+        context: input.context,
+        now,
+        reason_code: 'VENDOR_DELIVERY_COMPLETED',
+        source: 'vendor_fulfilment',
+        state: 'DELIVERED',
+        vendor_order_id: input.vendor_order_id,
       });
       return orderSummary(client, input.vendor_order_id);
     });

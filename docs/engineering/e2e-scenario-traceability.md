@@ -20,7 +20,7 @@ same inbox is integrated in all eight clients; real providers remain an explicit
 
 | # | §13.2 scenario | Status | Verifier(s) / evidence |
 |---|---|---|---|
-| 1 | One-store pickup completes and settles exactly once | covered | `verify-vendor-fulfilment.ts` — accept → pick → ready → OTP pickup → `settleInventoryOnPickup` commits reservations once |
+| 1 | One-store pickup completes and settles exactly once | covered | `verify-vendor-fulfilment.ts` — accept → pick → ready → OTP pickup → `settleInventoryOnPickup` commits reservations once, and (since batch 10) the collected order's money settles once through `recordDeliveryEarnings` with no partner earning; `apps/worker/src/domain-event-handler.spec.ts` asserts the worker runs that on `vendor_order.picked_up` only for a collected order. Before batch 10 this row covered inventory only — a collected order never settled. |
 | 2 | Three-store checkout: two accept, one times out; siblings continue, only failed allocation releases | covered | `verify-grouped-checkout.ts` (blocked-group isolation) + `verify-vendor-fulfilment.ts` (decline releases only its own holds; sibling stays PLACED) |
 | 3 | Two customers compete for the last counted unit; at most one reservation commits | covered | `verify-inventory-reservations.ts` — concurrent `softHold` under `FOR UPDATE`, over-reservation refused |
 | 4 | Vendor proposes substitution; customer approves, rejects, and times out (separate tests) | covered | `verify-vendor-fulfilment.ts` — substitution→approve (with authorization-delta assertion), weight→reject, weight→timeout, plus double-answer and foreign-customer negatives |

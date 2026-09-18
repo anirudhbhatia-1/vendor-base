@@ -131,6 +131,13 @@ export class OrderMoneyOrchestrator {
    * payment, not the whole group's capture. Passing the group total would credit
    * every shop in a two-shop basket with the entire amount.
    */
+  /**
+   * Also the settlement of a collected order, run on `vendor_order.picked_up`
+   * when the method is CUSTOMER_PICKUP: no assignment joins, so no partner
+   * earning posts, and the settlement divides the captured amount between the
+   * shop and the platform. Before that call existed a collected order was never
+   * settled at all.
+   */
   async recordDeliveryEarnings(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;

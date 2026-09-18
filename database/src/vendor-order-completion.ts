@@ -163,6 +163,8 @@ export async function completeVendorOrder(
     readonly state: VendorOrderCompletionState;
     readonly reason_code: string;
     readonly now: Date;
+    /** Which module ended the order; recorded on the transition evidence. */
+    readonly source?: 'assignment_custody' | 'vendor_fulfilment';
   },
 ): Promise<void> {
   const request = parseRequestId(input.context.request_id);
@@ -203,7 +205,7 @@ export async function completeVendorOrder(
     event_type: OUTBOX_EVENT_TYPE[input.state],
     now: input.now,
     reason_code: input.reason_code,
-    source: 'assignment_custody',
+    source: input.source ?? 'assignment_custody',
     to_state: input.state,
     vendor_order_id: input.vendor_order_id,
   });

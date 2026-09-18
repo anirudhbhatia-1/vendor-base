@@ -356,6 +356,56 @@ export class VendorOrderFulfilmentController {
     }
   }
 
+  /**
+   * The self-delivery leg (VEN-37): the store's own staff leave with the order,
+   * then complete it at the door against the customer's delivery code.
+   */
+  @Post(':vendor_order_id/self-delivery/start')
+  @vendorFulfil
+  async startVendorDelivery(
+    @Param('vendor_location_id') locationId: string,
+    @Param('vendor_order_id') orderId: string,
+    @Body() raw: unknown,
+  ) {
+    const body = object(raw);
+    try {
+      return await this.fulfilment.startVendorDelivery({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+        vendor_location_id: uuid(locationId),
+        expected_version: integerField(body, 'expected_version'),
+        ...(optionalString(body, 'proof_note') !== undefined
+          ? { proof_note: optionalString(body, 'proof_note') as string }
+          : {}),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Post(':vendor_order_id/self-delivery/complete')
+  @vendorFulfil
+  async completeVendorDelivery(
+    @Param('vendor_location_id') locationId: string,
+    @Param('vendor_order_id') orderId: string,
+    @Body() raw: unknown,
+  ) {
+    const body = object(raw);
+    try {
+      return await this.fulfilment.completeVendorDelivery({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+        vendor_location_id: uuid(locationId),
+        otp: stringField(body, 'otp'),
+        ...(optionalString(body, 'proof_note') !== undefined
+          ? { proof_note: optionalString(body, 'proof_note') as string }
+          : {}),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
   @Get(':vendor_order_id/picks')
   @vendorFulfil
   async listPicks(
@@ -544,6 +594,15 @@ export class CustomerOrderHistoryController {
   @Header('Cache-Control', 'no-store')
   async deliveryOtp(@Param('vendor_order_id') orderId: string) {
     try {
+      // A self-delivery has no assignment to hang the code on, so it lives on
+      // the order. Whichever leg it is, the customer opens one screen.
+      const method = await this.fulfilment.fulfilmentMethod(uuid(orderId));
+      if (method === 'VENDOR_DELIVERY') {
+        return await this.fulfilment.issueVendorDeliveryOtp({
+          context: currentRequestContext(),
+          vendor_order_id: uuid(orderId),
+        });
+      }
       return await this.assignments.issueDeliveryOtp({
         context: currentRequestContext(),
         vendor_order_id: uuid(orderId),

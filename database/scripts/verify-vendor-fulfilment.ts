@@ -36,6 +36,7 @@ import {
   FulfilmentNotFoundError,
   PickupOtpMismatchError,
   PickupOtpMissingError,
+  VendorDeliveryOtpMismatchError,
   VendorFulfilmentService,
 } from '../src/vendor-fulfilment.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
@@ -82,10 +83,11 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           location_name: `SYNTH Fulfilment Store ${suffix}`,
           latitude: 26.911 + index * 0.001,
           longitude: 75.811,
-          // Store P has one order delivered by a partner and another collected
-          // at the counter, so it must offer both; the cart now refuses a
-          // collection group at a store that only delivers (CUS-33).
-          fulfilment_modes: ['PLATFORM_DELIVERY', 'CUSTOMER_PICKUP'],
+          // Store P has one order delivered by a partner, one collected at the
+          // counter and one carried by its own staff, so it must offer all
+          // three; the cart now refuses a group at a store that lacks the
+          // method (CUS-33).
+          fulfilment_modes: ['PLATFORM_DELIVERY', 'CUSTOMER_PICKUP', 'VENDOR_DELIVERY'],
         }),
       ),
     );
@@ -858,6 +860,28 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       now: new Date(collectionBase.getTime() + 5_000),
     });
     check(readyP.lifecycle_state === 'READY', 'Collection order did not reach READY');
+    // While it is READY -- so that the method check, not the state check, is
+    // what refuses it -- a collected order cannot be sent out with store staff.
+    await rejects(
+      () =>
+        fulfilment.startVendorDelivery({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderP.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          expected_version: readyP.version,
+          now: new Date(collectionBase.getTime() + 5_050),
+        }),
+      FulfilmentConflictError,
+      'A collected order was sent out with store staff',
+    );
+    const stillReady = await fulfilment.getOrder({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderP.vendor_order_id,
+    });
+    check(
+      stillReady.lifecycle_state === 'READY' && stillReady.version === readyP.version,
+      'A refused self-delivery start still changed the collected order',
+    );
     const onBoard = await fulfilment.getOrder({
       context: vendorContext(storeA.ownerUserId),
       vendor_order_id: orderP.vendor_order_id,
@@ -953,6 +977,279 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       collected.lifecycle_state === 'PICKED_UP' &&
         collectionRecord.rows[0]?.reason_code === 'CUSTOMER_PICKUP_COMPLETED',
       'A customer collection was not completed and recorded as one',
+    );
+
+    // 8.5d -- vendor self-delivery (VEN-37, workflow 6.7): the shop's own staff
+    // carry the order. Before this leg existed a VENDOR_DELIVERY order reached
+    // READY and stopped: the console said the step was unavailable, the
+    // customer's delivery code needed a delivery assignment the order never
+    // had, and the domain accepted a vendor fallback collection code on it --
+    // which would have recorded a collection nobody made and left the order at
+    // PICKED_UP, where nothing settles.
+    const selfBase = new Date(now.getTime() + 30_000);
+    const selfCart = await carts.currentCart({
+      context: customerContext(customerId),
+      now: selfBase,
+    });
+    await carts.setCartAddress({
+      context: customerContext(customerId),
+      customer_address_id: addressId,
+      now: selfBase,
+    });
+    await carts.addLine({
+      context: customerContext(customerId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: collectionProduct.catalogue_variant_id,
+      quantity: 1,
+      fulfilment_method: 'VENDOR_DELIVERY',
+      now: selfBase,
+    });
+    const selfQuote = await checkout.createQuote({
+      context: customerContext(customerId),
+      cart_id: selfCart.cart_id,
+      now: selfBase,
+    });
+    const selfQuoteGroup = selfQuote.groups[0];
+    check(
+      selfQuote.groups.length === 1 &&
+        selfQuoteGroup?.fulfilment_method === 'VENDOR_DELIVERY' &&
+        selfQuoteGroup.delivery_minor > 0,
+      'A self-delivered group was not quoted with a delivery fee',
+    );
+    const selfPlaced = await checkout.place({
+      context: customerContext(customerId),
+      checkout_quote_id: selfQuote.checkout_quote_id,
+      provider_scenario: 'SUCCESS',
+      idempotency_key: 'phase8-self-delivery-001',
+      now: new Date(selfBase.getTime() + 1_000),
+    });
+    const orderV = selfPlaced.orders[0];
+    check(
+      orderV !== undefined && selfPlaced.orders.length === 1,
+      'Self-delivery fixture must place exactly one vendor order',
+    );
+    const acceptedV = await fulfilment.accept({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderV.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: orderV.version,
+      preparation_estimate_seconds: 600,
+      now: new Date(selfBase.getTime() + 2_000),
+    });
+    check(
+      acceptedV.fulfilment_method === 'VENDOR_DELIVERY',
+      `Accepting a self-delivery answered fulfilment_method ${acceptedV.fulfilment_method}`,
+    );
+    const pickingV = await fulfilment.startPicking({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderV.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: acceptedV.version,
+      now: new Date(selfBase.getTime() + 3_000),
+    });
+    const selfLine = await pool.query<{ id: string }>(
+      `SELECT vendor_order_line_id AS id FROM marketplace.vendor_order_lines
+        WHERE vendor_order_id=$1 LIMIT 1`,
+      [orderV.vendor_order_id],
+    );
+    check(typeof selfLine.rows[0]?.id === 'string', 'Self-delivery order line missing');
+    await fulfilment.markLineFound({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderV.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: selfLine.rows[0].id as UuidV7,
+      actual_quantity: 1,
+      actual_unit_price_minor: 20_000,
+      now: new Date(selfBase.getTime() + 4_000),
+    });
+    const readyV = await fulfilment.markReady({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderV.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: pickingV.version,
+      package_count: 1,
+      now: new Date(selfBase.getTime() + 5_000),
+    });
+    check(readyV.lifecycle_state === 'READY', 'Self-delivery order did not reach READY');
+
+    // Nothing is validated at the counter on a self-delivery: neither the
+    // customer's collection code nor the vendor's fallback applies, and the
+    // customer's delivery code does not exist until the goods have left.
+    await rejects(
+      () =>
+        fulfilment.issueCustomerPickupOtp({
+          context: customerContext(customerId),
+          vendor_order_id: orderV.vendor_order_id,
+          now: new Date(selfBase.getTime() + 5_100),
+        }),
+      FulfilmentConflictError,
+      'A customer minted a collection code for an order the store delivers itself',
+    );
+    await rejects(
+      () =>
+        fulfilment.issuePickupOtp({
+          context: vendorContext(storeA.ownerUserId),
+          reason_code: 'CUSTOMER_DEVICE_UNAVAILABLE',
+          vendor_order_id: orderV.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          now: new Date(selfBase.getTime() + 5_200),
+        }),
+      FulfilmentConflictError,
+      'A vendor fallback collection code was issued on a self-delivered order',
+    );
+    await rejects(
+      () =>
+        fulfilment.issueVendorDeliveryOtp({
+          context: customerContext(customerId),
+          vendor_order_id: orderV.vendor_order_id,
+          now: new Date(selfBase.getTime() + 5_300),
+        }),
+      FulfilmentConflictError,
+      'A delivery code was minted before the order left the shop',
+    );
+    await rejects(
+      () =>
+        fulfilment.completeVendorDelivery({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderV.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          otp: '123456',
+          now: new Date(selfBase.getTime() + 5_400),
+        }),
+      FulfilmentConflictError,
+      'A self-delivery was completed before it started',
+    );
+    await rejects(
+      () =>
+        fulfilment.startVendorDelivery({
+          context: vendorContext(storeB.ownerUserId),
+          vendor_order_id: orderV.vendor_order_id,
+          vendor_location_id: storeB.locationId,
+          expected_version: readyV.version,
+          now: new Date(selfBase.getTime() + 5_500),
+        }),
+      FulfilmentNotFoundError,
+      "Another store's staff started a self-delivery they do not own",
+    );
+    let staleStart: unknown;
+    try {
+      await fulfilment.startVendorDelivery({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderV.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        expected_version: readyV.version + 1,
+        now: new Date(selfBase.getTime() + 5_600),
+      });
+    } catch (error) {
+      staleStart = error;
+    }
+    check(
+      staleStart instanceof FulfilmentConflictError && staleStart.code === 'VERSION_CONFLICT',
+      `A stale self-delivery start was not refused as VERSION_CONFLICT (raised ${String(staleStart)})`,
+    );
+    const outV = await fulfilment.startVendorDelivery({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderV.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: readyV.version,
+      proof_note: 'Left with store staff.',
+      now: new Date(selfBase.getTime() + 6_000),
+    });
+    const startRecord = await pool.query<{
+      reason_code: string;
+      carrier: string | null;
+      out_at: Date | null;
+    }>(
+      `SELECT e.reason_code, o.vendor_delivery_by_user_id::text AS carrier,
+              o.out_for_delivery_at AS out_at
+         FROM marketplace.vendor_orders o
+         JOIN marketplace.vendor_order_events e
+           ON e.vendor_order_id = o.vendor_order_id AND e.event_type = 'PICKED_UP'
+        WHERE o.vendor_order_id=$1`,
+      [orderV.vendor_order_id],
+    );
+    check(
+      outV.lifecycle_state === 'PICKED_UP' &&
+        outV.out_for_delivery_at !== null &&
+        startRecord.rows[0]?.reason_code === 'VENDOR_DELIVERY_STARTED' &&
+        startRecord.rows[0].carrier === storeA.ownerUserId &&
+        startRecord.rows[0].out_at !== null,
+      'Starting a self-delivery did not record the goods leaving with a named member of staff',
+    );
+    const selfInventory = await fulfilment.settleInventoryOnPickup({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderV.vendor_order_id,
+      now: new Date(selfBase.getTime() + 6_500),
+    });
+    check(selfInventory >= 1, 'Inventory commit for a self-delivery did not run');
+
+    // At the door. The customer opens their code; the shop's staff type it.
+    const doorCode = await fulfilment.issueVendorDeliveryOtp({
+      context: customerContext(customerId),
+      vendor_order_id: orderV.vendor_order_id,
+      now: new Date(selfBase.getTime() + 7_000),
+    });
+    await rejects(
+      () =>
+        fulfilment.issueVendorDeliveryOtp({
+          context: customerContext(strangerCustomerId),
+          vendor_order_id: orderV.vendor_order_id,
+          now: new Date(selfBase.getTime() + 7_050),
+        }),
+      FulfilmentNotFoundError,
+      'Another customer minted a delivery code for an order they do not own',
+    );
+    const wrongCode = String((Number(doorCode.plaintext_otp) + 1) % 1_000_000).padStart(6, '0');
+    await rejects(
+      () =>
+        fulfilment.completeVendorDelivery({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderV.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          otp: wrongCode,
+          now: new Date(selfBase.getTime() + 7_100),
+        }),
+      VendorDeliveryOtpMismatchError,
+      'A wrong delivery code completed a self-delivery',
+    );
+    const counted = await pool.query<{ attempts: number }>(
+      `SELECT delivery_otp_attempts AS attempts FROM marketplace.vendor_orders WHERE vendor_order_id=$1`,
+      [orderV.vendor_order_id],
+    );
+    check(counted.rows[0]?.attempts === 1, 'A wrong delivery code was not counted');
+    const deliveredV = await fulfilment.completeVendorDelivery({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderV.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      otp: doorCode.plaintext_otp,
+      proof_note: 'Delivered by store staff.',
+      now: new Date(selfBase.getTime() + 8_000),
+    });
+    const doorRecord = await pool.query<{ reason_code: string; hash: string | null }>(
+      `SELECT e.reason_code, o.delivery_otp_hash AS hash
+         FROM marketplace.vendor_orders o
+         JOIN marketplace.vendor_order_events e
+           ON e.vendor_order_id = o.vendor_order_id AND e.event_type = 'DELIVERED'
+        WHERE o.vendor_order_id=$1`,
+      [orderV.vendor_order_id],
+    );
+    check(
+      deliveredV.lifecycle_state === 'DELIVERED' &&
+        doorRecord.rows[0]?.reason_code === 'VENDOR_DELIVERY_COMPLETED' &&
+        doorRecord.rows[0].hash === null,
+      'A self-delivery was not completed, recorded as one, and its code spent',
+    );
+    await rejects(
+      () =>
+        fulfilment.completeVendorDelivery({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderV.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          otp: doorCode.plaintext_otp,
+          now: new Date(selfBase.getTime() + 8_100),
+        }),
+      FulfilmentConflictError,
+      'A spent delivery code completed a delivered order again',
     );
 
     // 8.7 -- customer history and receipt.
@@ -1808,6 +2105,53 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           Number(earning.rows[0]?.net_minor) > 0 &&
           earning.rows[0]?.ledger !== null,
         'The partner’s earning was not recorded and posted to the ledger',
+      );
+
+      // An order nobody delivered still settles. Settlement ran only on
+      // `vendor_order.delivered`, so a collected order -- whose last state is
+      // PICKED_UP -- was never divided and the shop was never paid for it; the
+      // worker now runs this on pickup for CUSTOMER_PICKUP. A self-delivery
+      // ends at DELIVERED like a partner delivery, with no partner to pay.
+      for (const [label, order] of [
+        ['collected', orderP],
+        ['self-delivered', orderV],
+      ] as const) {
+        const captured = await orderMoney.settleAuthorizationForOrder({
+          context: systemContext(systemActorId),
+          now: new Date(now.getTime() + 73_000),
+          vendor_order_id: order.vendor_order_id,
+        });
+        check(
+          captured === 'CAPTURED',
+          `The ${label} order settled as ${captured} instead of CAPTURED`,
+        );
+        const divided = await orderMoney.recordDeliveryEarnings({
+          context: systemContext(systemActorId),
+          now: new Date(now.getTime() + 74_000),
+          vendor_order_id: order.vendor_order_id,
+        });
+        check(
+          divided.settled && !divided.earning_posted,
+          `The ${label} order did not settle without a partner earning (got ${JSON.stringify(divided)})`,
+        );
+        const settlement = await pool.query<{ count: string; net: string | null }>(
+          `SELECT count(*)::text AS count, max(vendor_payable_minor)::text AS net
+             FROM marketplace.settlements s
+             JOIN marketplace.vendor_orders o ON o.order_reference = s.source_order_reference
+            WHERE o.vendor_order_id=$1`,
+          [order.vendor_order_id],
+        );
+        check(
+          settlement.rows[0]?.count === '1' && Number(settlement.rows[0].net) > 0,
+          `The ${label} order has no settlement paying the shop`,
+        );
+      }
+      const earningsAfter = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM marketplace.partner_earnings_records`,
+      );
+      check(
+        earningsAfter.rows[0]?.count === '1',
+        'Settling orders no partner carried posted a partner earning',
       );
 
       // -----------------------------------------------------------------

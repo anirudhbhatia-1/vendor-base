@@ -35,36 +35,11 @@ import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 import { closeQueuesWithin, reportQueueErrors, requireQueueReady } from './queue-readiness.js';
 import { trace } from '@opentelemetry/api';
 import { Pool } from 'pg';
+import { handleDomainEvent } from './domain-event-handler.js';
 import { workerLogger } from './json-logger.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 
 const POLL_MS = 15_000;
-/**
- * Emitted event types with no worker-side reaction today. Their domain effects
- * are applied synchronously in the emitting transaction; the event exists for
- * ordering and audit. Listing them explicitly keeps an unhandled *new* event
- * type from being mistaken for a deliberate no-op.
- */
-const ACKNOWLEDGED_WITHOUT_REACTION: ReadonlySet<string> = new Set([
-  'checkout.payment_failed',
-  // The queue canary. R0.5 asks for a bounded, cleaned-up round trip that proves
-  // jobs actually flow, because a broker PING proves only that the broker answers
-  // and a heartbeat proves only that a worker is alive -- neither shows that an
-  // event enqueued now gets consumed. This type carries the whole path
-  // (outbox row -> dispatch -> Valkey -> worker -> acknowledged) and reacts to
-  // nothing, so it is inert in every environment rather than test-only code
-  // living in a production branch.
-  'ops.queue_canary',
-  'checkout.payment_unknown',
-  'checkout.placed',
-  'checkout.webhook_authorized',
-  'partner.reinstated',
-  'vendor.reinstated',
-  'vendor.suspended',
-]);
-
-/** How long an operator has to answer a returned delivery. */
-const RETURNED_CASE_RESPONSE_MS = 4 * 60 * 60 * 1_000;
 const OFFLINE_PROOF_TTL_MS = 24 * 60 * 60 * 1_000;
 const QUEUE_NAME = 'operations';
 
@@ -288,86 +263,19 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         request_id: job.request_id,
       },
       async (_client, event) => {
-        workerLogger.event('outbox.event.processing', {
-          event_id: event.event_id,
-          event_type: event.event_type,
-        });
-        if (event.event_type === 'vendor_order.picked_up') {
-          await this.#fulfilment.settleInventoryOnPickup({
-            context,
-            vendor_order_id: event.aggregate_id,
-          });
-        } else if (event.event_type === 'order.placed') {
-          await this.#dispatch.dispatchPlacedOrder({
-            context,
-            event_id: event.event_id,
-            vendor_order_id: event.aggregate_id,
-          });
-        } else if (
-          event.event_type === 'vendor_order.accepted' ||
-          event.event_type === 'vendor_order.ended'
-        ) {
-          // Every shop in a checkout group shares one authorization, so the
-          // decision to capture or void can only be taken once they have all
-          // answered. This runs on each answer and returns WAITING until then.
-          const outcome = await this.#orderMoney.settleAuthorizationForOrder({
-            context,
-            vendor_order_id: event.aggregate_id,
-          });
-          workerLogger.event('checkout.authorization.settled', {
-            event_id: event.event_id,
-            event_type: event.event_type,
-            outcome,
-            vendor_order_id: event.aggregate_id,
-          });
-        } else if (event.event_type === 'vendor_order.delivered') {
-          const result = await this.#orderMoney.recordDeliveryEarnings({
-            context,
-            vendor_order_id: event.aggregate_id,
-          });
-          workerLogger.event('vendor_order.delivery.settled', {
-            earning_posted: result.earning_posted,
-            event_id: event.event_id,
-            settled: result.settled,
-            vendor_order_id: event.aggregate_id,
-          });
-        } else if (event.event_type === 'vendor_order.returned') {
-          // Goods that came back are not a completed sale. The settlement that
-          // divides the money is deliberately not run here: what the partner is
-          // owed for a return trip is a policy question nobody has answered
-          // yet, and guessing it would move real money on an invented rate.
-          //
-          // What must happen is that a person sees it. A returned order has
-          // already failed and the customer is owed an answer, so it opens a
-          // case rather than resting in a state nobody reads.
-          await this.#adminControl.createSupportCase({
-            category: 'DELIVERY_RETURNED',
-            context,
-            description:
-              'Delivery was returned to the vendor. The customer has not received this order and the money has not been divided.',
-            response_due_at: new Date(Date.now() + RETURNED_CASE_RESPONSE_MS),
-            severity: 'HIGH',
-            vendor_order_id: event.aggregate_id,
-          });
-          workerLogger.event('vendor_order.return.case_opened', {
-            event_id: event.event_id,
-            vendor_order_id: event.aggregate_id,
-          });
-        } else if (event.event_type === 'partner.suspended') {
-          // A suspended partner keeps whatever availability row they last
-          // wrote. Dispatch already re-checks eligibility, but clearing the
-          // row keeps the two views of the same partner consistent.
-          await this.#availability.forceOffline({
-            context,
-            partner_user_id: event.aggregate_id,
-            reason_code: 'PARTNER_SUSPENDED',
-          });
-        } else if (!ACKNOWLEDGED_WITHOUT_REACTION.has(event.event_type)) {
-          // Falling through used to acknowledge the event, so an emitted type
-          // nobody handled looked delivered. Unknown types now fail and retry
-          // into the dead-letter path instead of disappearing.
-          throw new Error(`No outbox handler is registered for ${event.event_type}`);
-        }
+        await handleDomainEvent(
+          {
+            adminControl: this.#adminControl,
+            availability: this.#availability,
+            dispatch: this.#dispatch,
+            fulfilment: this.#fulfilment,
+            log: (name, fields) => workerLogger.event(name, fields),
+            now: () => new Date(),
+            orderMoney: this.#orderMoney,
+          },
+          context,
+          event,
+        );
         return null;
       },
     );

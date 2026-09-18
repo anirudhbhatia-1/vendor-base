@@ -152,6 +152,7 @@ assert(
       '0077_assignment_event_partner',
       '0078_partner_presence',
       '0079_fulfilment_method_unavailable',
+      '0080_vendor_self_delivery',
     ]),
   'Unexpected reviewed migrations',
 );

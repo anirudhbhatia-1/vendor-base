@@ -293,3 +293,23 @@ test('fulfilment modes are names, not objects with an enabled flag', () => {
     'a placeholder that renders the literal word MODE is not a fallback',
   );
 });
+
+test('a self-delivered order is started at the shop and completed at the door (VEN-37)', () => {
+  const source = code('orders-panel.tsx');
+  // The console used to say the step was "not available yet". Both legs now
+  // exist and are the shop's own work until the door, so the order stays on
+  // the active list while the goods are on the road.
+  assert.ok(
+    !source.includes('Recording its dispatch and delivery is not\n            available yet'),
+    'the self-delivery leg is no longer described as unavailable',
+  );
+  assert.ok(source.includes("'self-delivery/start'"), 'the shop starts the delivery');
+  assert.ok(source.includes("'self-delivery/complete'"), 'the shop completes it at the door');
+  assert.ok(source.includes('Customer’s delivery code'), 'the door asks for the customer’s code');
+  assert.ok(
+    source.includes(
+      "order.lifecycle_state === 'PICKED_UP' && order.fulfilment_method === 'VENDOR_DELIVERY'",
+    ),
+    'a self-delivery out on the road is still active work for the shop',
+  );
+});

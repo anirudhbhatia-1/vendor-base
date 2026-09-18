@@ -2857,21 +2857,26 @@
     {
       "id": "VEN-37",
       "name": "Vendor self-delivery",
-      "status": "backend_only",
+      "status": "complete_local_synthetic",
       "target_stage": "5",
-      "notes": "No self-delivery flow in client",
+      "notes": "Start at the shop (READY → PICKED_UP with the carrying staff member recorded), customer delivery code on the order, complete at the door (→ DELIVERED, settles with no partner earning); vendor console controls; Android shell unchanged (batch 10)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
-        "worker": false,
-        "pwa": false,
+        "worker": true,
+        "pwa": true,
         "android": false,
         "tests": true
       },
       "phase_steps": ["9.6"],
-      "verified_by": ["database/scripts/verify-assignment-custody.ts"]
+      "verified_by": [
+        "apps/api/src/vendor-fulfilment.controller.spec.ts",
+        "apps/vendor-pwa/app/vendor-panels.spec.ts",
+        "apps/worker/src/domain-event-handler.spec.ts",
+        "database/scripts/verify-vendor-fulfilment.ts"
+      ]
     },
     {
       "id": "VEN-38",
@@ -8297,8 +8302,8 @@
     "total_features": 354,
     "launch_features": 309,
     "by_status": {
-      "backend_only": 13,
-      "complete_local_synthetic": 265,
+      "backend_only": 12,
+      "complete_local_synthetic": 266,
       "excluded": 15,
       "gated": 7,
       "later": 23,
@@ -8313,8 +8318,8 @@
       "Launch": 309
     },
     "launch_by_status": {
-      "backend_only": 13,
-      "complete_local_synthetic": 265,
+      "backend_only": 12,
+      "complete_local_synthetic": 266,
       "not_started": 12,
       "partial_workflow": 17,
       "ui_only": 2
