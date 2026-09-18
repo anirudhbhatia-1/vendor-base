@@ -10,7 +10,7 @@
     "./supabase": "./src/native-supabase.ts"
   },
   "scripts": {
-    "test:unit": "node --import tsx --test src/*.spec.ts",
+    "test:unit": "node ../../tooling/scripts/ensure-packages-built.mjs && node --import tsx --test src/*.spec.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {

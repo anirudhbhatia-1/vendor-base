@@ -166,9 +166,14 @@ assert things type checking cannot see. Each is self-tested by `pnpm test:contro
 | `tooling/scripts/scan-secrets.mjs` | Committed credentials |
 
 `ensure-packages-built.mjs` also runs ahead of every `dev`, `start` and `android`
-script. Shared packages resolve types from `src/` but runtime from `dist/`, so
-TypeScript validates code Node never loads: a stale build fails only at runtime,
-with a missing-export error that looks nothing like its cause.
+script, once at the root of `pnpm test:unit`, and in the `test:unit` script of
+every workspace that imports another package's runtime. Shared packages resolve
+types from `src/` but runtime from `dist/`, so TypeScript validates code Node
+never loads: a stale build fails only at runtime, with a missing-export error
+that looks nothing like its cause. On a fresh clone there is no `dist/` at all,
+which is how CI failed on every push from 18 August to 17 September 2026 — the
+root guard builds the packages one at a time before the recursive run, so
+sibling packages do not race to emit the same `dist/`.
 
 ## Gated capabilities
 

@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "test:unit": "node --import tsx --test src/*.spec.ts"
+    "test:unit": "node ../../tooling/scripts/ensure-packages-built.mjs && node --import tsx --test src/*.spec.ts"
   },
   "dependencies": {
     "@neighbourhood-store/domain-types": "workspace:*"
