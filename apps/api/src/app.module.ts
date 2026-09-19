@@ -107,7 +107,10 @@ import {
   CONFIGURATION_ADMIN,
 } from './tokens.js';
 import { CustomerAddressesController } from './customer-addresses.controller.js';
-import { CustomerDiscoveryController } from './customer-discovery.controller.js';
+import {
+  AdminShopRequestController,
+  CustomerDiscoveryController,
+} from './customer-discovery.controller.js';
 import { CustomerCartController } from './customer-cart.controller.js';
 import { GroupedCheckoutController } from './grouped-checkout.controller.js';
 import {
@@ -171,6 +174,7 @@ import {
     CatalogueProductsController,
     CustomerAddressesController,
     CustomerDiscoveryController,
+    AdminShopRequestController,
     CustomerCartController,
     GroupedCheckoutController,
     VendorStaffController,

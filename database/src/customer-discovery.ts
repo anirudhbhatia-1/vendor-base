@@ -90,6 +90,34 @@ export interface ShopRequest {
   readonly lifecycle_state: 'CLOSED' | 'OPEN' | 'TRIAGED';
 }
 
+/**
+ * The preferred store as the customer sees it: the preference itself, plus
+ * whether that store can serve the address in hand. Eligibility is derived at
+ * read time and never stored, so a store that stops covering an address is
+ * shown as unavailable rather than silently dropped.
+ */
+export interface PreferredStore {
+  readonly vendor_location_id: UuidV7;
+  readonly location_name: string;
+  readonly is_currently_eligible: boolean;
+}
+
+/**
+ * What an operator sees of a nearby-shop request. The customer's identity is
+ * not part of it: the request is about a place, and the coordinates and pin
+ * the customer gave for that place are what the pipeline needs.
+ */
+export interface ShopRequestQueueEntry extends ShopRequest {
+  readonly pin_code: string;
+  readonly note: string | null;
+  readonly latitude: number;
+  readonly longitude: number;
+  readonly onboarding_case_id: UuidV7 | null;
+  readonly resolution: string | null;
+  readonly created_at: Date;
+  readonly updated_at: Date;
+}
+
 const storeName = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &'().,/-]{1,118}$/u;
 const pinCode = /^[1-9][0-9]{5}$/;
 
@@ -161,6 +189,32 @@ function requireCoordinate(latitude: number, longitude: number): void {
 function customer(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'customer') throw new CustomerDiscoveryAuthorizationError();
   return context.actor.actor_id;
+}
+
+function admin(context: RequestContext): UuidV7 {
+  if (context.actor?.actor_kind !== 'admin') throw new CustomerDiscoveryAuthorizationError();
+  return context.actor.actor_id;
+}
+
+function pgErrorCode(error: unknown): string | null {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code: unknown }).code)
+    : null;
+}
+
+/**
+ * A preference names a store by id, and a store that does not exist is a
+ * client error, not a database one. Without this the foreign-key violation
+ * surfaced as a 500.
+ */
+async function refusingUnknownStore<Result>(work: () => Promise<Result>): Promise<Result> {
+  try {
+    return await work();
+  } catch (error) {
+    if (pgErrorCode(error) === '23503')
+      throw new CustomerDiscoveryNotFoundError('Store was not found');
+    throw error;
+  }
 }
 
 function normalizeTerm(raw: string): string {
@@ -760,11 +814,13 @@ export class CustomerDiscoveryService {
     readonly now?: Date;
   }): Promise<void> {
     const userId = customer(input.context);
-    await this.#pool.query(
-      `INSERT INTO marketplace.customer_favourite_stores
-         (customer_favourite_store_id, user_id, vendor_location_id)
-       VALUES ($1,$2,$3) ON CONFLICT (user_id, vendor_location_id) DO NOTHING`,
-      [createUuidV7(), userId, input.vendor_location_id],
+    await refusingUnknownStore(() =>
+      this.#pool.query(
+        `INSERT INTO marketplace.customer_favourite_stores
+           (customer_favourite_store_id, user_id, vendor_location_id)
+         VALUES ($1,$2,$3) ON CONFLICT (user_id, vendor_location_id) DO NOTHING`,
+        [createUuidV7(), userId, input.vendor_location_id],
+      ),
     );
     await recordEvent(this.#pool, {
       user_id: userId,
@@ -833,11 +889,13 @@ export class CustomerDiscoveryService {
   }): Promise<void> {
     const userId = customer(input.context);
     const now = input.now ?? new Date();
-    await this.#pool.query(
-      `INSERT INTO marketplace.customer_preferred_store (user_id, vendor_location_id, updated_at)
-       VALUES ($1,$2,$3)
-       ON CONFLICT (user_id) DO UPDATE SET vendor_location_id = $2, updated_at = $3`,
-      [userId, input.vendor_location_id, now],
+    await refusingUnknownStore(() =>
+      this.#pool.query(
+        `INSERT INTO marketplace.customer_preferred_store (user_id, vendor_location_id, updated_at)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (user_id) DO UPDATE SET vendor_location_id = $2, updated_at = $3`,
+        [userId, input.vendor_location_id, now],
+      ),
     );
   }
 
@@ -848,14 +906,37 @@ export class CustomerDiscoveryService {
     ]);
   }
 
-  async preferredStore(input: { readonly context: RequestContext }): Promise<UuidV7 | null> {
+  async preferredStore(input: {
+    readonly context: RequestContext;
+    readonly customer_address_id?: UuidV7;
+  }): Promise<PreferredStore | null> {
     const userId = customer(input.context);
-    const result = await this.#pool.query<{ vendor_location_id: string }>(
-      'SELECT vendor_location_id FROM marketplace.customer_preferred_store WHERE user_id = $1',
-      [userId],
+    const result = await this.#pool.query<{
+      vendor_location_id: string;
+      location_name: string;
+      is_currently_eligible: boolean;
+    }>(
+      `SELECT p.vendor_location_id, l.location_name,
+              ($2::uuid IS NOT NULL AND EXISTS (
+                SELECT 1 FROM marketplace.customer_addresses a
+                JOIN marketplace.vendor_service_zones z
+                  ON z.vendor_location_id = p.vendor_location_id AND z.lifecycle_state = 'ACTIVE'
+                 AND ST_Covers(z.boundary, a.coordinates)
+                WHERE a.customer_address_id = $2 AND a.user_id = $1
+              )) AS is_currently_eligible
+         FROM marketplace.customer_preferred_store p
+         JOIN marketplace.vendor_locations l ON l.vendor_location_id = p.vendor_location_id
+        WHERE p.user_id = $1`,
+      [userId, input.customer_address_id ?? null],
     );
     const row = result.rows[0];
-    return row ? parseUuidV7(row.vendor_location_id) : null;
+    return row
+      ? Object.freeze({
+          vendor_location_id: parseUuidV7(row.vendor_location_id),
+          location_name: row.location_name,
+          is_currently_eligible: row.is_currently_eligible,
+        })
+      : null;
   }
 
   /**
@@ -923,13 +1004,137 @@ export class CustomerDiscoveryService {
         lifecycle_state: row.lifecycle_state,
       });
     } catch (error) {
-      if (
-        typeof error === 'object' &&
-        error !== null &&
-        (error as { code?: unknown }).code === '23505'
-      )
+      if (pgErrorCode(error) === '23505')
         throw new CustomerDiscoveryConflictError('An open request already exists for this area');
       throw error;
     }
   }
+
+  /**
+   * The pipeline side of a request (requirement 4): the queue an operator
+   * reads, oldest first, optionally narrowed to one state.
+   */
+  async listShopRequests(input: {
+    readonly context: RequestContext;
+    readonly state?: ShopRequest['lifecycle_state'];
+  }): Promise<readonly ShopRequestQueueEntry[]> {
+    admin(input.context);
+    const result = await this.#pool.query<ShopRequestQueueRow>(
+      `${SHOP_REQUEST_SELECT}
+        WHERE ($1::text IS NULL OR r.lifecycle_state = $1)
+        ORDER BY r.created_at
+        LIMIT 200`,
+      [input.state ?? null],
+    );
+    return Object.freeze(result.rows.map(shopRequestEntry));
+  }
+
+  /**
+   * OPEN -> TRIAGED. The operator may name the onboarding lead the request
+   * became; the lead itself is created through vendor onboarding, whose case
+   * numbering and audit this module does not own.
+   */
+  async triageShopRequest(input: {
+    readonly context: RequestContext;
+    readonly customer_shop_request_id: UuidV7;
+    readonly onboarding_case_id?: UuidV7 | null;
+    readonly now?: Date;
+  }): Promise<ShopRequestQueueEntry> {
+    const adminId = admin(input.context);
+    const now = input.now ?? new Date();
+    let result;
+    try {
+      result = await this.#pool.query<ShopRequestQueueRow>(
+        `WITH moved AS (
+           UPDATE marketplace.customer_shop_requests
+              SET lifecycle_state = 'TRIAGED', handled_by_user_id = $2,
+                  onboarding_case_id = $3, updated_at = $4
+            WHERE customer_shop_request_id = $1 AND lifecycle_state = 'OPEN'
+            RETURNING *)
+         ${SHOP_REQUEST_SELECT.replace('marketplace.customer_shop_requests r', 'moved r')}`,
+        [input.customer_shop_request_id, adminId, input.onboarding_case_id ?? null, now],
+      );
+    } catch (error) {
+      if (pgErrorCode(error) === '23503')
+        throw new CustomerDiscoveryNotFoundError('Onboarding case was not found');
+      throw error;
+    }
+    const row = result.rows[0];
+    if (row) return shopRequestEntry(row);
+    throw await this.#shopRequestRefusal(input.customer_shop_request_id, 'triaged');
+  }
+
+  /** OPEN or TRIAGED -> CLOSED, with the reason the customer would be told. */
+  async closeShopRequest(input: {
+    readonly context: RequestContext;
+    readonly customer_shop_request_id: UuidV7;
+    readonly resolution: string;
+    readonly now?: Date;
+  }): Promise<ShopRequestQueueEntry> {
+    const adminId = admin(input.context);
+    const resolution = input.resolution.trim();
+    if (resolution.length < 1 || resolution.length > 240)
+      throw new CustomerDiscoveryInputError('Resolution must be between 1 and 240 characters');
+    const now = input.now ?? new Date();
+    const result = await this.#pool.query<ShopRequestQueueRow>(
+      `WITH moved AS (
+         UPDATE marketplace.customer_shop_requests
+            SET lifecycle_state = 'CLOSED', handled_by_user_id = $2, resolution = $3,
+                updated_at = $4
+          WHERE customer_shop_request_id = $1 AND lifecycle_state IN ('OPEN', 'TRIAGED')
+          RETURNING *)
+       ${SHOP_REQUEST_SELECT.replace('marketplace.customer_shop_requests r', 'moved r')}`,
+      [input.customer_shop_request_id, adminId, resolution, now],
+    );
+    const row = result.rows[0];
+    if (row) return shopRequestEntry(row);
+    throw await this.#shopRequestRefusal(input.customer_shop_request_id, 'closed');
+  }
+
+  /** Why a transition matched no row: the request is missing, or not in a state it can leave. */
+  async #shopRequestRefusal(requestId: UuidV7, verb: string): Promise<Error> {
+    const current = await this.#pool.query<{ lifecycle_state: string }>(
+      'SELECT lifecycle_state FROM marketplace.customer_shop_requests WHERE customer_shop_request_id = $1',
+      [requestId],
+    );
+    const state = current.rows[0]?.lifecycle_state;
+    return state
+      ? new CustomerDiscoveryConflictError(`A ${state} shop request cannot be ${verb}`)
+      : new CustomerDiscoveryNotFoundError('Shop request was not found');
+  }
+}
+
+interface ShopRequestQueueRow {
+  customer_shop_request_id: string;
+  store_name: string;
+  lifecycle_state: ShopRequest['lifecycle_state'];
+  pin_code: string;
+  note: string | null;
+  latitude: number;
+  longitude: number;
+  onboarding_case_id: string | null;
+  resolution: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+const SHOP_REQUEST_SELECT = `SELECT r.customer_shop_request_id, r.store_name, r.lifecycle_state, r.pin_code, r.note,
+              ST_Y(r.coordinates::geometry) AS latitude, ST_X(r.coordinates::geometry) AS longitude,
+              r.onboarding_case_id, r.resolution, r.created_at, r.updated_at
+         FROM marketplace.customer_shop_requests r`;
+
+function shopRequestEntry(row: ShopRequestQueueRow): ShopRequestQueueEntry {
+  return Object.freeze({
+    customer_shop_request_id: parseUuidV7(row.customer_shop_request_id),
+    store_name: row.store_name,
+    lifecycle_state: row.lifecycle_state,
+    pin_code: row.pin_code,
+    note: row.note,
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    onboarding_case_id: row.onboarding_case_id ? parseUuidV7(row.onboarding_case_id) : null,
+    resolution: row.resolution,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
 }

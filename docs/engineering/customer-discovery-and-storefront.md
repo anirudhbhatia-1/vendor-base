@@ -17,8 +17,11 @@ never to a store the customer has no eligibility path to.
 
 - `customer_favourite_stores` — one row per (customer, store); no cap, dedup on conflict.
 - `customer_preferred_store` — at most one row per customer (primary key is `user_id`).
-- `customer_shop_requests` — a synthetic pin/coordinate/store-name request; a partial unique index
-  allows only one `OPEN` request per `(user_id, pin_code)`.
+- `customer_shop_requests` — a pin/coordinate/store-name request with a lifecycle
+  `OPEN → TRIAGED → CLOSED`; a partial unique index allows only one `OPEN` request per
+  `(user_id, pin_code)`. Since 0081 a moved request records who handled it, the onboarding lead it
+  became (`onboarding_case_id`) and, when closed, the reason — the table refuses a move with no
+  handler and a close with no reason.
 - `customer_recent_searches` — deduplicated by normalized term, most-recent-first, capped to the
   10 most recent at read time.
 - `customer_discovery_events` — append-only, privacy-safe funnel: event type and result count only,
@@ -41,17 +44,28 @@ never to a store the customer has no eligibility path to.
   `CORRECTION_REQUIRED`/`RESTRICTED` moderation case is excluded entirely, reusing the Phase 5.7
   moderation boundary.
 - **Favourites and the preferred store are independent** of eligibility. Losing zone coverage never
-  deletes either; the caller re-derives `is_currently_eligible` at read time.
+  deletes either; both reads take an address and derive `is_currently_eligible` at read time, so
+  the change is shown rather than the preference vanishing. Favouriting or preferring a store that
+  does not exist is refused as not found.
 - **A shop request cannot be spammed** in one area: the partial unique index blocks a second `OPEN`
   request for the same customer and pin until the first is triaged or closed, but a genuinely new
-  area is always accepted.
+  area is always accepted. Operators read the queue oldest first, triage a request (optionally
+  linking the `vendor_onboarding_cases` lead they created through onboarding — that module owns
+  lead numbering, so triage links rather than creates) and close one with a reason. The queue
+  carries the place, never the customer's identity.
 
 ## API
 
 Routes under `customer/discovery`, all behind capability `customer.discovery.use` with resource
 concealment: `GET stores`, `GET search`, `GET/DELETE recent-searches`, `GET stores/:id`
 (storefront), `POST/DELETE favourites/:id`, `GET favourites`, `POST/DELETE/GET preferred-store`,
-`POST shop-requests`.
+`POST shop-requests`; `GET preferred-store` takes an optional `customer_address_id` and returns
+`{ preferred_store }` with the eligibility flag.
+
+The pipeline side lives under `admin/shop-requests` (global admin scope): `GET` lists the queue
+(`?state=` narrows it) behind `admin.vendor_onboarding.review`; `POST :id/triage` (optional
+`onboarding_case_id`) and `POST :id/close` (`resolution`, 1–240 characters) behind
+`admin.vendor_onboarding.manage`.
 
 ## Verification
 
@@ -59,8 +73,12 @@ concealment: `GET stores`, `GET search`, `GET/DELETE recent-searches`, `GET stor
 ordered by distance with a funnel event, a real catalogue product/inventory row joined correctly
 into the storefront (price, availability, staleness), a not-found storefront for an unknown
 location, search ranking with a zero-result funnel event, recent-search dedup and deletion,
-favourite eligibility surviving a zone change, preferred-store persistence across an eligibility
-change, shop-request dedup per pin with acceptance in a new pin, and input/actor validation. Wired
+favourite add/idempotent re-add/removal with eligibility from the address and an unknown store
+refused, the preferred store returned with its eligibility for an out-of-zone and an in-zone
+store with exactly one row, shop-request dedup per pin with acceptance in a new pin and in Hindi,
+the operator queue (oldest first, customer identity absent, triage into a real onboarding lead,
+close with a reason, the state machine's refusals, the table's own checks, and asking again once
+closed), and input/actor validation. Wired
 into `verify-lifecycle.ts` as `customer_discovery_scenarios`. Shares
 `verify-discoverable-store-fixture.ts` (a published, zoned, all-hours store) with the cart
 verifier, so both exercise the real onboarding → publication → discovery chain instead of

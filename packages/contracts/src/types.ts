@@ -85,6 +85,28 @@ export type OperatingHours = {
   closes_at: string;
 };
 
+/** The customer's preferred store, with whether it can serve the address asked about. */
+export type PreferredStore = {
+  vendor_location_id: string;
+  location_name: string;
+  is_currently_eligible: boolean;
+};
+
+/** A nearby-shop request as the operator queue shows it: the place, never the customer. */
+export type ShopRequestQueueEntry = {
+  customer_shop_request_id: string;
+  store_name: string;
+  lifecycle_state: 'CLOSED' | 'OPEN' | 'TRIAGED';
+  pin_code: string;
+  note: string | null;
+  latitude: number;
+  longitude: number;
+  onboarding_case_id: string | null;
+  resolution: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type Store = {
   vendor_location_id: string;
   location_name: string;

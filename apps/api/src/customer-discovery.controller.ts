@@ -13,7 +13,7 @@ import { CustomerDiscoveryService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { CUSTOMER_DISCOVERY } from './tokens.js';
-import { numberField, object, stringField, uuid } from './request-fields.js';
+import { numberField, object, optionalString, stringField, uuid } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 function requireQuery(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0) throw new BadRequestException();
@@ -23,6 +23,23 @@ const asCustomer = RequireAuthorization({
   capability: 'customer.discovery.use',
   conceal_resource: true,
 });
+// A shop request is a lead for the vendor pipeline, so the queue is read and
+// moved under the onboarding capabilities rather than a capability of its own.
+const reviewRequests = RequireAuthorization({
+  admin_scope: { kind: 'GLOBAL' },
+  capability: 'admin.vendor_onboarding.review',
+  conceal_resource: true,
+});
+const manageRequests = RequireAuthorization({
+  admin_scope: { kind: 'GLOBAL' },
+  capability: 'admin.vendor_onboarding.manage',
+  conceal_resource: true,
+});
+const SHOP_REQUEST_STATES = new Set(['OPEN', 'TRIAGED', 'CLOSED']);
+function shopRequestState(value: string): 'CLOSED' | 'OPEN' | 'TRIAGED' {
+  if (!SHOP_REQUEST_STATES.has(value)) throw new BadRequestException();
+  return value as 'CLOSED' | 'OPEN' | 'TRIAGED';
+}
 
 @Controller('customer/discovery')
 export class CustomerDiscoveryController {
@@ -185,13 +202,19 @@ export class CustomerDiscoveryController {
     }
   }
 
+  /**
+   * With an address, the answer says whether the preferred store can serve
+   * it (6.4 requirement 3): the preference survives an eligibility change and
+   * the change is shown, rather than the store quietly vanishing.
+   */
   @Get('preferred-store')
   @asCustomer
-  async preferredStore() {
+  async preferredStore(@Query('customer_address_id') addressId?: string) {
     try {
       return {
-        vendor_location_id: await this.discovery.preferredStore({
+        preferred_store: await this.discovery.preferredStore({
           context: currentRequestContext(),
+          ...(addressId ? { customer_address_id: uuid(addressId) } : {}),
         }),
       };
     } catch (error) {
@@ -211,6 +234,61 @@ export class CustomerDiscoveryController {
         longitude: numberField(body, 'longitude'),
         store_name: stringField(body, 'store_name'),
         note: typeof body['note'] === 'string' ? (body['note'] as string) : null,
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+}
+
+/**
+ * The pipeline side of a nearby-shop request (6.4 requirement 4). The request
+ * used to be written and never read by anyone.
+ */
+@Controller('admin/shop-requests')
+export class AdminShopRequestController {
+  constructor(@Inject(CUSTOMER_DISCOVERY) private readonly discovery: CustomerDiscoveryService) {}
+
+  @Get()
+  @reviewRequests
+  async list(@Query('state') state?: string) {
+    try {
+      return {
+        shop_requests: await this.discovery.listShopRequests({
+          context: currentRequestContext(),
+          ...(state ? { state: shopRequestState(state) } : {}),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Post(':customer_shop_request_id/triage')
+  @manageRequests
+  async triage(@Param('customer_shop_request_id') id: string, @Body() raw: unknown) {
+    const body = object(raw);
+    const caseId = optionalString(body, 'onboarding_case_id');
+    try {
+      return await this.discovery.triageShopRequest({
+        context: currentRequestContext(),
+        customer_shop_request_id: uuid(id),
+        ...(caseId ? { onboarding_case_id: uuid(caseId) } : {}),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Post(':customer_shop_request_id/close')
+  @manageRequests
+  async close(@Param('customer_shop_request_id') id: string, @Body() raw: unknown) {
+    const body = object(raw);
+    try {
+      return await this.discovery.closeShopRequest({
+        context: currentRequestContext(),
+        customer_shop_request_id: uuid(id),
+        resolution: stringField(body, 'resolution'),
       });
     } catch (error) {
       translateDomainError(error);

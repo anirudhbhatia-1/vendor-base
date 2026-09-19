@@ -1137,6 +1137,50 @@ The same session repaired four defects on the path an order takes out of the sho
 
 Three documents had drifted from the code and are corrected in the same batch: the vendor-fulfilment doc described a five-module split that commit `f0e646e` had abandoned; the README named migration `0045` of 46 as head; the topology, deployment, register, CI and entry-point docs predated Valkey/BullMQ activation, worker heartbeats and the D-16 Azure environment. `CLAUDE.md` now says what `database/schema.ts` is (a ratcheted mirror, not the schema authority).
 
+## Run 37 (19 September 2026) — step 6.4, favourites, preferred store, and shop request
+
+The step names five requirements. Two held. One was tested vacuously, one was met only for favourites and not for the preferred store, and one — the pipeline — did not exist: a request was written and nobody could read it. Twenty-three assertions were added and every one was mutation-proven, eleven probes.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Add/remove favourite stores | Add held; **removal was never asserted**, and an unknown store was a 500 — P37-01. |
+| 2 | Exactly one preferred store | Held (primary key on `user_id`), now asserted by count rather than by reading the value back. |
+| 3 | Show eligibility changes without deleting preference | Met for favourites. **The preferred-store read returned a bare id**, so its eligibility could not be shown at all, and the assertion read the same value twice with nothing changed between — P37-02. |
+| 4 | Submit a nearby shop request into the admin/vendor pipeline | **The request was stored; the pipeline did not exist.** `TRIAGED` and `CLOSED` were unreachable states — P37-03. |
+| 5 | Prevent duplicate request spam | Held (partial unique index on open requests per customer and pin). |
+
+**P37-01 — removal never asserted; an unknown store was a server fault.** `removeFavourite` had no assertion anywhere; its `DELETE` could have been dropped with the suite green (probe 1 confirms). Favouriting or preferring a `vendor_location_id` that does not exist violated the foreign key and surfaced as a 500, because nothing translated it. Both writes now go through `refusingUnknownStore`, which turns the violation into `CustomerDiscoveryNotFoundError` (404). The verifier asserts removal, idempotent re-adding, and the refusal.
+
+**P37-02 — the preferred store could not show an eligibility change.** Requirement 3 asks that eligibility changes be *shown* without deleting the preference. `listFavourites` did that (an `is_currently_eligible` flag derived at read time); `preferredStore` returned only the id. The read now takes an optional address and returns the store with its name and `is_currently_eligible`, derived the same way. The earlier assertion — set a preference, read it, read it again, check it is still there — could not have failed for any implementation that stored a row; it now sets an out-of-zone store and asserts it is returned *and* reported ineligible, then an in-zone one and asserts eligible. The API response is `{ preferred_store }` (was `{ vendor_location_id }`); nothing but the typed client consumed it.
+
+**P37-03 — no pipeline.** Migration 0020 gave a request a lifecycle of `OPEN → TRIAGED → CLOSED`, and no code in the repository listed requests or moved one. Migration 0081 adds who handled it, the onboarding lead it became, and the closing reason, with table checks that a moved request names a handler and a closed one names a reason. The domain gains `listShopRequests` (oldest first, filterable by state), `triageShopRequest` (OPEN → TRIAGED, optionally linked to a `vendor_onboarding_cases` lead the operator created through the onboarding module — that module owns lead numbering and audit, so triage links rather than creates) and `closeShopRequest` (OPEN or TRIAGED → CLOSED, reason required). Routes under `admin/shop-requests` sit behind `admin.vendor_onboarding.review` (read) and `.manage` (move), global scope, because a shop request is a lead for that pipeline and not a capability of its own. The queue does not carry the customer's identity: the request is about a place. Once closed, the customer may ask again for the same pin, which is what the partial index was designed to allow and had never been shown.
+
+The same walk found that a shop named in Hindi was a server fault: the service accepted any letter (`\p{L}`) while the table's check accepted ASCII only, so `शर्मा किराना` passed validation and failed the insert. 0081 replaces that check with the length bound 0062 gave every other runtime name.
+
+**The feature matrix was wrong in both directions.** CUS-21 (preferred store) claimed `pwa: true` with "PWA working"; no PWA or Android surface reads or sets it — only the typed client had the methods. It is `backend_only`. CUS-22 (request a shop) claimed `not_started` with "no nomination UI or API call"; the domain method and route had existed since 0020. It is `backend_only` too, with the pipeline now real. All three entries cited `customer-preferences.controller.spec.ts` as verification, a spec about profile, consent and notifications that mentions none of them; they now cite the discovery verifier and the discovery controller spec.
+
+**Mutation results.** Eleven probes, each on a rebuilt database (the discovery fixture places its stores at fixed coordinates, so the verifier cannot re-run on one), each restored from the index and confirmed identical afterwards:
+
+| Probe | Caught by |
+|---|---|
+| `removeFavourite` DELETE neutralised | *Removing a favourite did not remove it* |
+| Preferred-store eligibility forced true | *A preferred store outside the address zone was reported eligible* |
+| Foreign-key translation removed | *Favouriting a store that does not exist was not refused as not found (raised … violates foreign key constraint)* |
+| Triage state guard removed | *A triaged request was triaged again* |
+| Close state guard removed | *A closed request was closed again* |
+| Resolution length check removed | *A request was closed without a reason (raised … violates check constraint)* |
+| Queue `ORDER BY` removed | *The queue is not oldest first* — the second request is submitted a minute *earlier* than the first, because heap order alone would have listed them in the expected order |
+| Queue actor check removed | *A customer read the shop-request queue* |
+| 0081 `resolution_when_closed` check weakened | *The table let a request close without a reason* |
+| 0081 `handled_when_moved` check weakened | *The table let a request move with nobody recorded as handling it* |
+| 0081 ASCII name check kept | *A shop named in Hindi could not be requested (… violates check constraint customer_shop_request_name_shape)* |
+
+One process failure worth recording: the first probe was restored with `git checkout -- <file>` before the day's edits had been staged, which restored the file to HEAD and discarded the domain work along with the mutation. The edits were re-applied and staged, and every later probe restored from the index. **Stage before probing.**
+
+**Verification.** `pnpm db:verify` exit 0 — 82 migrations, full down/up ladder and rebuild from zero; `customer_discovery` 72 assertions measured (the static count of `check`/`rejects` calls went 47 → 70). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm contracts:check` (253 routes) exit 0; `pnpm test:unit` 499 pass / 0 fail (+1 controller test).
+
+**Step 6.4: VERIFIED_LOCAL.** Scope notes: the request has no customer nomination UI and the queue has no admin UI, recorded as `backend_only` in the matrix; the vendor-side view of a request (the "vendor pipeline" alternative the step names) is the onboarding lead itself.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

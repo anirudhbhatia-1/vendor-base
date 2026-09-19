@@ -153,6 +153,7 @@ assert(
       '0078_partner_presence',
       '0079_fulfilment_method_unavailable',
       '0080_vendor_self_delivery',
+      '0081_shop_request_pipeline',
     ]),
   'Unexpected reviewed migrations',
 );

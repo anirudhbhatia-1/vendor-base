@@ -4,6 +4,9 @@ import {
   createUuidV7,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Pool } from 'pg';
 import { CatalogueProductService } from '../src/catalogue-products.js';
 import {
@@ -13,8 +16,10 @@ import {
   CustomerDiscoveryService,
 } from '../src/customer-discovery.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
+import { LocalProtectedObjectStorage } from '../src/protected-object-storage.js';
+import { VendorOnboardingService } from '../src/vendor-onboarding.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
-import { check, rejects, vendorContext } from './verify-support.js';
+import { adminContext, check, rejects, vendorContext } from './verify-support.js';
 
 function context(userId: UuidV7) {
   return createRequestContext({
@@ -483,8 +488,15 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
       'Deleting a recent search left it in the list',
     );
 
-    // 7. Favourites and preferred store are independent, and eligibility does
-    // not delete either when the customer moves out of range.
+    // 7. Favourites: added, listed with eligibility derived from the address,
+    // idempotent on a repeat, refused for a store that does not exist, and
+    // actually removed -- the removal had never been asserted, so its DELETE
+    // could have been dropped unnoticed.
+    await discovery.addFavourite({
+      context: context(customerId),
+      vendor_location_id: near.locationId,
+      now,
+    });
     await discovery.addFavourite({
       context: context(customerId),
       vendor_location_id: near.locationId,
@@ -495,10 +507,21 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
       vendor_location_id: far.locationId,
       now,
     });
+    await rejects(
+      () =>
+        discovery.addFavourite({
+          context: context(customerId),
+          vendor_location_id: createUuidV7(),
+          now,
+        }),
+      CustomerDiscoveryNotFoundError,
+      'Favouriting a store that does not exist was not refused as not found',
+    );
     const favourites = await discovery.listFavourites({
       context: context(customerId),
       customer_address_id: addressId as UuidV7,
     });
+    check(favourites.length === 2, 'Favouriting the same store twice listed it twice');
     const nearFavourite = favourites.find((f) => f.vendor_location_id === near.locationId);
     const farFavourite = favourites.find((f) => f.vendor_location_id === far.locationId);
     check(
@@ -509,39 +532,88 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
       farFavourite?.is_currently_eligible === false,
       'An out-of-zone favourite reported eligible',
     );
+    await discovery.removeFavourite({
+      context: context(customerId),
+      vendor_location_id: far.locationId,
+    });
+    const afterRemoval = await discovery.listFavourites({ context: context(customerId) });
+    check(
+      afterRemoval.length === 1 && afterRemoval[0]?.vendor_location_id === near.locationId,
+      'Removing a favourite did not remove it',
+    );
 
+    // Preferred store: exactly one, refused for an unknown store, and shown
+    // with its eligibility from the address in hand rather than dropped when
+    // the store cannot serve that address. The earlier assertion read the same
+    // preference twice with nothing changed between the reads; this one sets
+    // an out-of-zone store and asks the question the requirement asks.
+    await rejects(
+      () =>
+        discovery.setPreferredStore({
+          context: context(customerId),
+          vendor_location_id: createUuidV7(),
+          now,
+        }),
+      CustomerDiscoveryNotFoundError,
+      'Preferring a store that does not exist was not refused as not found',
+    );
     await discovery.setPreferredStore({
       context: context(customerId),
       vendor_location_id: far.locationId,
       now,
     });
+    const preferredFar = await discovery.preferredStore({
+      context: context(customerId),
+      customer_address_id: addressId as UuidV7,
+    });
     check(
-      (await discovery.preferredStore({ context: context(customerId) })) === far.locationId,
+      preferredFar?.vendor_location_id === far.locationId,
       'Setting a preferred store did not persist it',
     );
-    // Moving the "preference" far away conceptually — the store stays
-    // preferred even though it is not currently eligible from this address.
     check(
-      (await discovery.preferredStore({ context: context(customerId) })) !== null,
-      'An eligibility change silently cleared the preferred store',
+      preferredFar?.is_currently_eligible === false,
+      'A preferred store outside the address zone was reported eligible',
+    );
+    check(
+      preferredFar?.location_name === 'SYNTH Far Store',
+      'The preferred store came back without its name',
     );
     await discovery.setPreferredStore({
       context: context(customerId),
       vendor_location_id: near.locationId,
       now,
     });
+    const preferredNear = await discovery.preferredStore({
+      context: context(customerId),
+      customer_address_id: addressId as UuidV7,
+    });
     check(
-      (await discovery.preferredStore({ context: context(customerId) })) === near.locationId,
+      preferredNear?.vendor_location_id === near.locationId &&
+        preferredNear.is_currently_eligible === true,
+      'Changing the preferred store did not replace the earlier one, or lost its eligibility',
+    );
+    const preferredCount = await pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM marketplace.customer_preferred_store WHERE user_id = $1',
+      [customerId],
+    );
+    check(
+      preferredCount.rows[0]?.count === '1',
       'A customer ended up with more than one preferred store',
+    );
+    await discovery.clearPreferredStore({ context: context(customerId) });
+    check(
+      (await discovery.preferredStore({ context: context(customerId) })) === null,
+      'Clearing the preferred store left it set',
     );
 
     // 8. A shop request is created once; a duplicate open request in the same
     // pin is refused, but a new pin is accepted.
-    await discovery.requestShop({
+    const firstRequest = await discovery.requestShop({
       context: context(customerId),
       pin_code: '302001',
       ...jaipur,
       store_name: 'SYNTH Missing Neighbourhood Store',
+      note: '  Opposite the park  ',
       now,
     });
     await rejects(
@@ -556,16 +628,209 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
       CustomerDiscoveryConflictError,
       'A second open shop request in the same pin was accepted',
     );
+    // Submitted a minute *earlier* than the first request, so "oldest first"
+    // is observable: heap order alone would list the first request first.
     const secondPin = await discovery.requestShop({
       context: context(customerId),
       pin_code: '400001',
       ...mumbai,
       store_name: 'SYNTH Missing Store In Another Area',
-      now,
+      now: new Date(now.getTime() - 60_000),
     });
     check(secondPin.lifecycle_state === 'OPEN', 'A request in a different pin was refused');
+    // The service accepted any letter while the table accepted ASCII only, so
+    // a shop named in Hindi was a server fault after passing validation.
+    const hindi = await discovery
+      .requestShop({
+        context: context(customerId),
+        pin_code: '500001',
+        ...jaipur,
+        store_name: 'शर्मा किराना',
+        now,
+      })
+      .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+    check(
+      !(hindi instanceof Error) && hindi.store_name === 'शर्मा किराना',
+      `A shop named in Hindi could not be requested (${String(hindi)})`,
+    );
 
-    // 9. Input and actor boundaries are enforced.
+    // 9. The pipeline side (requirement 4). A request used to be written and
+    // never read: TRIAGED and CLOSED were unreachable. An operator now sees the
+    // queue, triages a request into an onboarding lead, and closes one with the
+    // reason -- after which the customer may ask again for the same pin.
+    const operatorId = createUuidV7();
+    await pool.query(
+      "INSERT INTO marketplace.users (user_id, state, data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+      [operatorId],
+    );
+    await rejects(
+      () => discovery.listShopRequests({ context: context(customerId) }),
+      Error,
+      'A customer read the shop-request queue',
+    );
+    const queue = await discovery.listShopRequests({
+      context: adminContext(operatorId),
+      state: 'OPEN',
+    });
+    const queuedFirst = queue.find(
+      (entry) => entry.customer_shop_request_id === firstRequest.customer_shop_request_id,
+    );
+    check(
+      queuedFirst?.pin_code === '302001' &&
+        queuedFirst.note === 'Opposite the park' &&
+        Math.abs(queuedFirst.latitude - jaipur.latitude) < 1e-6 &&
+        Math.abs(queuedFirst.longitude - jaipur.longitude) < 1e-6,
+      'The open queue did not carry the request as the customer submitted it',
+    );
+    check(
+      !('user_id' in (queuedFirst ?? {})),
+      'The shop-request queue exposed the customer identity',
+    );
+    check(
+      queue.findIndex((e) => e.customer_shop_request_id === secondPin.customer_shop_request_id) <
+        queue.findIndex(
+          (e) => e.customer_shop_request_id === firstRequest.customer_shop_request_id,
+        ),
+      'The queue is not oldest first',
+    );
+    // The table refuses the states the service could reach by mistake: a
+    // close without a reason, and a move nobody is recorded as having made.
+    await rejects(
+      () =>
+        pool.query(
+          `UPDATE marketplace.customer_shop_requests SET lifecycle_state = 'CLOSED', handled_by_user_id = $2
+            WHERE customer_shop_request_id = $1`,
+          [firstRequest.customer_shop_request_id, operatorId],
+        ),
+      Error,
+      'The table let a request close without a reason',
+    );
+    await rejects(
+      () =>
+        pool.query(
+          `UPDATE marketplace.customer_shop_requests SET lifecycle_state = 'TRIAGED'
+            WHERE customer_shop_request_id = $1`,
+          [firstRequest.customer_shop_request_id],
+        ),
+      Error,
+      'The table let a request move with nobody recorded as handling it',
+    );
+
+    await rejects(
+      () =>
+        discovery.triageShopRequest({
+          context: adminContext(operatorId),
+          customer_shop_request_id: firstRequest.customer_shop_request_id,
+          onboarding_case_id: createUuidV7(),
+          now,
+        }),
+      CustomerDiscoveryNotFoundError,
+      'Triage into an onboarding case that does not exist was not refused',
+    );
+    const leadRoot = await mkdtemp(join(tmpdir(), 'discovery-verifier-'));
+    const onboarding = new VendorOnboardingService({
+      connection_string: connectionString,
+      storage: new LocalProtectedObjectStorage({
+        grant_key: 'synthetic-discovery-verifier-grant-key-0001',
+        root_directory: leadRoot,
+      }),
+    });
+    let leadId: UuidV7;
+    try {
+      leadId = await onboarding.createLead({ context: adminContext(operatorId), now });
+    } finally {
+      await onboarding.close();
+      await rm(leadRoot, { force: true, recursive: true });
+    }
+    const triaged = await discovery.triageShopRequest({
+      context: adminContext(operatorId),
+      customer_shop_request_id: firstRequest.customer_shop_request_id,
+      onboarding_case_id: leadId,
+      now,
+    });
+    check(
+      triaged.lifecycle_state === 'TRIAGED' && triaged.onboarding_case_id === leadId,
+      'Triage did not move the request or link the onboarding lead',
+    );
+    await rejects(
+      () =>
+        discovery.triageShopRequest({
+          context: adminContext(operatorId),
+          customer_shop_request_id: firstRequest.customer_shop_request_id,
+          now,
+        }),
+      CustomerDiscoveryConflictError,
+      'A triaged request was triaged again',
+    );
+    await rejects(
+      () =>
+        discovery.closeShopRequest({
+          context: adminContext(operatorId),
+          customer_shop_request_id: secondPin.customer_shop_request_id,
+          resolution: '   ',
+          now,
+        }),
+      CustomerDiscoveryInputError,
+      'A request was closed without a reason',
+    );
+    const closed = await discovery.closeShopRequest({
+      context: adminContext(operatorId),
+      customer_shop_request_id: secondPin.customer_shop_request_id,
+      resolution: 'No serviceable zone in this pin yet',
+      now,
+    });
+    check(
+      closed.lifecycle_state === 'CLOSED' &&
+        closed.resolution === 'No serviceable zone in this pin yet',
+      'Closing did not record the state and the reason',
+    );
+    await rejects(
+      () =>
+        discovery.closeShopRequest({
+          context: adminContext(operatorId),
+          customer_shop_request_id: secondPin.customer_shop_request_id,
+          resolution: 'Again',
+          now,
+        }),
+      CustomerDiscoveryConflictError,
+      'A closed request was closed again',
+    );
+    await rejects(
+      () =>
+        discovery.closeShopRequest({
+          context: adminContext(operatorId),
+          customer_shop_request_id: createUuidV7(),
+          resolution: 'Nothing here',
+          now,
+        }),
+      CustomerDiscoveryNotFoundError,
+      'Closing a request that does not exist was not refused as not found',
+    );
+    const openAfter = await discovery.listShopRequests({
+      context: adminContext(operatorId),
+      state: 'OPEN',
+    });
+    check(
+      !openAfter.some((e) =>
+        [firstRequest.customer_shop_request_id, secondPin.customer_shop_request_id].includes(
+          e.customer_shop_request_id,
+        ),
+      ),
+      'Handled requests still appear in the open queue',
+    );
+    const again = await discovery.requestShop({
+      context: context(customerId),
+      pin_code: '400001',
+      ...mumbai,
+      store_name: 'SYNTH Missing Store In Another Area Again',
+      now,
+    });
+    check(
+      again.lifecycle_state === 'OPEN',
+      'A customer could not ask again for a pin once the earlier request was closed',
+    );
+
+    // 10. Input and actor boundaries are enforced.
     await rejects(
       () =>
         discovery.requestShop({

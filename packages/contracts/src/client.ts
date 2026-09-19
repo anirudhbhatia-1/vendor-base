@@ -18,6 +18,8 @@ import type {
   LocaleLanguage,
   NotificationPreference,
   PaymentMethod,
+  PreferredStore,
+  ShopRequestQueueEntry,
   VendorLocationSettings,
   RecentSearch,
   SearchResult,
@@ -384,8 +386,14 @@ export function createApiClient(options: ApiClientOptions) {
       clearPreferredStore: () =>
         r<{ cleared: boolean }>('/customer/discovery/preferred-store', { method: 'DELETE' }),
 
-      preferredStore: () =>
-        r<{ vendor_location_id: string | null }>('/customer/discovery/preferred-store'),
+      preferredStore: (params?: { customer_address_id?: string }) => {
+        const qs = params?.customer_address_id
+          ? `?customer_address_id=${params.customer_address_id}`
+          : '';
+        return r<{ preferred_store: PreferredStore | null }>(
+          `/customer/discovery/preferred-store${qs}`,
+        );
+      },
 
       requestShop: (body: {
         pin_code: string;
@@ -1110,6 +1118,25 @@ export function createApiClient(options: ApiClientOptions) {
 
         reject: (id: string, body: { expected_version: number; reason_note: string }) =>
           r<Record<string, unknown>>(`/admin/partner-applications/${id}/reject`, {
+            method: 'POST',
+            json: body,
+          }),
+      },
+
+      shopRequests: {
+        list: (params?: { state?: 'CLOSED' | 'OPEN' | 'TRIAGED' }) => {
+          const qs = params?.state ? `?state=${params.state}` : '';
+          return r<{ shop_requests: ShopRequestQueueEntry[] }>(`/admin/shop-requests${qs}`);
+        },
+
+        triage: (id: string, body: { onboarding_case_id?: string } = {}) =>
+          r<ShopRequestQueueEntry>(`/admin/shop-requests/${id}/triage`, {
+            method: 'POST',
+            json: body,
+          }),
+
+        close: (id: string, body: { resolution: string }) =>
+          r<ShopRequestQueueEntry>(`/admin/shop-requests/${id}/close`, {
             method: 'POST',
             json: body,
           }),

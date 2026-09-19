@@ -779,7 +779,7 @@
       "name": "Favourite stores",
       "status": "complete_local_synthetic",
       "target_stage": "4",
-      "notes": "PWA working. Android has hard-coded 'My Stores' tab",
+      "notes": "PWA working. Android has hard-coded 'My Stores' tab. Audit run 37: removal and idempotent add now asserted; an unknown store is refused as not found rather than a 500.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -792,50 +792,55 @@
       },
       "phase_steps": ["6.4"],
       "verified_by": [
-        "apps/api/src/customer-preferences.controller.spec.ts",
+        "database/scripts/verify-customer-discovery.ts",
+        "apps/api/src/customer-discovery.controller.spec.ts",
         "apps/customer-pwa/app/customer-panels.spec.ts"
       ]
     },
     {
       "id": "CUS-21",
       "name": "Preferred store",
-      "status": "complete_local_synthetic",
+      "status": "backend_only",
       "target_stage": "4",
-      "notes": "PWA working. Android not wired",
+      "notes": "Domain and API only: no PWA or Android surface reads or sets it (the earlier 'PWA working' claim was wrong -- only the typed client had the methods). Audit run 37: the read now returns the store with its eligibility from an address, so an eligibility change is shown rather than the preference vanishing.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
         "worker": false,
-        "pwa": true,
-        "android": "unverified",
+        "pwa": false,
+        "android": false,
         "tests": true
       },
       "phase_steps": ["6.4"],
       "verified_by": [
-        "apps/api/src/customer-preferences.controller.spec.ts",
+        "database/scripts/verify-customer-discovery.ts",
+        "apps/api/src/customer-discovery.controller.spec.ts",
         "apps/customer-pwa/app/customer-panels.spec.ts"
       ]
     },
     {
       "id": "CUS-22",
       "name": "Request a shop",
-      "status": "not_started",
+      "status": "backend_only",
       "target_stage": "4",
-      "notes": "No nomination UI or API call",
+      "notes": "Domain, customer API and the operator queue (list, triage into an onboarding lead, close with a reason) exist and are verified; no customer nomination UI and no admin queue UI. The earlier 'not_started' under-claimed: the request and its duplicate guard had existed since migration 0020, but nothing read the queue until audit run 37.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
-        "domain": false,
-        "api": false,
+        "domain": true,
+        "api": true,
         "worker": false,
         "pwa": false,
         "android": false,
-        "tests": false
+        "tests": true
       },
       "phase_steps": ["6.4"],
-      "verified_by": ["apps/api/src/customer-preferences.controller.spec.ts"]
+      "verified_by": [
+        "database/scripts/verify-customer-discovery.ts",
+        "apps/api/src/customer-discovery.controller.spec.ts"
+      ]
     },
     {
       "id": "CUS-23",
@@ -8302,12 +8307,12 @@
     "total_features": 354,
     "launch_features": 309,
     "by_status": {
-      "backend_only": 12,
-      "complete_local_synthetic": 266,
+      "backend_only": 14,
+      "complete_local_synthetic": 265,
       "excluded": 15,
       "gated": 7,
       "later": 23,
-      "not_started": 12,
+      "not_started": 11,
       "partial_workflow": 17,
       "ui_only": 2
     },
@@ -8318,9 +8323,9 @@
       "Launch": 309
     },
     "launch_by_status": {
-      "backend_only": 12,
-      "complete_local_synthetic": 266,
-      "not_started": 12,
+      "backend_only": 14,
+      "complete_local_synthetic": 265,
+      "not_started": 11,
       "partial_workflow": 17,
       "ui_only": 2
     }
