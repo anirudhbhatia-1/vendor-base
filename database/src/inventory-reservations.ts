@@ -393,6 +393,87 @@ async function expireLocked(
   return reservationRecord(requiredRow(result.rows, 'Expired reservation was not returned'));
 }
 
+/**
+ * Releases reservations inside a caller's transaction, restoring counted stock
+ * and recomputing the shelf state, with the append-only event each release
+ * leaves. The one release routine.
+ *
+ * The checkout and fulfilment modules each had a private copy: the checkout's
+ * gave the units back but left `availability_state` at OUT_OF_STOCK, so a
+ * declined payment left the shelf saying sold out with stock on it; the
+ * fulfilment's marked the reservation RELEASED and never gave the units back
+ * at all, so every vendor decline, timeout or customer cancellation of a
+ * counted item lost that stock for good. Neither wrote an inventory event.
+ *
+ * Reservations not in one of `states` are skipped, not refused: a caller
+ * releasing "whatever this quote still holds" is not wrong because one line
+ * was already expired by the sweep.
+ */
+export async function releaseReservationsLocked(
+  client: PoolClient,
+  input: {
+    readonly context: RequestContext;
+    readonly now: Date;
+    readonly reason_code: string;
+    readonly reservation_ids: readonly UuidV7[];
+    readonly states?: readonly InventoryReservationState[];
+  },
+): Promise<readonly InventoryReservationRecord[]> {
+  const who = actor(input.context, ['admin', 'customer', 'system', 'vendor_staff']);
+  const states = input.states ?? ['SOFT_HELD', 'PROVISIONAL'];
+  const released: InventoryReservationRecord[] = [];
+  for (const reservationId of input.reservation_ids) {
+    const locked = await client.query<ReservationRow>(
+      `SELECT * FROM marketplace.inventory_reservations WHERE reservation_id=$1 FOR UPDATE`,
+      [reservationId],
+    );
+    const reservation = locked.rows[0];
+    if (!reservation || !states.includes(reservation.reservation_state)) continue;
+    const item = await lockItem(client, parseUuidV7(reservation.inventory_item_id));
+    const nextItemVersion = item.version + 1;
+    const nextReservationVersion = reservation.version + 1;
+    let available =
+      item.exact_available_quantity === null ? null : Number(item.exact_available_quantity);
+    if (reservation.counted_stock_applied && available !== null) {
+      available += Number(reservation.quantity);
+      await updateItemQuantity(client, item, available, nextItemVersion, input.now);
+    } else {
+      await client.query(
+        `UPDATE marketplace.inventory_items SET version=$2, updated_at=$3
+          WHERE inventory_item_id=$1`,
+        [item.inventory_item_id, nextItemVersion, input.now],
+      );
+    }
+    const result = await client.query<ReservationRow>(
+      `UPDATE marketplace.inventory_reservations
+          SET reservation_state='RELEASED', version=$2, updated_at=$3
+        WHERE reservation_id=$1 RETURNING *`,
+      [reservation.reservation_id, nextReservationVersion, input.now],
+    );
+    await appendEvent(client, {
+      actor_id: who.id,
+      actor_kind: who.kind,
+      context: input.context,
+      counted_stock_applied: reservation.counted_stock_applied,
+      event_type: 'RELEASED',
+      exact_available_quantity: available,
+      inventory_item_id: parseUuidV7(item.inventory_item_id),
+      item_version: nextItemVersion,
+      now: input.now,
+      previous_state: reservation.reservation_state,
+      quantity: Number(reservation.quantity),
+      reason_code: input.reason_code,
+      reservation_id: parseUuidV7(reservation.reservation_id),
+      reservation_version: nextReservationVersion,
+      resulting_state: 'RELEASED',
+    });
+    released.push(
+      reservationRecord(requiredRow(result.rows, 'Released reservation was not returned')),
+    );
+  }
+  return Object.freeze(released);
+}
+
 export class InventoryReservationService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {

@@ -324,7 +324,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       );
       const quotes = await pass(
         'checkout.expireQuotes',
-        () => this.#checkout.expireQuotes({ now }),
+        () => this.#checkout.expireQuotes({ context, now }),
         0,
       );
       const accepts = await pass(

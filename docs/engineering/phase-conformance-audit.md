@@ -1326,6 +1326,43 @@ The pure pricing function was in good shape. The step's requirements are about w
 
 **Step 7.1: VERIFIED_LOCAL**, with the tax-basis and straight-line-distance scope notes carried for an owner.
 
+## Run 42 (19 September 2026) — step 7.2, inventory soft holds
+
+The inventory module itself was well built and well verified — concurrency, replay, release, expiry, all asserted since run 26's era. The defects were in the two modules that bypassed it. Each had a private copy of "release a hold", and each copy was wrong in its own way. Fourteen connected assertions added; six mutation probes, all caught, one redone after the race it targeted did not materialise on its own.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Create an expiring hold only during checkout quoting where policy permits | Met: the cart never reserves (run 39), the quote holds one soft hold per line expiring with the quote, and a blocked store consumes nothing — now asserted. |
+| 2 | Scope reservations to vendor location and product variant | Met at location and product: `inventory_items` is keyed by `(vendor_location_id, product_reference)` and the catalogue creates one variant per product, so the scope is equivalent today. Scope note: a second variant of one product would share its stock count. |
+| 3 | Prevent over-reservation under concurrency | Met in the module; **the checkout path had no such test** — P42-03. |
+| 4 | Release or expire invalid, abandoned, timed-out or failed groups | **Two of the three release paths were broken** — P42-01, P42-02. |
+| 5 | Preserve independent sibling reservations | Met and now asserted through the checkout: a competitor is blocked on the held store alone and takes nothing from it. |
+
+**P42-01 — the checkout's release could not give back the last units, and stalled the sweep.** `GroupedCheckoutService.#releaseQuote` added the units back to `exact_available_quantity` and left `availability_state` alone. The table's `inventory_counted_state_shape` check forbids a positive quantity at `OUT_OF_STOCK`, so whenever a hold had taken the last units — the case a hold exists for — the release was refused by the database: a declined payment on such a quote failed outright with a 500 instead of a decline, and `expireQuotes`, which sweeps every lapsed quote in one transaction, threw on the first such quote and expired none of the others until the inventory worker's own sweep had expired the reservations first. Probe 35 reproduces the symptom exactly: *"raised error: new row … violates check constraint inventory_counted_state_shape"*.
+
+**P42-02 — the fulfilment's release never returned the units at all.** `VendorFulfilmentService.#releaseHolds` set the reservations to `RELEASED` and stopped. Every vendor decline, accept-deadline timeout and customer cancellation of a counted item lost that stock for good — the shelf said 6 with 8 on it (probe 40: *quantity 6, events 0*). Neither module wrote an inventory event, so the append-only history had gaps exactly where stock moved.
+
+Both now call one exported routine, `releaseReservationsLocked`, which locks the reservation and the item, restores counted units through the same `updateItemQuantity` the module's own release and expiry use (state recomputed), transitions to `RELEASED` and appends the event with the reason (`PAYMENT_DECLINED`, `PAYMENT_FAILED`, `QUOTE_EXPIRED`, `VENDOR_DECLINED`, `ACCEPT_DEADLINE_TIMEOUT`, `CUSTOMER_CANCELLED`). `place()` used to sweep every customer's lapsed quotes under the caller's context; it now sweeps the caller's own, and the worker's sweep carries the worker's system context, so the events name who released.
+
+**Also found: a re-quote was blocked by its own dead hold.** A quote lapses after five minutes; its holds stay `SOFT_HELD` until the inventory sweep (every 15 s) reaches them. A customer re-quoting in that window read stock already reduced by their own lapsed hold, so the last units on the shelf were "unavailable" to the only customer holding them. `createQuote` now gives back the same cart's lapsed holds and marks those quotes `EXPIRED` before it reads stock.
+
+**P42-03 — the race through the checkout had never been run, and running it once proved nothing.** The first assertion started two quotes for the last unit with `Promise.allSettled` and saw one winner — but so did probe 38 with the row lock removed, because the two transactions happened not to interleave. The verifier now holds the item's row lock in a third connection while both quotes start, so each reads one unit before either can take it, then lets go: the correct path re-reads under the lock and the second quote finds nothing; the mutant held the unit twice and was caught by the event table's `(item, version)` uniqueness before the assertion could count the holds — the database's second line of defence, recorded as such.
+
+**Mutation results.** Six probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Release restores units without the shelf state (the old checkout behaviour) | *A declined authorization did not surface as a decline (raised error: … violates check constraint "inventory_counted_state_shape")* |
+| Release never gives the units back | *A declined payment did not give the shelf back with its state recomputed ({"quantity":"0","state":"OUT_OF_STOCK"})* |
+| Re-quote does not clear the cart's lapsed quotes | *Re-quoting after one's own quote lapsed was blocked by the dead hold (Every cart group is blocked)* |
+| Quote reads inventory without the row lock — interleaving left to chance | **not caught**; redone below |
+| Same, with the interleaving forced by a held row lock | *Two customers quoting the last unit at once did not produce exactly one hold (loser: duplicate key … inventory_event_item_version_unique)* |
+| Fulfilment release back to its old inline `UPDATE` | *A declined order's units were not returned to the shelf with the release recorded ({"quantity":"6","events":"0"})* |
+
+**Verification.** `pnpm db:verify` exit 0 — 84 migrations, full ladder; `grouped_checkout` 45 assertions (32 after run 41), `vendor_fulfilment` 173 (172). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 523 pass / 0 fail; `pnpm test:integration` exit 0 (the worker's quote sweep now takes its context). The checkout verifier's remaining fixed address reference is unique per run.
+
+**Step 7.2: VERIFIED_LOCAL**, with the variant-scope note carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

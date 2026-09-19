@@ -6064,7 +6064,7 @@
       "name": "Reservation lifecycle",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "SOFT_HELD -> PROVISIONAL -> COMMITTED/RELEASED/EXPIRED",
+      "notes": "SOFT_HELD -> PROVISIONAL -> COMMITTED/RELEASED/EXPIRED. Audit run 42: one release routine for checkout and fulfilment; before it a vendor decline/timeout/cancellation of a counted item never returned the units, and a declined payment on a sold-out-by-quote item failed on the counted-state check.",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6087,7 +6087,7 @@
       "name": "Last-unit concurrency protection",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "SELECT FOR UPDATE; atomic decrement",
+      "notes": "SELECT FOR UPDATE; atomic decrement. Audit run 42: proven through the checkout path with the interleaving forced by a held row lock (two customers, one unit, exactly one hold).",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {

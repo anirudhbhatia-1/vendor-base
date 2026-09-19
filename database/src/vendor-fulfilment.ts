@@ -8,7 +8,10 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
-import { InventoryReservationService } from './inventory-reservations.js';
+import {
+  InventoryReservationService,
+  releaseReservationsLocked,
+} from './inventory-reservations.js';
 import { completeVendorOrder, publishVendorOrderTransition } from './vendor-order-completion.js';
 import { transaction as tx } from './transaction.js';
 
@@ -927,7 +930,13 @@ export class VendorFulfilmentService {
           WHERE vendor_order_id=$1`,
         [input.vendor_order_id, input.reason_code, input.note ?? null, version, now],
       );
-      await this.#releaseHolds(client, input.vendor_order_id);
+      await this.#releaseHolds(
+        client,
+        input.context,
+        input.vendor_order_id,
+        now,
+        'VENDOR_DECLINED',
+      );
       await releaseAuthorizationForEndedOrder(client, {
         actor_id: userId,
         actor_kind: 'vendor_staff',
@@ -989,7 +998,7 @@ export class VendorFulfilmentService {
             WHERE vendor_order_id=$1`,
           [orderId, row.version + 1, now],
         );
-        await this.#releaseHolds(client, orderId);
+        await this.#releaseHolds(client, input.context, orderId, now, 'ACCEPT_DEADLINE_TIMEOUT');
         await releaseAuthorizationForEndedOrder(client, {
           actor_id: systemActorId,
           actor_kind: 'system',
@@ -2709,7 +2718,13 @@ export class VendorFulfilmentService {
       );
       // A cancelled order was leaving its stock held, so a sibling order in the
       // same group could be starved of inventory nobody was going to buy.
-      await this.#releaseHolds(client, input.vendor_order_id);
+      await this.#releaseHolds(
+        client,
+        input.context,
+        input.vendor_order_id,
+        now,
+        'CUSTOMER_CANCELLED',
+      );
       await releaseAuthorizationForEndedOrder(client, {
         actor_id: customerId,
         actor_kind: 'customer',
@@ -3042,17 +3057,32 @@ export class VendorFulfilmentService {
   // Internal helpers
   // -----------------------------------------------------------------------
 
-  async #releaseHolds(client: PoolClient, vendorOrderId: UuidV7): Promise<void> {
-    // Cancel the vendor's SOFT_HELD/PROVISIONAL reservations so a sibling
-    // vendor_order in the same checkout group is not starved.
-    await client.query(
-      `UPDATE marketplace.inventory_reservations ir
-          SET reservation_state='RELEASED', version=version+1, updated_at=clock_timestamp()
+  /**
+   * Gives back what an ended order still holds, so a sibling order in the
+   * same checkout group is not starved and the shop's count is right. This
+   * used to flip the reservations to RELEASED and stop: the units were never
+   * returned to `exact_available_quantity`, so every decline, timeout or
+   * cancellation of a counted item lost that stock for good.
+   */
+  async #releaseHolds(
+    client: PoolClient,
+    context: RequestContext,
+    vendorOrderId: UuidV7,
+    now: Date,
+    reasonCode: string,
+  ): Promise<void> {
+    const held = await client.query<{ reservation_id: string }>(
+      `SELECT l.inventory_reservation_id AS reservation_id
          FROM marketplace.vendor_order_lines l
-        WHERE l.vendor_order_id=$1 AND l.inventory_reservation_id=ir.reservation_id
-          AND ir.reservation_state IN ('SOFT_HELD','PROVISIONAL')`,
+        WHERE l.vendor_order_id=$1 AND l.inventory_reservation_id IS NOT NULL`,
       [vendorOrderId],
     );
+    await releaseReservationsLocked(client, {
+      context,
+      now,
+      reason_code: reasonCode,
+      reservation_ids: held.rows.map((row) => parseUuidV7(row.reservation_id)),
+    });
   }
 
   async #recordPick(input: {

@@ -10,6 +10,7 @@ import {
 import { Pool, type PoolClient } from 'pg';
 import { calculateCheckoutPricing } from './checkout-pricing.js';
 import { resolveFinancialPolicy } from './financial-policy.js';
+import { releaseReservationsLocked } from './inventory-reservations.js';
 import {
   LocalFakeMoneyProvider,
   type FakeProviderScenario,
@@ -137,12 +138,6 @@ type VendorOrderProjection = Record<string, unknown> & {
   readonly vendor_order_id: string;
   readonly version: number;
 };
-type ReservationReleaseRow = {
-  readonly counted_stock_applied: boolean;
-  readonly inventory_item_id: string;
-  readonly quantity: string | number;
-  readonly reservation_id: string;
-};
 
 function customer(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'customer')
@@ -205,6 +200,29 @@ export class GroupedCheckoutService {
       );
       if (activeQuote.rows[0])
         return this.#projectQuote(client, activeQuote.rows[0].checkout_quote_id);
+      // This cart's earlier quotes that have lapsed still hold their units
+      // until the sweep reaches them, and the stock read below would count
+      // those units as gone -- so a customer re-quoting the last units on the
+      // shelf was blocked by their own dead hold. Give them back first.
+      const lapsed = await client.query<{ checkout_quote_id: UuidV7 }>(
+        `SELECT checkout_quote_id FROM marketplace.checkout_quotes
+          WHERE cart_id=$1 AND customer_user_id=$2 AND lifecycle_state='ACTIVE' AND expires_at<=$3
+          FOR UPDATE`,
+        [input.cart_id, userId, now],
+      );
+      for (const quote of lapsed.rows) {
+        await this.#releaseQuote(
+          client,
+          input.context,
+          quote.checkout_quote_id,
+          now,
+          'QUOTE_EXPIRED',
+        );
+        await client.query(
+          `UPDATE marketplace.checkout_quotes SET lifecycle_state='EXPIRED',updated_at=$2 WHERE checkout_quote_id=$1`,
+          [quote.checkout_quote_id, now],
+        );
+      }
       const groups = await client.query<GroupRow>(
         `SELECT g.cart_vendor_group_id,g.vendor_location_id,g.fulfilment_method,g.tip_minor::text,l.minimum_order_minor::text,
           ST_Distance(l.coordinates,a.coordinates)::bigint::text route_metres,
@@ -430,7 +448,10 @@ export class GroupedCheckoutService {
   }) {
     const userId = customer(input.context);
     const now = input.now ?? new Date();
-    await this.expireQuotes({ now });
+    // Only this customer's lapsed quotes: the sweep of everyone's belongs to
+    // the worker, not to a customer's request, and the release events it
+    // writes name the actor who released.
+    await this.expireQuotes({ context: input.context, customer_user_id: userId, now });
     const result = await tx(this.#pool, async (client) => {
       const existing = await client.query(
         `SELECT * FROM marketplace.checkout_groups
@@ -446,7 +467,13 @@ export class GroupedCheckoutService {
       const q = quote.rows[0];
       if (!q) throw new CheckoutNotFoundError();
       if (q.expires_at <= now) {
-        await this.#releaseQuote(client, input.checkout_quote_id, now);
+        await this.#releaseQuote(
+          client,
+          input.context,
+          input.checkout_quote_id,
+          now,
+          'QUOTE_EXPIRED',
+        );
         await client.query(
           `UPDATE marketplace.checkout_quotes SET lifecycle_state='EXPIRED',updated_at=$2 WHERE checkout_quote_id=$1`,
           [input.checkout_quote_id, now],
@@ -512,7 +539,13 @@ export class GroupedCheckoutService {
         resulting_state: paymentState,
       });
       if (outcome === 'DECLINED') {
-        await this.#releaseQuote(client, input.checkout_quote_id, now);
+        await this.#releaseQuote(
+          client,
+          input.context,
+          input.checkout_quote_id,
+          now,
+          'PAYMENT_DECLINED',
+        );
         await client.query(
           `UPDATE marketplace.checkout_quotes SET lifecycle_state='INVALID',updated_at=$2 WHERE checkout_quote_id=$1`,
           [input.checkout_quote_id, now],
@@ -644,7 +677,13 @@ export class GroupedCheckoutService {
           checkout: await this.#projectCheckout(client, row.checkout_group_id),
         };
       if (input.outcome === 'FAILED') {
-        await this.#releaseQuote(client, row.checkout_quote_id, now);
+        await this.#releaseQuote(
+          client,
+          input.context,
+          row.checkout_quote_id,
+          now,
+          'PAYMENT_FAILED',
+        );
         await client.query(
           `UPDATE marketplace.payment_transactions SET payment_state='FAILED',version=version+1,updated_at=$2 WHERE payment_transaction_id=$1`,
           [row.payment_transaction_id, now],
@@ -733,16 +772,28 @@ export class GroupedCheckoutService {
     });
   }
 
-  async expireQuotes(input: { readonly now?: Date } = {}) {
+  async expireQuotes(input: {
+    readonly context: RequestContext;
+    readonly customer_user_id?: UuidV7;
+    readonly now?: Date;
+  }) {
     const now = input.now ?? new Date();
     return tx(this.#pool, async (client) => {
       const quotes = await client.query<{ checkout_quote_id: UuidV7 }>(
         `SELECT checkout_quote_id FROM marketplace.checkout_quotes
-          WHERE lifecycle_state='ACTIVE' AND expires_at<=$1 FOR UPDATE SKIP LOCKED`,
-        [now],
+          WHERE lifecycle_state='ACTIVE' AND expires_at<=$1
+            AND ($2::uuid IS NULL OR customer_user_id=$2)
+          FOR UPDATE SKIP LOCKED`,
+        [now, input.customer_user_id ?? null],
       );
       for (const quote of quotes.rows) {
-        await this.#releaseQuote(client, quote.checkout_quote_id, now);
+        await this.#releaseQuote(
+          client,
+          input.context,
+          quote.checkout_quote_id,
+          now,
+          'QUOTE_EXPIRED',
+        );
         await client.query(
           `UPDATE marketplace.checkout_quotes SET lifecycle_state='EXPIRED',updated_at=$2 WHERE checkout_quote_id=$1`,
           [quote.checkout_quote_id, now],
@@ -1200,21 +1251,32 @@ export class GroupedCheckoutService {
       ],
     );
   }
-  async #releaseQuote(client: PoolClient, id: UuidV7, now: Date) {
-    const rows = await client.query<ReservationReleaseRow>(
-      `SELECT r.* FROM marketplace.checkout_quote_lines l JOIN marketplace.inventory_reservations r ON r.reservation_id=l.inventory_reservation_id JOIN marketplace.checkout_quote_groups g ON g.checkout_quote_group_id=l.checkout_quote_group_id WHERE g.checkout_quote_id=$1 AND r.reservation_state='SOFT_HELD' FOR UPDATE OF r`,
+  /**
+   * Gives back what a quote still holds. Restoring the units, recomputing the
+   * shelf state and recording the event are the inventory module's job; this
+   * used to do the first alone, so a declined payment that had taken the last
+   * units left the item saying OUT_OF_STOCK with stock on it.
+   */
+  async #releaseQuote(
+    client: PoolClient,
+    context: RequestContext,
+    id: UuidV7,
+    now: Date,
+    reasonCode: string,
+  ) {
+    const rows = await client.query<{ reservation_id: string }>(
+      `SELECT l.inventory_reservation_id AS reservation_id
+         FROM marketplace.checkout_quote_lines l
+         JOIN marketplace.checkout_quote_groups g ON g.checkout_quote_group_id=l.checkout_quote_group_id
+        WHERE g.checkout_quote_id=$1`,
       [id],
     );
-    for (const r of rows.rows) {
-      if (r.counted_stock_applied)
-        await client.query(
-          `UPDATE marketplace.inventory_items SET exact_available_quantity=exact_available_quantity+$2,version=version+1,updated_at=$3 WHERE inventory_item_id=$1`,
-          [r.inventory_item_id, r.quantity, now],
-        );
-      await client.query(
-        `UPDATE marketplace.inventory_reservations SET reservation_state='RELEASED',version=version+1,updated_at=$2 WHERE reservation_id=$1`,
-        [r.reservation_id, now],
-      );
-    }
+    await releaseReservationsLocked(client, {
+      context,
+      now,
+      reason_code: reasonCode,
+      reservation_ids: rows.rows.map((row) => parseUuidV7(row.reservation_id)),
+      states: ['SOFT_HELD'],
+    });
   }
 }

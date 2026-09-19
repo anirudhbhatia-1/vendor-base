@@ -225,6 +225,29 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       declinedHold.rows.every((row) => row.state === 'RELEASED'),
       'Declined order did not release its own reservations',
     );
+    // 7.2 requirement 4: releasing a failed order's hold gives the units back.
+    // The declined order held 2 of the 8 the store started with; the shelf
+    // must say 8 again, with the availability recomputed, and the inventory
+    // history must carry the release. It used to flip the reservation to
+    // RELEASED and keep the 2 units gone.
+    const restocked = await pool.query<{ quantity: string; state: string; events: string }>(
+      `SELECT i.exact_available_quantity::text AS quantity, i.availability_state AS state,
+              (SELECT count(*) FROM marketplace.inventory_events e
+                JOIN marketplace.vendor_order_lines l ON l.inventory_reservation_id=e.reservation_id
+                WHERE l.vendor_order_id=$1 AND e.event_type='RELEASED'
+                  AND e.reason_code='VENDOR_DECLINED')::text AS events
+         FROM marketplace.inventory_items i
+         JOIN marketplace.vendor_order_lines l ON l.vendor_order_id=$1
+         JOIN marketplace.inventory_reservations ir ON ir.reservation_id=l.inventory_reservation_id
+        WHERE i.inventory_item_id=ir.inventory_item_id`,
+      [orderB.vendor_order_id],
+    );
+    check(
+      restocked.rows.length >= 1 &&
+        restocked.rows.every((row) => row.quantity === '8' && row.state === 'AVAILABLE') &&
+        restocked.rows[0]?.events === String(restocked.rows.length),
+      `A declined order's units were not returned to the shelf with the release recorded (${JSON.stringify(restocked.rows)})`,
+    );
 
     // 8.2 -- vendor A accepts. Version guard rejects stale expected_version.
     await rejects(

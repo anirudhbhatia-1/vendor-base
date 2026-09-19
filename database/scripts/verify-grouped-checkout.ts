@@ -4,7 +4,12 @@ import { Pool } from 'pg';
 import { CatalogueProductService } from '../src/catalogue-products.js';
 import { CustomerCartService } from '../src/customer-cart.js';
 import { resolveFinancialPolicy } from '../src/financial-policy.js';
-import { CheckoutNotFoundError, GroupedCheckoutService } from '../src/grouped-checkout.js';
+import {
+  CheckoutConflictError,
+  CheckoutNotFoundError,
+  CheckoutPaymentDeclinedError,
+  GroupedCheckoutService,
+} from '../src/grouped-checkout.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
 import { calculateDistanceAmount } from '../src/money-policy.js';
 import {
@@ -15,7 +20,7 @@ import {
   validateConfigurationVersion,
 } from '../src/versioned-configuration.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
-import { check, customerContext, vendorContext } from './verify-support.js';
+import { check, customerContext, rejects, vendorContext } from './verify-support.js';
 
 async function rejectsNotFound(work: () => Promise<unknown>) {
   try {
@@ -150,6 +155,39 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       );
     }
     check(quote.total_minor === 23_000, 'The quote total is not the sum of its groups');
+    // 7.2: the blocked store consumed nothing; each quoted line holds exactly
+    // its quantity against its own store's item, expiring with the quote.
+    const blockedStore = stores[2];
+    check(blockedStore !== undefined, 'The out-of-stock fixture store is missing');
+    const holds = await pool.query<{
+      vendor_location_id: string;
+      reservation_state: string;
+      quantity: string;
+      expires_at: Date;
+    }>(
+      `SELECT ir.vendor_location_id, ir.reservation_state, ir.quantity::text, ir.expires_at
+         FROM marketplace.inventory_reservations ir
+         JOIN marketplace.checkout_quote_lines ql ON ql.inventory_reservation_id=ir.reservation_id
+         JOIN marketplace.checkout_quote_groups qg USING (checkout_quote_group_id)
+        WHERE qg.checkout_quote_id=$1`,
+      [quote.checkout_quote_id],
+    );
+    check(
+      holds.rows.length === 2 &&
+        holds.rows.every(
+          (row) =>
+            row.reservation_state === 'SOFT_HELD' &&
+            row.quantity === '1' &&
+            row.expires_at.getTime() === quote.expires_at.getTime() &&
+            row.vendor_location_id !== blockedStore.locationId,
+        ),
+      `The quote's holds are not one soft hold per quoted line, expiring with the quote (${JSON.stringify(holds.rows)})`,
+    );
+    const blockedHolds = await pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM marketplace.inventory_reservations WHERE vendor_location_id=$1',
+      [blockedStore.locationId],
+    );
+    check(blockedHolds.rows[0]?.count === '0', 'A blocked store group consumed stock');
     check(
       quote.blocked_groups.length === 1 &&
         quote.blocked_groups[0]?.reason_code === 'INVENTORY_UNAVAILABLE',
@@ -226,8 +264,13 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
     await pool.query(
       `INSERT INTO marketplace.customer_addresses
         (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
-       VALUES ($1,$2,'SYNTH-ADDRESS-UNKNOWN','SYNTH Unknown Home','302020',ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
-      [unknownAddress, unknownCustomer, createUuidV7()],
+       VALUES ($1,$2,'SYNTH-ADDRESS-UNKNOWN-' || $4,'SYNTH Unknown Home','302020',ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
+      [
+        unknownAddress,
+        unknownCustomer,
+        createUuidV7(),
+        unknownCustomer.replaceAll('-', '').slice(-10).toUpperCase(),
+      ],
     );
     const unknownCart = await carts.currentCart({ context: customerContext(unknownCustomer), now });
     const store0 = stores[0];
@@ -432,6 +475,275 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       withdrawnQuote.groups.length === 1 &&
         withdrawnQuote.groups[0]?.vendor_location_id === deliveringStore.locationId,
       'Blocking the withdrawn group also dropped its healthy sibling',
+    );
+
+    // 7.2, the release paths. A store with three units; one customer takes
+    // them all at the quote.
+    async function customerWithCart(label: string) {
+      const userId = createUuidV7();
+      await pool.query(
+        "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+        [userId],
+      );
+      const holdAddressId = createUuidV7();
+      await pool.query(
+        `INSERT INTO marketplace.customer_addresses
+          (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
+         VALUES ($1,$2,'SYNTH-ADDRESS-HOLD-' || $4,'SYNTH Hold Home','302020',ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
+        [
+          holdAddressId,
+          userId,
+          createUuidV7(),
+          `${label}-${userId.replaceAll('-', '').slice(-10).toUpperCase()}`,
+        ],
+      );
+      const holdCart = await carts.currentCart({ context: customerContext(userId), now });
+      await carts.setCartAddress({
+        context: customerContext(userId),
+        customer_address_id: holdAddressId,
+        now,
+      });
+      return { userId, cartId: holdCart.cart_id };
+    }
+    const shelfStore = await createDiscoverableStoreFixture(pool, {
+      location_name: 'SYNTH Checkout Shelf Store',
+      latitude: 26.91,
+      longitude: 75.81,
+    });
+    const shelfReference = `SYNTH-PROD-SHELF-${Date.now()}`;
+    const shelfProduct = await catalogue.createProduct({
+      context: vendorContext(shelfStore.ownerUserId),
+      vendor_location_id: shelfStore.locationId,
+      product_reference: shelfReference,
+      title: 'SYNTH Shelf Product',
+      category: 'FRUIT_VEGETABLE',
+      unit_label: 'EACH',
+      tax_basis: 'EXEMPT',
+      variable_weight: false,
+      sku: `SYNTH-SKU-SHELF-${Date.now()}`,
+      variant_title: 'SYNTH Shelf Variant',
+      price_minor: 10_000,
+      initial_stock_quantity: 3,
+      low_stock_threshold: 1,
+      now,
+    });
+    const shelf = async () => {
+      const row = await pool.query<{ quantity: string; state: string; holds: string }>(
+        `SELECT i.exact_available_quantity::text AS quantity, i.availability_state AS state,
+                (SELECT count(*) FROM marketplace.inventory_reservations r
+                  WHERE r.inventory_item_id=i.inventory_item_id AND r.reservation_state='SOFT_HELD')::text AS holds
+           FROM marketplace.inventory_items i
+          WHERE i.vendor_location_id=$1 AND i.product_reference=$2`,
+        [shelfStore.locationId, shelfReference],
+      );
+      return row.rows[0];
+    };
+    const taker = await customerWithCart('TAKER');
+    await carts.addLine({
+      context: customerContext(taker.userId),
+      vendor_location_id: shelfStore.locationId,
+      catalogue_variant_id: shelfProduct.catalogue_variant_id,
+      quantity: 3,
+      now,
+    });
+    const takeAll = await checkout.createQuote({
+      context: customerContext(taker.userId),
+      cart_id: taker.cartId,
+      now,
+    });
+    const heldShelf = await shelf();
+    check(
+      takeAll.groups.length === 1 &&
+        heldShelf?.quantity === '0' &&
+        heldShelf.state === 'OUT_OF_STOCK' &&
+        heldShelf.holds === '1',
+      `Taking the whole shelf at the quote did not hold it (${JSON.stringify(heldShelf)})`,
+    );
+
+    // Declined payment: the units come back, and so does the shelf state.
+    // The release used to give the units back and leave OUT_OF_STOCK on the
+    // item, so the shop's page said sold out with three on the shelf.
+    await rejects(
+      () =>
+        checkout.place({
+          context: customerContext(taker.userId),
+          checkout_quote_id: takeAll.checkout_quote_id,
+          provider_scenario: 'DECLINE',
+          idempotency_key: `phase7-decline-${taker.userId}`,
+          now: new Date(now.getTime() + 1_000),
+        }),
+      CheckoutPaymentDeclinedError,
+      'A declined authorization did not surface as a decline',
+    );
+    const declinedShelf = await shelf();
+    check(
+      declinedShelf?.quantity === '3' &&
+        declinedShelf.state === 'AVAILABLE' &&
+        declinedShelf.holds === '0',
+      `A declined payment did not give the shelf back with its state recomputed (${JSON.stringify(declinedShelf)})`,
+    );
+    const declinedEvents = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM marketplace.inventory_events e
+         JOIN marketplace.checkout_quote_lines ql ON ql.inventory_reservation_id=e.reservation_id
+         JOIN marketplace.checkout_quote_groups qg USING (checkout_quote_group_id)
+        WHERE qg.checkout_quote_id=$1 AND e.event_type='RELEASED' AND e.reason_code='PAYMENT_DECLINED'`,
+      [takeAll.checkout_quote_id],
+    );
+    check(
+      declinedEvents.rows[0]?.count === '1',
+      'The release after a declined payment left no inventory event',
+    );
+
+    // A lapsed quote of one's own is not a competitor. The customer quotes the
+    // whole shelf again, lets the quote lapse, and re-quotes before the sweep
+    // has run: the new quote must not be blocked by the dead hold.
+    const secondTake = await checkout.createQuote({
+      context: customerContext(taker.userId),
+      cart_id: taker.cartId,
+      now: new Date(now.getTime() + 2_000),
+    });
+    check(
+      secondTake.checkout_quote_id !== takeAll.checkout_quote_id && (await shelf())?.holds === '1',
+      'The second quote did not take a fresh hold',
+    );
+    const afterLapse = new Date(secondTake.expires_at.getTime() + 1_000);
+    const requote = await checkout
+      .createQuote({
+        context: customerContext(taker.userId),
+        cart_id: taker.cartId,
+        now: afterLapse,
+      })
+      .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+    const requotedShelf = await shelf();
+    check(
+      !(requote instanceof Error) &&
+        requote.checkout_quote_id !== secondTake.checkout_quote_id &&
+        requote.groups.length === 1 &&
+        requote.blocked_groups.length === 0 &&
+        requotedShelf?.quantity === '0' &&
+        requotedShelf.holds === '1',
+      `Re-quoting after one's own quote lapsed was blocked by the dead hold (${String(requote instanceof Error ? requote : requote.blocked_groups.map((b) => b.reason_code))}; shelf ${JSON.stringify(requotedShelf)})`,
+    );
+    const lapsedQuote = await pool.query<{ lifecycle_state: string }>(
+      'SELECT lifecycle_state FROM marketplace.checkout_quotes WHERE checkout_quote_id=$1',
+      [secondTake.checkout_quote_id],
+    );
+    check(
+      lapsedQuote.rows[0]?.lifecycle_state === 'EXPIRED',
+      'The lapsed quote was not marked expired when its holds were given back',
+    );
+
+    // Sibling reservations are independent. Another customer wanting one of
+    // the held units and one of store A's is blocked on the shelf store only,
+    // and takes nothing from it.
+    const sibling = await customerWithCart('SIBLING');
+    const storeA = stores[0];
+    const productA = products[0];
+    check(storeA !== undefined && productA !== undefined, 'Store A fixture missing');
+    await carts.addLine({
+      context: customerContext(sibling.userId),
+      vendor_location_id: shelfStore.locationId,
+      catalogue_variant_id: shelfProduct.catalogue_variant_id,
+      quantity: 1,
+      now: afterLapse,
+    });
+    await carts.addLine({
+      context: customerContext(sibling.userId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: productA.catalogue_variant_id,
+      quantity: 1,
+      now: afterLapse,
+    });
+    const siblingQuote = await checkout.createQuote({
+      context: customerContext(sibling.userId),
+      cart_id: sibling.cartId,
+      now: afterLapse,
+    });
+    check(
+      siblingQuote.groups.length === 1 &&
+        siblingQuote.groups[0]?.vendor_location_id === storeA.locationId &&
+        siblingQuote.blocked_groups.length === 1 &&
+        siblingQuote.blocked_groups[0]?.vendor_location_id === shelfStore.locationId &&
+        siblingQuote.blocked_groups[0].reason_code === 'INVENTORY_UNAVAILABLE' &&
+        (await shelf())?.holds === '1',
+      'A competing customer was not blocked on the held shelf alone, or took stock from it',
+    );
+
+    // Over-reservation under concurrency, through the checkout path: one unit,
+    // two customers, both quoting at once. Exactly one gets it.
+    const lastStore = await createDiscoverableStoreFixture(pool, {
+      location_name: 'SYNTH Checkout Last Unit Store',
+      latitude: 26.91,
+      longitude: 75.81,
+    });
+    const lastReference = `SYNTH-PROD-LAST-${Date.now()}`;
+    const lastProduct = await catalogue.createProduct({
+      context: vendorContext(lastStore.ownerUserId),
+      vendor_location_id: lastStore.locationId,
+      product_reference: lastReference,
+      title: 'SYNTH Last Unit Product',
+      category: 'FRUIT_VEGETABLE',
+      unit_label: 'EACH',
+      tax_basis: 'EXEMPT',
+      variable_weight: false,
+      sku: `SYNTH-SKU-LAST-${Date.now()}`,
+      variant_title: 'SYNTH Last Unit Variant',
+      price_minor: 10_000,
+      initial_stock_quantity: 1,
+      low_stock_threshold: 1,
+      now,
+    });
+    const racers = await Promise.all([customerWithCart('RACER1'), customerWithCart('RACER2')]);
+    for (const racer of racers) {
+      await carts.addLine({
+        context: customerContext(racer.userId),
+        vendor_location_id: lastStore.locationId,
+        catalogue_variant_id: lastProduct.catalogue_variant_id,
+        quantity: 1,
+        now,
+      });
+    }
+    // Force the interleaving rather than hope for it: hold the item's row
+    // lock while both quotes start, so each reads one unit on the shelf before
+    // either can take it, then let go. The correct path re-reads under the
+    // lock and the second quote finds nothing; a path that trusts its first
+    // read holds the unit twice.
+    const blocker = await pool.connect();
+    await blocker.query('BEGIN');
+    await blocker.query(
+      'SELECT 1 FROM marketplace.inventory_items WHERE vendor_location_id=$1 AND product_reference=$2 FOR UPDATE',
+      [lastStore.locationId, lastReference],
+    );
+    const racing = Promise.allSettled(
+      racers.map((racer) =>
+        checkout.createQuote({
+          context: customerContext(racer.userId),
+          cart_id: racer.cartId,
+          now,
+        }),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await blocker.query('COMMIT');
+    blocker.release();
+    const race = await racing;
+    const winners = race.filter((r) => r.status === 'fulfilled');
+    const losers = race.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    const lastShelf = await pool.query<{ quantity: string; holds: string }>(
+      `SELECT i.exact_available_quantity::text AS quantity,
+              (SELECT count(*) FROM marketplace.inventory_reservations r
+                WHERE r.inventory_item_id=i.inventory_item_id AND r.reservation_state='SOFT_HELD')::text AS holds
+         FROM marketplace.inventory_items i
+        WHERE i.vendor_location_id=$1 AND i.product_reference=$2`,
+      [lastStore.locationId, lastReference],
+    );
+    check(
+      winners.length === 1 &&
+        losers.length === 1 &&
+        losers[0]?.reason instanceof CheckoutConflictError &&
+        lastShelf.rows[0]?.quantity === '0' &&
+        lastShelf.rows[0].holds === '1',
+      `Two customers quoting the last unit at once did not produce exactly one hold (${JSON.stringify({ winners: winners.length, loser: String(losers[0]?.reason), shelf: lastShelf.rows[0] })})`,
     );
 
     // 7.1 requirement 2, the other half: a policy version is attached so the
