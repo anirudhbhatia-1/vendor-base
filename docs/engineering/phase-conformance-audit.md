@@ -1212,6 +1212,36 @@ The step names five requirements. Three held with scope notes. Requirement 3 was
 
 **Step 6.5: VERIFIED_LOCAL**, with the requirement-1 scope note: store images, per-store policy text and offers are not modelled; the first two are not in the feature catalogue at all and should be added as entries with an owner decision, the third is Later.
 
+## Run 39 (19 September 2026) — step 6.6, vendor-grouped cart
+
+The step names five requirements. Four held in code; two of those had parts with no assertion, and requirement 3's word *configured* was a constant with a comment naming a configuration key nothing read. Nine assertions added, five mutation probes, all caught — two only after being redone to fail at the assertion.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Cart, vendor groups, lines, quantities, preferences | Held; **the line's substitution preference had no assertion** — P39-02. |
+| 2 | Another store is a separate group with a clear fee/order explanation | Held: a second store makes a second group, and the basket says "One payment. Each shop confirms, packs and delivers its own order" with the fee hint. Scope note: the explanation is at the basket, not at the moment of adding. |
+| 3 | Enforce the configured group limit, default three | **Not configured.** `cartGroupLimit()` returned the constant; the comment above it named a key "when no active configuration exists" that no code resolved — P39-01. |
+| 4 | Per-group fulfilment method, notes, substitution preferences, tip where enabled | Method held (run 36). **The note had no assertion** — P39-02. Tip: not enabled anywhere; `tip_minor` is priced and nothing can set it (scope note). |
+| 5 | Never represent cart items as reserved inventory | Held and asserted (scenario 8). |
+
+**P39-01 — "configured" meant a constant.** Run 33 found the same shape on the saved-address limit and called it *"the operator control was silently dead"*. `cartGroupLimit` now resolves `customer.cart_group_limit` (`SETTING`, 1–10) from versioned configuration at the instant of the add and falls back to `DEFAULT_CART_GROUP_LIMIT` of three, exactly as `savedAddressLimit` does. The verifier activates a limit of four through the draft → validate → approve → schedule → activate chain, asserts the read returns four, admits the fourth store, and refuses a fifth — which needed a fifth fixture store.
+
+**P39-02 — two written fields never read back.** `substitution_preference` on the line and `customer_note` on the group were both stored and neither appeared in any assertion, so the `INSERT` could have discarded the preference and the `UPDATE` the note with the ladder green — probes 20 and 18b confirm. The verifier now asserts the preference given with a line is kept and one given without defaults to asking the customer; the note is kept trimmed; and a note over 240 characters is refused as input.
+
+**Mutation results.** Five probes, each on a rebuilt database (the cart fixture's stores sit at fixed coordinates), restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Configuration key changed to one nothing activates | *An activated cart-group limit did not replace the default* |
+| Limit resolved at the epoch instead of the add's instant | *Raising the configured ceiling did not admit the fourth store (Error: A cart may hold at most 3 vendor groups)* — redone: the first attempt raised from `addLine` itself rather than at an assertion, so the fourth add now catches and the check reports |
+| Note written as `NULLIF($4,$4)` | *The group note was not kept, trimmed* — redone: the first attempt (`customer_note=NULL`) failed at bind on an untyped parameter |
+| Note length check removed | *A note over 240 characters was accepted (raised … violates check constraint cart_vendor_group_note_shape)* |
+| Preference replaced by the default | *The substitution preference given with the line was not kept* |
+
+**Verification.** `pnpm db:verify` exit 0 — 83 migrations, full ladder; `customer_cart` 46 assertions (37 after batch 10). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 502 pass / 0 fail.
+
+**Step 6.6: VERIFIED_LOCAL**, with two scope notes: tipping is not enabled and not in the feature catalogue, though the column is priced; and the separate-order explanation lives at the basket rather than at the add.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

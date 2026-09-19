@@ -8,6 +8,7 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import { transaction as tx } from './transaction.js';
+import { resolveConfiguration } from './versioned-configuration.js';
 
 export class CustomerCartInputError extends Error {}
 export class CustomerCartNotFoundError extends Error {}
@@ -24,8 +25,10 @@ export class CustomerCartFulfilmentMethodError extends Error {
   }
 }
 
-/** Applied when no active `customer_cart_group_limit` configuration exists. */
+/** Applied when no active `customer.cart_group_limit` configuration exists. */
 export const DEFAULT_CART_GROUP_LIMIT = 3;
+/** The most stores one cart may hold under any configuration: a ceiling on the ceiling. */
+export const MAX_CART_GROUP_LIMIT = 10;
 
 export type FulfilmentMethod = 'CUSTOMER_PICKUP' | 'PLATFORM_DELIVERY' | 'VENDOR_DELIVERY';
 
@@ -338,11 +341,30 @@ export class CustomerCartService {
     await this.#pool.end();
   }
 
-  async cartGroupLimit(): Promise<number> {
-    // The ceiling is documented policy (phases.md 6.6: "default three"). A
-    // dedicated configuration key can be added the same way as the saved
-    // address limit once operators need to tune it independently.
-    return DEFAULT_CART_GROUP_LIMIT;
+  /**
+   * The store-group ceiling is operator policy (6.6: "the configured group
+   * limit, default three"), read from versioned configuration the way the
+   * saved-address limit is. A missing or unusable value falls back to the
+   * documented default; a value above MAX_CART_GROUP_LIMIT is treated the
+   * same way rather than honoured, because a checkout across dozens of shops
+   * is not a cart anyone designed for.
+   */
+  async cartGroupLimit(at?: Date): Promise<number> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: 'customer.cart_group_limit',
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value;
+    if (
+      typeof value !== 'number' ||
+      !Number.isSafeInteger(value) ||
+      value < 1 ||
+      value > MAX_CART_GROUP_LIMIT
+    ) {
+      return DEFAULT_CART_GROUP_LIMIT;
+    }
+    return value;
   }
 
   /** Finds the customer's one active cart, creating it if none exists. */
@@ -453,7 +475,7 @@ export class CustomerCartService {
       request: parseRequestId(input.context.request_id),
       correlation: parseUuidV7(input.context.correlation_id),
     };
-    const limit = await this.cartGroupLimit();
+    const limit = await this.cartGroupLimit(now);
     const cart = await this.currentCart({ context: input.context, now });
     if (cart.lifecycle_state !== 'ACTIVE')
       throw new CustomerCartConflictError('Cart is not active');

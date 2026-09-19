@@ -1,6 +1,7 @@
 import {
   createAuthenticatedActor,
   createRequestContext,
+  createRequestId,
   createUuidV7,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
@@ -9,10 +10,18 @@ import { CatalogueProductService } from '../src/catalogue-products.js';
 import {
   CustomerCartConflictError,
   CustomerCartFulfilmentMethodError,
+  CustomerCartInputError,
   CustomerCartNotFoundError,
   CustomerCartService,
   DEFAULT_CART_GROUP_LIMIT,
 } from '../src/customer-cart.js';
+import {
+  activateConfigurationVersion,
+  approveConfigurationVersion,
+  createConfigurationDraft,
+  scheduleConfigurationVersion,
+  validateConfigurationVersion,
+} from '../src/versioned-configuration.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
 import { check, rejects, vendorContext } from './verify-support.js';
 
@@ -62,7 +71,7 @@ export async function verifyCustomerCart(connectionString: string): Promise<void
       [customerId],
     );
     const stores = await Promise.all(
-      ['A', 'B', 'C', 'D'].map((suffix) =>
+      ['A', 'B', 'C', 'D', 'E'].map((suffix) =>
         createDiscoverableStoreFixture(pool, {
           location_name: `SYNTH Cart Store ${suffix}`,
           latitude: jaipur.latitude + Number(`0.0${suffix.charCodeAt(0) - 65}`),
@@ -118,11 +127,53 @@ export async function verifyCustomerCart(connectionString: string): Promise<void
       vendor_location_id: stores1.locationId,
       catalogue_variant_id: productB.catalogue_variant_id,
       quantity: 1,
+      substitution_preference: 'NO_SUBSTITUTION',
       now,
     });
     check(
       afterSecondStore.groups.length === 2,
       'Adding a second store did not create a second group',
+    );
+    // 6.6 requirement 1 names line preferences and requirement 4 per-group
+    // notes; neither had an assertion, so either could have been dropped on
+    // the way to the row.
+    const secondGroup = afterSecondStore.groups.find(
+      (g) => g.vendor_location_id === stores1.locationId,
+    );
+    check(
+      secondGroup?.lines[0]?.substitution_preference === 'NO_SUBSTITUTION',
+      'The substitution preference given with the line was not kept',
+    );
+    check(
+      afterSecondStore.groups.find((g) => g.vendor_location_id === stores0.locationId)?.lines[0]
+        ?.substitution_preference === 'ASK_CUSTOMER',
+      'A line added without a preference did not default to asking the customer',
+    );
+    const noted = await cart.setGroupFulfilmentMethod({
+      context: context(customerId),
+      cart_vendor_group_id: secondGroup.cart_vendor_group_id,
+      expected_version: secondGroup.version,
+      fulfilment_method: secondGroup.fulfilment_method,
+      customer_note: '  Ring the bell twice  ',
+      now,
+    });
+    check(
+      noted.groups.find((g) => g.cart_vendor_group_id === secondGroup.cart_vendor_group_id)
+        ?.customer_note === 'Ring the bell twice',
+      'The group note was not kept, trimmed',
+    );
+    await rejects(
+      () =>
+        cart.setGroupFulfilmentMethod({
+          context: context(customerId),
+          cart_vendor_group_id: secondGroup.cart_vendor_group_id,
+          expected_version: secondGroup.version + 1,
+          fulfilment_method: secondGroup.fulfilment_method,
+          customer_note: 'x'.repeat(241),
+          now,
+        }),
+      CustomerCartInputError,
+      'A note over 240 characters was accepted',
     );
 
     // 3. Adding the same variant again to the same group merges quantity
@@ -166,6 +217,91 @@ export async function verifyCustomerCart(connectionString: string): Promise<void
       CustomerCartConflictError,
       'A fourth vendor group was accepted past the configured ceiling',
     );
+    // "Configured" had meant a constant with a comment naming a configuration
+    // key nothing read. The ceiling now comes from versioned configuration
+    // like the saved-address limit; raising it to four is what lets the fourth
+    // store in, and proves the lookup is alive rather than the default.
+    const proposerId = createUuidV7();
+    const approverId = createUuidV7();
+    for (const actorId of [proposerId, approverId]) {
+      await pool.query(
+        `INSERT INTO marketplace.users (user_id, created_at, updated_at)
+         VALUES ($1,$2,$2) ON CONFLICT (user_id) DO NOTHING`,
+        [actorId, now],
+      );
+    }
+    const limitDraft = await createConfigurationDraft(pool, {
+      actor_id: proposerId,
+      configuration_key: 'customer.cart_group_limit',
+      configuration_kind: 'SETTING',
+      configuration_value: 4,
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: proposerId,
+      configuration_version_id: limitDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: limitDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: limitDraft.configuration_version_id,
+      effective_from: new Date(now.getTime() - 1_000),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: approverId,
+      at: now,
+      configuration_version_id: limitDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    check(
+      (await cart.cartGroupLimit(now)) === 4,
+      'An activated cart-group limit did not replace the default',
+    );
+    const fourthAttempt = await cart
+      .addLine({
+        context: context(customerId),
+        vendor_location_id: storeD.locationId,
+        catalogue_variant_id: productD.catalogue_variant_id,
+        quantity: 1,
+        now,
+      })
+      .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+    check(
+      !(fourthAttempt instanceof Error) && fourthAttempt.groups.length === 4,
+      `Raising the configured ceiling did not admit the fourth store (${String(fourthAttempt)})`,
+    );
+    const fourStores = fourthAttempt as Exclude<typeof fourthAttempt, Error>;
+    const [, , , , storeE] = stores;
+    const [, , , , productE] = products;
+    check(storeE && productE, 'A fifth fixture store is needed to re-test the raised ceiling');
+    await rejects(
+      () =>
+        cart.addLine({
+          context: context(customerId),
+          vendor_location_id: storeE.locationId,
+          catalogue_variant_id: productE.catalogue_variant_id,
+          quantity: 1,
+          now,
+        }),
+      CustomerCartConflictError,
+      'A fifth vendor group was accepted past the raised ceiling',
+    );
+    const fourthLine = fourStores.groups.find((g) => g.vendor_location_id === storeD.locationId)
+      ?.lines[0];
+    check(fourthLine !== undefined, 'The fourth store has no line to remove');
+    await cart.removeLine({
+      context: context(customerId),
+      cart_line_id: fourthLine.cart_line_id,
+      now,
+    });
 
     // 5. Quantity change is optimistic; removing the last line removes the group.
     const beforeRemoval = await cart.currentCart({ context: context(customerId), now });

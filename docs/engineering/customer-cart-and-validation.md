@@ -8,8 +8,12 @@ recovery), company-local synthetic development only
 
 Migration `0021_customer_cart` and `CustomerCartService` give a customer one active cart split
 into per-store groups. Adding a second store creates a second group rather than mixing lines; a
-configured ceiling (default three) bounds distinct vendor locations, not line count. Cart items are
-never represented as reserved inventory — nothing here touches `inventory_reservations`.
+configured ceiling bounds distinct vendor locations, not line count — read from the versioned
+configuration key `customer.cart_group_limit` (a `SETTING`, 1–10) at the instant of the add, with
+`DEFAULT_CART_GROUP_LIMIT` of three when nothing usable is active. Cart items are never
+represented as reserved inventory — nothing here touches `inventory_reservations`. A group carries
+a fulfilment method, a customer note (1–240 characters, trimmed) and `tip_minor`; tipping is not
+enabled anywhere and nothing sets the tip, which is priced at zero.
 
 ## Aggregates
 
@@ -63,8 +67,11 @@ concealment: `GET` (find-or-create), `PUT address`, `POST lines`, `PUT lines/:id
 
 ## Verification
 
-`database/scripts/verify-customer-cart.ts` — 9 connected scenarios: find-or-create idempotency,
-two-store grouping, same-variant quantity merge, the group ceiling against a fourth store,
+`database/scripts/verify-customer-cart.ts` — 10 connected scenarios: find-or-create idempotency,
+two-store grouping with the line's substitution preference kept (and defaulted to asking) and the
+group note kept trimmed and bounded, same-variant quantity merge, the group ceiling against a
+fourth store and then, once an activated `customer.cart_group_limit` of four is read, the fourth
+admitted and a fifth refused,
 optimistic quantity change with stale-version rejection and last-line group removal, cross-customer
 isolation, revalidation isolating one closed store while a healthy sibling group and its lines stay
 untouched, the never-reserved-inventory property, and audit-evidence coverage. Wired into

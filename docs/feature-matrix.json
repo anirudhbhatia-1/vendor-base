@@ -1050,7 +1050,7 @@
       "name": "Configurable store-group limit",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Server enforces limit",
+      "notes": "Server enforces the limit read from versioned configuration key customer.cart_group_limit (default three; audit run 39 -- before that the 'configured' limit was a constant).",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
