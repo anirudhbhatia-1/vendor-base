@@ -51,6 +51,18 @@ The worker's `vendor_order.picked_up` handler now runs the settlement when the m
 
 The routing lived in a closure inside a service that constructs fourteen dependencies in its constructor, reachable only through the integration queue canary — which carries an event that reacts to nothing. It had never been asserted. `apps/worker/src/domain-event-handler.ts` now holds it as a function over the narrowest shape each branch needs; the service delegates to it, and `domain-event-handler.spec.ts` asserts every branch with fakes: which service each event reaches, that a collected order settles on pickup while a delivery does not, that acknowledged-without-reaction types do nothing, and that an unknown type fails rather than being acknowledged. Mutation-proven: dropping the pickup-settlement branch fails one test.
 
+## B10-07 — the live journeys had no fixtures, and two of them could not have passed
+
+The 25 Playwright journeys gated on `LIVE_SUPABASE_ACCEPTANCE` fail without their data (batch 04 removed the conditionals that let them pass empty), and nothing provided the data. `database/scripts/live-supabase-fixtures.ts` now does, through the API and Supabase Auth only: a store with a stocked product, a rider holding an order that is `EN_ROUTE_TO_CUSTOMER` and then taken offline, a second order left `PLACED`, and a `PENDING` moderation case. Because the awaiting order expires minutes after placement, `e2e/global-setup.ts` seeds inside the same `pnpm test:e2e` run when `ACCEPTANCE_SEED_FIXTURES=true`, and copies the printed `ACCEPTANCE_*` block onto the process the workers fork from. The helpers it shares with `live-supabase-acceptance.ts` moved to `acceptance-support.ts`.
+
+Building it exposed three defects by source inspection:
+
+- The partner journey asserted a button named *Delivery failed*. No such control exists — that string is the `DELIVERY_FAILED` state label in `packages/ui`; the control is *I cannot deliver this*, offered only `EN_ROUTE_TO_CUSTOMER` or `ARRIVED`. The spec now names the control, and the fixture leaves the rider in that state.
+- The admin journey's `/checkout group/` and `/live cases/` were satisfied by "0 checkout groups loaded" and "0 live cases" — the empty state the batch-04 control was written to reject, reached through a count rather than an alternation. Both now require a non-zero leading digit.
+- `live-supabase-acceptance.ts` polled for a partner offer straight after checkout, but dispatch offers only `ACCEPTED/PICKING/READY` orders (a rider is never offered an order the shop may still decline). The script could not have passed since that guard was added; it now has the vendor accept first.
+
+Plumbing proven locally: with both flags set and no Supabase environment, `playwright test` spawns the provisioner from `database/`, the provisioner exits 1 on `SUPABASE_URL is required`, and the run fails at global setup; without the flags the setup is a no-op and `playwright test --list` still enumerates 40 tests. **The provisioner has not been run against a Supabase project**: the role PWAs sign in through Supabase Auth, so it cannot run against local PostgreSQL, and seeding the shared synthetic project needs approval.
+
 ## What the ladder now asserts
 
 `verify-customer-cart.ts` (30 → 37): a pickup-only store's group defaults to collection and reports it offered; delivery from that store is refused as `FULFILMENT_METHOD_UNAVAILABLE` with exactly `['CUSTOMER_PICKUP']` offered and the group's method and version unchanged; collection from a delivery-only store is refused before any group exists; a withdrawn mode reads `fulfilment_method_offered: false`.
@@ -90,7 +102,7 @@ The first probe run failed on `customer_addresses_address_reference_key` before 
 ## Still open
 
 - **Branch protection** on `main` requiring the Mandatory quality gate — a repository setting, not a file.
-- **Browser and device runs.** The checkout panel changed and was not driven; the Android customer app's own default was already correct and is unchanged.
+- **Browser and device runs.** The checkout panel changed and was not driven; the Android customer app's own default was already correct and is unchanged. The live journeys now have a provisioner (B10-07) but no recorded run: that needs a Supabase project and approval to seed it.
 - **Who settles the vendor-delivery fee** — carried to D-05.
 - **A self-delivery that fails at the door** (customer unreachable, wrong address) has no exception path of its own; the shop's route is a support case. The partner's guided exceptions (DLP-36–42) do not apply to staff.
 - **Settlement is attempted once.** `recordDeliveryEarnings` returns `settled: false` when the group's authorization has not yet been captured (a sibling still PLACED) and nothing retries it — for a delivered order this window is minutes; for a fast collection it is real. Pre-existing, now shared by the collected path, recorded rather than solved here.

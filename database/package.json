@@ -34,6 +34,7 @@
     "seed:admin": "tsx scripts/seed-admin.ts",
     "seed:supabase-admin": "node --env-file=../infrastructure/supabase-production/.env --import tsx scripts/seed-supabase-admin.ts",
     "acceptance:supabase": "node --env-file=../infrastructure/supabase-production/.env --import tsx scripts/live-supabase-acceptance.ts",
+    "acceptance:fixtures": "node --env-file=../infrastructure/supabase-production/.env --import tsx scripts/live-supabase-fixtures.ts",
     "seed": "tsx scripts/seed.ts --target local",
     "seed:marketplace": "tsx scripts/seed-marketplace.ts",
     "test:unit": "node ../tooling/scripts/ensure-packages-built.mjs && tsx scripts/verify-static.ts && node --import tsx --test src/*.spec.ts",

@@ -110,8 +110,10 @@ test.describe('cross-role order journey', () => {
     // Every custody state must offer a way out. The shell used to fall through
     // to a disabled "Await operations" button with no unhappy path at all, and
     // guarding this assertion behind `isVisible()` meant the regression would
-    // have returned silently.
-    const failure = page.getByRole('button', { name: /Delivery failed/i });
+    // have returned silently. The control is offered on the way to the customer,
+    // so the fixture leaves this rider holding an order that is en route. ("Delivery
+    // failed" is the state's label, not the control's; the spec named the wrong one.)
+    const failure = page.getByRole('button', { name: /I cannot deliver this/i });
     await expect(failure).toBeVisible();
     await expect(failure).toBeEnabled();
   });
@@ -127,12 +129,15 @@ test.describe('cross-role order journey', () => {
     await page.goto('/orders');
     await page.getByRole('button', { name: /Refresh order monitor/i }).click();
     // "No orders loaded yet" satisfied this assertion, so the monitor proved
-    // nothing about whether it can display an order.
-    await expect(page.getByText(/checkout group/i).first()).toBeVisible();
+    // nothing about whether it can display an order -- and so did "0 checkout
+    // groups loaded", which /checkout group/ matched just as happily. The count
+    // has to start with a non-zero digit.
+    await expect(page.getByText(/^[1-9]\d* checkout groups? loaded\./)).toBeVisible();
 
     await page.goto('/catalogue');
     // The moderation queue rendered empty regardless of its contents because
-    // the response shape was parsed wrongly.
-    await expect(page.getByText(/live cases/i)).toBeVisible();
+    // the response shape was parsed wrongly. "0 live cases" is that defect's
+    // exact symptom, so it is not accepted either.
+    await expect(page.getByRole('heading', { name: /^[1-9]\d* live cases$/ })).toBeVisible();
   });
 });

@@ -21,6 +21,8 @@ export const supabaseConfigured = Boolean(
 
 export default defineConfig({
   testDir: './e2e',
+  // Seeds the live journeys' fixtures when asked; a no-op otherwise. See e2e/README.md.
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
