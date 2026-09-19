@@ -44,14 +44,25 @@ enabled anywhere and nothing sets the tip, which is priced at zero.
   projection so the customer can choose another; the quote blocks the group meanwhile. Until
   batch 10 nothing checked this and every new group started as `PLATFORM_DELIVERY`, so a
   pickup-only shop could take a delivery order it had no way to fulfil.
-- **Revalidation isolates failure to one group.** `revalidate()` re-checks every `ACTIVE` group
-  against the vendor location's lifecycle state, its `PUBLISHED` publication case, and — when the
-  cart carries an address — live service-zone coverage and marks a failing group `INVALID` with a
-  specific reason (`STORE_CLOSED`, `STORE_UNPUBLISHED`, `ADDRESS_OUT_OF_ZONE`). A group's lines are
-  independently checked against `catalogue_product_variants` and marked `STALE` if the variant is
-  no longer active. **A sibling group in good standing is never touched** — this is the exit-gate
-  property from `phases.md` §11: "A stale line or closed store does not destroy valid sibling
-  groups," and the verifier below asserts it directly.
+- **Revalidation isolates failure to one group, and can undo it.** `revalidate()` re-checks every
+  `ACTIVE` *and* `INVALID` group against the vendor location's lifecycle state, its `PUBLISHED`
+  publication case, and — when the cart carries an address — live service-zone coverage, and
+  marks a failing group `INVALID` with the reason on the row (`invalid_reason`: `STORE_CLOSED`,
+  `STORE_UNPUBLISHED`, `ADDRESS_OUT_OF_ZONE`). A group's lines are independently checked and
+  marked `STALE` with `stale_reason` when the product or variant is no longer active
+  (`PRODUCT_NO_LONGER_ACTIVE`), has no current price (`PRICE_WITHDRAWN`) or has no inventory row
+  for the store to answer from (`AVAILABILITY_UNKNOWN`) — each a line the quote's inner joins
+  would otherwise drop without a word. Out of stock is not a stale reason: the quote reports it as
+  a blocked group the customer can see. **A sibling group in good standing is never touched** —
+  this is the exit-gate property from `phases.md` §11: "A stale line or closed store does not
+  destroy valid sibling groups," and the verifier below asserts it directly. Since 0083 the way
+  back exists too: a group whose checks all pass again returns to `ACTIVE`
+  (`GROUP_REVALIDATED`) and a stale line whose product, price or stock record came back returns to
+  `ACTIVE` (`LINE_REVIVED`); before that a group could only ever get worse and stayed out of the
+  quote while the basket still showed it. Changing the cart's address revalidates in the same
+  command, because that is one of the recovery actions 6.7 names. The table refuses a stale line
+  or an invalid group with no reason. The basket shows the reason and offers removal of the line
+  or the whole store; a stale line has no quantity to step and accepts no quantity change.
 - **Cart items are never inventory.** No cart operation reads or writes
   `marketplace.inventory_reservations`; the verifier asserts the reservation table stays empty
   across the whole scenario.
@@ -67,11 +78,17 @@ concealment: `GET` (find-or-create), `PUT address`, `POST lines`, `PUT lines/:id
 
 ## Verification
 
-`database/scripts/verify-customer-cart.ts` — 10 connected scenarios: find-or-create idempotency,
+`database/scripts/verify-customer-cart.ts` — 11 connected scenarios: find-or-create idempotency,
 two-store grouping with the line's substitution preference kept (and defaulted to asking) and the
 group note kept trimmed and bounded, same-variant quantity merge, the group ceiling against a
 fourth store and then, once an activated `customer.cart_group_limit` of four is read, the fourth
-admitted and a fifth refused,
+admitted and a fifth refused, recovery of a closed store's group on refresh, every group
+invalidated as out of zone by an address change and recovered by changing back, a paused
+publication as `STORE_UNPUBLISHED`, a retired product isolated to its own line with the reason
+while its sibling and the group stay active and a stale line refuses a quantity change, revival
+when the product returns, `PRICE_WITHDRAWN` and `AVAILABILITY_UNKNOWN` with removal of a stale
+line, five consecutive quantity updates landing on the last value with five version steps and
+five audit rows, the table's own reason checks,
 optimistic quantity change with stale-version rejection and last-line group removal, cross-customer
 isolation, revalidation isolating one closed store while a healthy sibling group and its lines stay
 untouched, the never-reserved-inventory property, and audit-evidence coverage. Wired into

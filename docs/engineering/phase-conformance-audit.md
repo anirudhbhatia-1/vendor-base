@@ -1242,6 +1242,55 @@ The step names five requirements. Four held in code; two of those had parts with
 
 **Step 6.6: VERIFIED_LOCAL**, with two scope notes: tipping is not enabled and not in the feature catalogue, though the column is priced; and the separate-order explanation lives at the basket rather than at the add.
 
+## Run 40 (19 September 2026) — step 6.7, cart validation and recovery
+
+The step is named *validation and recovery*. Validation existed for one of the three group reasons and one of the line reasons, and was asserted for the closed-store case alone. Recovery did not exist: a group marked `INVALID` and a line marked `STALE` could never come back, nothing recorded why either had failed, and the basket drew both exactly as before. Twenty-four assertions added, eight mutation probes, all caught.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Revalidate publication, price, availability, store state, minimum, method, address | Publication, store state and address held. **Price and availability were not revalidated**: a line with no current price or no inventory row stayed `ACTIVE` in the basket and was dropped by the quote's inner joins without a word — P40-02. Minimum and method are derived on the projection (`minimum_met`, `fulfilment_method_offered`, run 36) and blocked at the quote; that is validation without invalidation, which is right for a shortfall the customer can repair by adding more. |
+| 2 | Isolate stale or invalid lines to the affected group | Held in code; the line-level path (`STALE`) had no assertion. |
+| 3 | Preserve valid sibling groups | Held and asserted (run 33's exit-gate property). |
+| 4 | Remove, replace, refresh, change method, change address | Remove, refresh, change method and change address exist. **None of them could recover anything**: `revalidate` skipped `INVALID` groups, so a store that reopened or an address changed back left the group `INVALID` for good — P40-01. Replace is remove-and-add (scope note). |
+| 5 | Test reconnect and repeated quantity updates | Optimistic versioning was asserted for one update. Repeated updates now walk five, each against the version the last returned. Reconnect is the pre-sign-in basket's server replay, asserted in the PWA spec. |
+
+**P40-01 — a group could only get worse.** `revalidate` iterated `ACTIVE` groups and `continue`d past everything else. Once `INVALID`, a group was never re-examined: the store reopening, the customer changing to an address the store covers, a paused publication resuming — none of it mattered. The quote selects `ACTIVE` groups only, so the store silently dropped out of the order while the basket, which drew every group identically, still showed it with a working quantity stepper. Migration 0083 puts the reason on the row (`invalid_reason`, `stale_reason`, each with a table check that a moved row names one) and adds `GROUP_REVALIDATED` and `LINE_REVIVED` to the append-only history. `revalidate` now examines `INVALID` groups and `STALE` lines too, and returns `recovered` and `revived_line_ids` alongside the failures. `setCartAddress` revalidates in the same command, because changing the address is one of the recovery actions the step names and a group that was out of zone is only worth keeping if that can bring it back.
+
+**P40-02 — two of the quote's silent drops were not the cart's business until now.** The quote joins lines to a current price and to an inventory row; a line with neither vanished from the total with no blocked reason. The line check now names three reasons — `PRODUCT_NO_LONGER_ACTIVE` (product or variant), `PRICE_WITHDRAWN`, `AVAILABILITY_UNKNOWN` — each a line the quote would drop. Out of stock is deliberately not among them: the quote reports it as a blocked group the customer can see, and a cart that invalidated a line for stock would be pretending to reserve.
+
+**The basket now says so.** `GroupCard` renders an `INVALID` group with the reason's sentence and *Remove this store*; a `STALE` line with its sentence and *Remove*, in place of the stepper and the substitution choice (a stale line accepts no quantity change — asserted). `basket-copy.ts` maps reason to sentence with a unit test (3 tests); the copy is registered en and hi in 0083. The recheck notice used to say "current" when a line had gone stale, because `changed` looked only at invalidated groups; it now counts stale, revived and recovered.
+
+**Also closed:** the cart verifier's fixed `SYNTH-ADDRESS-CART` reference, which batch 06 and batch 10 recorded as the reason it could not re-run on one database, is unique per run. The fixture's stores still sit at fixed coordinates, so the discovery-style limitation remains for the store list assertions.
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| `recovered` forced false | *A reopened store did not recover its group on refresh* |
+| Loop skips non-`ACTIVE` groups, as before | same assertion — proves the loop change, not only the flag |
+| `PRICE_WITHDRAWN` branch removed | *A line with no current price was not marked stale as unpriced* |
+| `AVAILABILITY_UNKNOWN` branch removed | *A line with no inventory row was not marked stale as availability unknown* |
+| Revival never selected | *A product brought back did not revive its line on refresh* |
+| `setCartAddress` no longer revalidates | *Changing to an address outside every zone did not invalidate each group with the reason* |
+| 0083 line reason check weakened | *The table let a line go stale with no reason* |
+| 0083 group reason check weakened | *The table let a group go invalid with no reason* |
+
+One defect the table check caught before any probe: removing a `STALE` line left its reason set on a `REMOVED` row, and the new constraint refused it. Removal, and the revive-on-re-add paths for lines and groups, now clear the reason — the check earned its place on the first run.
+
+**Verification.** `pnpm db:verify` exit 0 — 84 migrations, full ladder; `customer_cart` 70 assertions (46 after run 39); `grouped_checkout` unchanged at 23. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 507 pass / 0 fail (+3 basket copy, +2 panel).
+
+**Step 6.7: VERIFIED_LOCAL**, with the scope note that *replace* is remove-and-add rather than a command of its own.
+
+### Phase 6 exit gate
+
+*"A customer can build and restore a three-store cart. A stale line or closed store does not destroy valid sibling groups. No UI or API claims cart inventory is reserved."*
+
+- **Build and restore a three-store cart**: met. The cart verifier builds three groups (and, with the configured ceiling raised, four); `currentCart` finds the one active cart on every call; the pre-sign-in basket is replayed through the server at sign-in (PWA spec).
+- **A stale line or closed store does not destroy valid sibling groups**: met, and since run 40 the reverse holds as well — a stale line or invalid group can come back, and the basket says which and why.
+- **No UI or API claims cart inventory is reserved**: met. The verifier asserts `inventory_reservations` stays empty across the whole scenario; the basket copy says "Nothing is reserved" in the guest path and the quote is where holds begin.
+
+**Phase 6 status: VERIFIED_LOCAL.** All seven steps are VERIFIED_LOCAL (6.1–6.3 in runs 33–35, 6.4–6.7 in runs 37–40). Open by scope note, not by gate: the preferred store and the shop request have no customer or admin surface (`backend_only`); store images, per-store policy text and offers are not modelled; tipping is priced but not enabled or catalogued; the discovery multi-page ordering test recorded at 6.2.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

@@ -65,6 +65,8 @@ export interface CartLine {
   readonly quantity: number;
   readonly substitution_preference: SubstitutionPreference;
   readonly lifecycle_state: 'ACTIVE' | 'REMOVED' | 'STALE';
+  /** Why the line is STALE (PRODUCT_NO_LONGER_ACTIVE, PRICE_WITHDRAWN, AVAILABILITY_UNKNOWN); null otherwise. */
+  readonly stale_reason: string | null;
   readonly version: number;
   /**
    * Presentation facts resolved from the current catalogue.
@@ -91,6 +93,8 @@ export interface CartVendorGroup {
   readonly customer_note: string | null;
   readonly tip_minor: number;
   readonly lifecycle_state: 'ACTIVE' | 'INVALID' | 'REMOVED';
+  /** Why the group is INVALID (STORE_CLOSED, STORE_UNPUBLISHED, ADDRESS_OUT_OF_ZONE); null otherwise. */
+  readonly invalid_reason: string | null;
   readonly version: number;
   readonly lines: readonly CartLine[];
   /**
@@ -126,9 +130,14 @@ export interface Cart {
 export interface RevalidationOutcome {
   readonly cart_vendor_group_id: UuidV7;
   readonly vendor_location_id: UuidV7;
+  /** The group failed a check on this pass (whether or not it had already been INVALID). */
   readonly invalidated: boolean;
   readonly reason: string | null;
+  /** The group had been INVALID and every check now passes: it is ACTIVE again. */
+  readonly recovered: boolean;
   readonly stale_line_ids: readonly UuidV7[];
+  /** Lines that had been STALE and now pass every check: ACTIVE again. */
+  readonly revived_line_ids: readonly UuidV7[];
 }
 
 function customer(context: RequestContext): UuidV7 {
@@ -143,6 +152,7 @@ interface GroupRow {
   readonly customer_note: string | null;
   readonly tip_minor: string;
   readonly lifecycle_state: CartVendorGroup['lifecycle_state'];
+  readonly invalid_reason: string | null;
   readonly version: number;
   readonly location_name: string;
   readonly minimum_order_minor: string;
@@ -156,6 +166,7 @@ interface LineRow {
   readonly quantity: number;
   readonly substitution_preference: SubstitutionPreference;
   readonly lifecycle_state: CartLine['lifecycle_state'];
+  readonly stale_reason: string | null;
   readonly version: number;
   readonly title: string;
   readonly unit_label: string;
@@ -182,6 +193,7 @@ function projectLine(row: LineRow): CartLine {
     quantity: row.quantity,
     substitution_preference: row.substitution_preference,
     lifecycle_state: row.lifecycle_state,
+    stale_reason: row.stale_reason,
     version: row.version,
     title: row.title,
     unit_label: row.unit_label,
@@ -203,7 +215,7 @@ async function loadCart(client: PoolClient, cartId: string): Promise<Cart> {
   if (!cartRow) throw new CustomerCartNotFoundError();
   const groups = await client.query<GroupRow>(
     `SELECT g.cart_vendor_group_id, g.vendor_location_id, g.fulfilment_method, g.customer_note,
-            g.tip_minor::text AS tip_minor, g.lifecycle_state, g.version,
+            g.tip_minor::text AS tip_minor, g.lifecycle_state, g.invalid_reason, g.version,
             l.location_name, l.minimum_order_minor::text AS minimum_order_minor,
             COALESCE(
               (SELECT array_agg(DISTINCT fulfilment_mode)
@@ -219,7 +231,7 @@ async function loadCart(client: PoolClient, cartId: string): Promise<Cart> {
   );
   const lines = await client.query<LineRow>(
     `SELECT l.cart_line_id, l.cart_vendor_group_id, l.catalogue_variant_id, l.quantity,
-            l.substitution_preference, l.lifecycle_state, l.version,
+            l.substitution_preference, l.lifecycle_state, l.stale_reason, l.version,
             p.catalogue_product_id, p.title, p.unit_label, p.category, p.variable_weight,
             price.price_minor::text AS unit_price_minor,
             (SELECT i.object_reference
@@ -271,6 +283,7 @@ async function loadCart(client: PoolClient, cartId: string): Promise<Cart> {
           customer_note: group.customer_note,
           tip_minor: Number(group.tip_minor),
           lifecycle_state: group.lifecycle_state,
+          invalid_reason: group.invalid_reason,
           version: group.version,
           lines: Object.freeze(groupLines),
           location_name: group.location_name,
@@ -298,10 +311,12 @@ async function recordEvent(
       | 'GROUP_ADDED'
       | 'GROUP_INVALIDATED'
       | 'GROUP_REMOVED'
+      | 'GROUP_REVALIDATED'
       | 'LINE_ADDED'
       | 'LINE_MARKED_STALE'
       | 'LINE_QUANTITY_CHANGED'
-      | 'LINE_REMOVED';
+      | 'LINE_REMOVED'
+      | 'LINE_REVIVED';
     readonly reason_code: string;
     readonly ids: { readonly request: string; readonly correlation: string };
     readonly now: Date;
@@ -427,7 +442,7 @@ export class CustomerCartService {
       correlation: parseUuidV7(input.context.correlation_id),
     };
     const cart = await this.currentCart({ context: input.context, now });
-    return tx(this.#pool, async (client) => {
+    await tx(this.#pool, async (client) => {
       const owned = await client.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM marketplace.customer_addresses
           WHERE customer_address_id = $1 AND user_id = $2 AND lifecycle_state = 'ACTIVE'`,
@@ -448,8 +463,12 @@ export class CustomerCartService {
         ids,
         now,
       });
-      return loadCart(client, cart.cart_id);
     });
+    // Changing the address is one of the recovery actions 6.7 names: a group
+    // invalidated as out of zone is only worth keeping if this can bring it
+    // back, and a group now out of zone is only honest if this says so.
+    await this.revalidate({ context: input.context, now });
+    return this.currentCart({ context: input.context, now });
   }
 
   /**
@@ -509,7 +528,7 @@ export class CustomerCartService {
              (cart_vendor_group_id, cart_id, vendor_location_id, fulfilment_method, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$5)
            ON CONFLICT (cart_id, vendor_location_id)
-           DO UPDATE SET lifecycle_state = 'ACTIVE',
+           DO UPDATE SET lifecycle_state = 'ACTIVE', invalid_reason = NULL,
                          fulfilment_method = EXCLUDED.fulfilment_method,
                          customer_note = NULL, tip_minor = 0,
                          version = marketplace.cart_vendor_groups.version + 1,
@@ -553,7 +572,8 @@ export class CustomerCartService {
                           WHEN marketplace.cart_lines.lifecycle_state = 'REMOVED' THEN EXCLUDED.substitution_preference
                           ELSE marketplace.cart_lines.substitution_preference
                         END,
-                        lifecycle_state = 'ACTIVE', version = marketplace.cart_lines.version + 1,
+                        lifecycle_state = 'ACTIVE', stale_reason = NULL,
+                        version = marketplace.cart_lines.version + 1,
                         updated_at = $6
          RETURNING cart_line_id, quantity`,
         [
@@ -659,7 +679,7 @@ export class CustomerCartService {
     };
     return tx(this.#pool, async (client) => {
       const removed = await client.query<{ cart_id: string; cart_vendor_group_id: string }>(
-        `UPDATE marketplace.cart_lines l SET lifecycle_state='REMOVED', version=l.version+1, updated_at=$3
+        `UPDATE marketplace.cart_lines l SET lifecycle_state='REMOVED', stale_reason=NULL, version=l.version+1, updated_at=$3
            FROM marketplace.cart_vendor_groups g, marketplace.carts c
           WHERE l.cart_line_id=$1 AND l.lifecycle_state IN ('ACTIVE','STALE')
             AND g.cart_vendor_group_id=l.cart_vendor_group_id AND c.cart_id=g.cart_id
@@ -687,7 +707,7 @@ export class CustomerCartService {
       );
       if (remaining.rows[0]?.count === '0') {
         await client.query(
-          `UPDATE marketplace.cart_vendor_groups SET lifecycle_state='REMOVED', version=version+1, updated_at=$2
+          `UPDATE marketplace.cart_vendor_groups SET lifecycle_state='REMOVED', invalid_reason=NULL, version=version+1, updated_at=$2
             WHERE cart_vendor_group_id=$1`,
           [row.cart_vendor_group_id, now],
         );
@@ -791,11 +811,16 @@ export class CustomerCartService {
 
     return tx(this.#pool, async (client) => {
       const outcomes: RevalidationOutcome[] = [];
+      // INVALID groups are re-checked too: a store that reopened, or an
+      // address the customer changed to one the store covers, is the way back
+      // that "recovery" names, and a group that could only ever get worse
+      // silently dropped out of the quote while the basket still showed it.
       for (const group of cart.groups) {
-        if (group.lifecycle_state !== 'ACTIVE') continue;
+        if (group.lifecycle_state === 'REMOVED') continue;
         const check = await client.query<{
           reason: string | null;
-          stale_line_ids: string[];
+          stale_lines: readonly { readonly cart_line_id: string; readonly reason: string }[];
+          revived_line_ids: string[];
         }>(
           `WITH location_check AS (
              SELECT l.vendor_location_id,
@@ -813,15 +838,33 @@ export class CustomerCartService {
                     )) AS out_of_zone
                FROM marketplace.vendor_locations l WHERE l.vendor_location_id = $1
            ),
-           stale AS (
-             SELECT cl.cart_line_id
+           -- Every line the quote would otherwise drop without a word: the
+           -- variant or product withdrawn, no current price, or no inventory
+           -- row for the store to answer from. Out of stock is not here; the
+           -- quote reports that as a blocked group the customer can see.
+           line_check AS (
+             SELECT cl.cart_line_id, cl.lifecycle_state,
+                    CASE
+                      WHEN NOT EXISTS (
+                        SELECT 1 FROM marketplace.catalogue_product_variants v
+                        JOIN marketplace.catalogue_products p ON p.catalogue_product_id = v.catalogue_product_id
+                         WHERE v.catalogue_variant_id = cl.catalogue_variant_id
+                           AND v.lifecycle_state = 'ACTIVE' AND p.lifecycle_state = 'ACTIVE'
+                      ) THEN 'PRODUCT_NO_LONGER_ACTIVE'
+                      WHEN NOT EXISTS (
+                        SELECT 1 FROM marketplace.catalogue_prices cp
+                         WHERE cp.catalogue_variant_id = cl.catalogue_variant_id AND cp.effective_until IS NULL
+                      ) THEN 'PRICE_WITHDRAWN'
+                      WHEN NOT EXISTS (
+                        SELECT 1 FROM marketplace.inventory_items i
+                        JOIN marketplace.catalogue_product_variants v ON v.catalogue_variant_id = cl.catalogue_variant_id
+                        JOIN marketplace.catalogue_products p ON p.catalogue_product_id = v.catalogue_product_id
+                         WHERE i.vendor_location_id = $1 AND i.product_reference = p.product_reference
+                      ) THEN 'AVAILABILITY_UNKNOWN'
+                      ELSE NULL
+                    END AS reason
                FROM marketplace.cart_lines cl
-              WHERE cl.cart_vendor_group_id = $3 AND cl.lifecycle_state = 'ACTIVE'
-                AND NOT EXISTS (
-                  SELECT 1 FROM marketplace.catalogue_product_variants v
-                   WHERE v.catalogue_variant_id = cl.catalogue_variant_id
-                     AND v.lifecycle_state = 'ACTIVE'
-                )
+              WHERE cl.cart_vendor_group_id = $3 AND cl.lifecycle_state IN ('ACTIVE', 'STALE')
            )
            SELECT
              CASE
@@ -830,20 +873,26 @@ export class CustomerCartService {
                WHEN lc.out_of_zone THEN 'ADDRESS_OUT_OF_ZONE'
                ELSE NULL
              END AS reason,
-             COALESCE((SELECT array_agg(cart_line_id::text) FROM stale), ARRAY[]::text[])
-               AS stale_line_ids
+             COALESCE((SELECT json_agg(json_build_object('cart_line_id', cart_line_id, 'reason', reason))
+                         FROM line_check WHERE lifecycle_state = 'ACTIVE' AND reason IS NOT NULL),
+                      '[]'::json) AS stale_lines,
+             COALESCE((SELECT array_agg(cart_line_id::text)
+                         FROM line_check WHERE lifecycle_state = 'STALE' AND reason IS NULL),
+                      ARRAY[]::text[]) AS revived_line_ids
              FROM location_check lc`,
           [group.vendor_location_id, cart.customer_address_id, group.cart_vendor_group_id],
         );
         const row = check.rows[0];
         const reason = row?.reason ?? null;
-        const staleLineIds = row?.stale_line_ids ?? [];
+        const staleLines = row?.stale_lines ?? [];
+        const revivedLineIds = row?.revived_line_ids ?? [];
 
-        if (reason) {
+        if (reason && group.invalid_reason !== reason) {
           await client.query(
-            `UPDATE marketplace.cart_vendor_groups SET lifecycle_state='INVALID', version=version+1, updated_at=$2
+            `UPDATE marketplace.cart_vendor_groups
+                SET lifecycle_state='INVALID', invalid_reason=$3, version=version+1, updated_at=$2
               WHERE cart_vendor_group_id=$1`,
-            [group.cart_vendor_group_id, now],
+            [group.cart_vendor_group_id, now, reason],
           );
           await recordEvent(client, {
             cart_id: cart.cart_id,
@@ -854,9 +903,44 @@ export class CustomerCartService {
             now,
           });
         }
-        for (const lineId of staleLineIds) {
+        const recovered = reason === null && group.lifecycle_state === 'INVALID';
+        if (recovered) {
           await client.query(
-            `UPDATE marketplace.cart_lines SET lifecycle_state='STALE', version=version+1, updated_at=$2
+            `UPDATE marketplace.cart_vendor_groups
+                SET lifecycle_state='ACTIVE', invalid_reason=NULL, version=version+1, updated_at=$2
+              WHERE cart_vendor_group_id=$1`,
+            [group.cart_vendor_group_id, now],
+          );
+          await recordEvent(client, {
+            cart_id: cart.cart_id,
+            cart_vendor_group_id: group.cart_vendor_group_id,
+            event_type: 'GROUP_REVALIDATED',
+            reason_code: 'CHECKS_PASSED',
+            ids,
+            now,
+          });
+        }
+        for (const stale of staleLines) {
+          await client.query(
+            `UPDATE marketplace.cart_lines
+                SET lifecycle_state='STALE', stale_reason=$3, version=version+1, updated_at=$2
+              WHERE cart_line_id=$1`,
+            [stale.cart_line_id, now, stale.reason],
+          );
+          await recordEvent(client, {
+            cart_id: cart.cart_id,
+            cart_vendor_group_id: group.cart_vendor_group_id,
+            cart_line_id: parseUuidV7(stale.cart_line_id),
+            event_type: 'LINE_MARKED_STALE',
+            reason_code: stale.reason,
+            ids,
+            now,
+          });
+        }
+        for (const lineId of revivedLineIds) {
+          await client.query(
+            `UPDATE marketplace.cart_lines
+                SET lifecycle_state='ACTIVE', stale_reason=NULL, version=version+1, updated_at=$2
               WHERE cart_line_id=$1`,
             [lineId, now],
           );
@@ -864,8 +948,8 @@ export class CustomerCartService {
             cart_id: cart.cart_id,
             cart_vendor_group_id: group.cart_vendor_group_id,
             cart_line_id: parseUuidV7(lineId),
-            event_type: 'LINE_MARKED_STALE',
-            reason_code: 'PRODUCT_NO_LONGER_ACTIVE',
+            event_type: 'LINE_REVIVED',
+            reason_code: 'CHECKS_PASSED',
             ids,
             now,
           });
@@ -876,7 +960,9 @@ export class CustomerCartService {
             vendor_location_id: group.vendor_location_id,
             invalidated: reason !== null,
             reason,
-            stale_line_ids: Object.freeze(staleLineIds.map((id) => parseUuidV7(id))),
+            recovered,
+            stale_line_ids: Object.freeze(staleLines.map((line) => parseUuidV7(line.cart_line_id))),
+            revived_line_ids: Object.freeze(revivedLineIds.map((id) => parseUuidV7(id))),
           }),
         );
       }

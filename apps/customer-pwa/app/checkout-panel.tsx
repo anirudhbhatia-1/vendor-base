@@ -25,6 +25,7 @@ import {
   formatCountdown,
   formatMoneyMinor,
 } from '@neighbourhood-store/ui';
+import { groupUnavailableSentence, lineStaleSentence } from './basket-copy';
 import { useCart } from './cart-store';
 import { customerApiClient } from './customer-session';
 import { displayLabel, shortReference } from './display';
@@ -43,13 +44,37 @@ const FULFILMENT_LABEL: Readonly<Record<FulfilmentMethod, string>> = {
 
 /** One vendor group in the basket, with everything that is decided per store. */
 function GroupCard({ group }: { readonly group: CartVendorGroup }) {
-  const { busyVariantIds, setGroupFulfilment, setQuantity, setSubstitutionPreference } = useCart();
+  const {
+    busyVariantIds,
+    removeGroup,
+    removeLine,
+    setGroupFulfilment,
+    setQuantity,
+    setSubstitutionPreference,
+  } = useCart();
   const { t } = useLocale();
   const [note, setNote] = useState(group.customer_note ?? '');
   const name = displayLabel(group.location_name);
+  // Revalidation used to mark a group INVALID and a line STALE and the basket
+  // drew both exactly as before, so the customer learnt at the quote -- or
+  // never -- that a store had dropped out. The reason is now on the row and
+  // the way out is offered next to it.
+  const unavailable =
+    group.lifecycle_state === 'INVALID' ? groupUnavailableSentence(group.invalid_reason, t) : null;
 
   return (
     <Card as="article" className="basket-group" tone="raised">
+      {unavailable ? (
+        <Notice tone="danger">
+          <strong>
+            {t('customer.cart.group.unavailable', 'This store cannot take this order right now')}
+          </strong>{' '}
+          {unavailable}{' '}
+          <Button onClick={() => void removeGroup(group)} size="small" variant="danger">
+            {t('customer.cart.group.remove', 'Remove this store')}
+          </Button>
+        </Notice>
+      ) : null}
       <header className="basket-group__head">
         <div>
           <h3 className="basket-group__name">
@@ -78,6 +103,8 @@ function GroupCard({ group }: { readonly group: CartVendorGroup }) {
         {group.lines.map((line) => {
           const title = displayLabel(line.title);
           const imageId = line.image_reference;
+          const stale =
+            line.lifecycle_state === 'STALE' ? lineStaleSentence(line.stale_reason, t) : null;
           return (
             <li className="basket-line" key={line.cart_line_id}>
               <ProductImage
@@ -109,41 +136,56 @@ function GroupCard({ group }: { readonly group: CartVendorGroup }) {
                     : ` = ${formatMoneyMinor(line.line_total_minor)}`}
                 </span>
 
-                <SelectField
-                  className="basket-line__substitution"
-                  label={t('customer.cart.substitution', 'If it is unavailable')}
-                  onChange={(event) =>
-                    void setSubstitutionPreference(
-                      line,
-                      event.target.value as 'ASK_CUSTOMER' | 'ALLOW_SAME_STORE' | 'NO_SUBSTITUTION',
-                    )
-                  }
-                  value={line.substitution_preference}
-                >
-                  <option value="ASK_CUSTOMER">
-                    {t('customer.substitution.ask', 'Ask me before replacing it')}
-                  </option>
-                  <option value="ALLOW_SAME_STORE">
-                    {t('customer.substitution.allow', 'Let the store choose a close match')}
-                  </option>
-                  <option value="NO_SUBSTITUTION">
-                    {t('customer.substitution.none', 'Do not replace it — refund me')}
-                  </option>
-                </SelectField>
+                {stale ? <Notice tone="danger">{stale}</Notice> : null}
+                {stale ? null : (
+                  <SelectField
+                    className="basket-line__substitution"
+                    label={t('customer.cart.substitution', 'If it is unavailable')}
+                    onChange={(event) =>
+                      void setSubstitutionPreference(
+                        line,
+                        event.target.value as
+                          'ASK_CUSTOMER' | 'ALLOW_SAME_STORE' | 'NO_SUBSTITUTION',
+                      )
+                    }
+                    value={line.substitution_preference}
+                  >
+                    <option value="ASK_CUSTOMER">
+                      {t('customer.substitution.ask', 'Ask me before replacing it')}
+                    </option>
+                    <option value="ALLOW_SAME_STORE">
+                      {t('customer.substitution.allow', 'Let the store choose a close match')}
+                    </option>
+                    <option value="NO_SUBSTITUTION">
+                      {t('customer.substitution.none', 'Do not replace it — refund me')}
+                    </option>
+                  </SelectField>
+                )}
               </div>
-              <QuantityStepper
-                busy={busyVariantIds.has(line.catalogue_variant_id)}
-                itemLabel={title}
-                onChange={(next) =>
-                  void setQuantity({
-                    catalogueVariantId: line.catalogue_variant_id,
-                    quantity: next,
-                    vendorLocationId: group.vendor_location_id,
-                  })
-                }
-                quantity={line.quantity}
-                size="small"
-              />
+              {stale ? (
+                <Button
+                  busy={busyVariantIds.has(line.catalogue_variant_id)}
+                  onClick={() => void removeLine(line)}
+                  size="small"
+                  variant="danger"
+                >
+                  {t('customer.cart.line.remove', 'Remove')}
+                </Button>
+              ) : (
+                <QuantityStepper
+                  busy={busyVariantIds.has(line.catalogue_variant_id)}
+                  itemLabel={title}
+                  onChange={(next) =>
+                    void setQuantity({
+                      catalogueVariantId: line.catalogue_variant_id,
+                      quantity: next,
+                      vendorLocationId: group.vendor_location_id,
+                    })
+                  }
+                  quantity={line.quantity}
+                  size="small"
+                />
+              )}
             </li>
           );
         })}

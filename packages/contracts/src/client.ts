@@ -22,6 +22,7 @@ import type {
   ShopRequestQueueEntry,
   VendorLocationSettings,
   RecentSearch,
+  RevalidationOutcome,
   SearchResult,
   CheckoutGroupReceipt,
   CustomerOrderGroup,
@@ -449,7 +450,7 @@ export function createApiClient(options: ApiClientOptions) {
         }),
 
       revalidate: () =>
-        r<{ outcomes: { invalidated: boolean }[] }>('/customer/cart/revalidate', {
+        r<{ outcomes: RevalidationOutcome[] }>('/customer/cart/revalidate', {
           method: 'POST',
         }),
     },

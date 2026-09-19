@@ -13,6 +13,7 @@ import {
 import type {
   Cart,
   CartLine,
+  CartVendorGroup,
   FulfilmentMethod,
   SubstitutionPreference,
 } from '@neighbourhood-store/contracts';
@@ -57,6 +58,10 @@ export type CartState = {
   }) => Promise<void>;
   readonly refresh: () => Promise<void>;
   readonly revalidate: () => Promise<{ readonly changed: boolean }>;
+  /** Removes one line whatever its state: a stale line has no quantity to step to zero. */
+  readonly removeLine: (line: CartLine) => Promise<void>;
+  /** Removes every line of a group: the way out of a store that cannot take the order. */
+  readonly removeGroup: (group: CartVendorGroup) => Promise<void>;
 };
 
 const CartContext = createContext<CartState | null>(null);
@@ -245,12 +250,48 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
       const client = await customerApiClient();
       const outcome = await client.cart.revalidate();
       await refresh();
-      return { changed: outcome.outcomes.some((entry) => entry.invalidated) };
+      // A line going stale, or a group or line coming back, is a change the
+      // customer is told about just as an invalidated group is.
+      return {
+        changed: outcome.outcomes.some(
+          (entry) =>
+            entry.invalidated ||
+            entry.recovered ||
+            entry.stale_line_ids.length > 0 ||
+            entry.revived_line_ids.length > 0,
+        ),
+      };
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Your basket could not be rechecked.');
       return { changed: false };
     }
   }, [refresh]);
+
+  const removeLine = useCallback<CartState['removeLine']>(
+    async (line) => {
+      markBusy(line.catalogue_variant_id, true);
+      const ticket = ++sequence.current;
+      try {
+        const client = await customerApiClient();
+        adopt(await client.cart.removeLine(line.cart_line_id), ticket);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : 'That line could not be removed.');
+        await refresh();
+      } finally {
+        markBusy(line.catalogue_variant_id, false);
+      }
+    },
+    [adopt, markBusy, refresh],
+  );
+
+  const removeGroup = useCallback<CartState['removeGroup']>(
+    async (group) => {
+      for (const line of group.lines) {
+        if (line.lifecycle_state !== 'REMOVED') await removeLine(line);
+      }
+    },
+    [removeLine],
+  );
 
   useEffect(() => {
     void refresh();
@@ -351,6 +392,8 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
         setGroupFulfilment,
         refresh,
         revalidate,
+        removeLine,
+        removeGroup,
       };
     }
     const groups = cart?.groups ?? [];
@@ -370,6 +413,8 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
       setGroupFulfilment,
       refresh,
       revalidate,
+      removeLine,
+      removeGroup,
     };
   }, [
     busy,
@@ -377,6 +422,8 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
     error,
     guestLines,
     refresh,
+    removeGroup,
+    removeLine,
     revalidate,
     setGroupFulfilment,
     setQuantity,

@@ -90,10 +90,19 @@ export async function verifyCustomerCart(connectionString: string): Promise<void
     const address = await pool.query<{ customer_address_id: string }>(
       `INSERT INTO marketplace.customer_addresses
          (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
-       VALUES ($1,$2,'SYNTH-ADDRESS-CART','SYNTH Cart Home','302001',
+       VALUES ($1,$2,$6,'SYNTH Cart Home','302001',
          ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,$5)
        RETURNING customer_address_id`,
-      [createUuidV7(), customerId, jaipur.longitude, jaipur.latitude, createUuidV7()],
+      [
+        createUuidV7(),
+        customerId,
+        jaipur.longitude,
+        jaipur.latitude,
+        createUuidV7(),
+        // Unique per run: address_reference is globally unique, so a fixed
+        // value let this script succeed exactly once per database (batch 06).
+        `SYNTH-ADDRESS-CART-${customerId.replaceAll('-', '').slice(-10).toUpperCase()}`,
+      ],
     );
     const addressId = address.rows[0]?.customer_address_id as UuidV7;
     check(typeof addressId === 'string', 'Fixture address was not created');
@@ -430,6 +439,274 @@ export async function verifyCustomerCart(connectionString: string): Promise<void
     await pool.query(
       "UPDATE marketplace.vendor_locations SET lifecycle_state='ACTIVE' WHERE vendor_location_id=$1",
       [stores0.locationId],
+    );
+    check(
+      invalidGroup.invalid_reason === 'STORE_CLOSED',
+      'The invalidated group did not carry the reason',
+    );
+
+    // 7b. Recovery (6.7 requirements 2-4). Revalidation could mark a group
+    // INVALID and a line STALE and never undo either, so a store that
+    // reopened or an address changed back left a group the basket showed
+    // and the quote silently dropped. Each way back is walked here.
+    const reopened = await cart.revalidate({ context: context(customerId), now });
+    check(
+      reopened.find((o) => o.vendor_location_id === stores0.locationId)?.recovered === true,
+      'A reopened store did not recover its group on refresh',
+    );
+    const afterReopen = await cart.currentCart({ context: context(customerId), now });
+    const reopenedGroup = afterReopen.groups.find(
+      (g) => g.vendor_location_id === stores0.locationId,
+    );
+    check(
+      reopenedGroup?.lifecycle_state === 'ACTIVE' && reopenedGroup.invalid_reason === null,
+      'A recovered group is not ACTIVE with its reason cleared',
+    );
+
+    // Change address: moving out of every store's zone invalidates each group
+    // with the address reason; moving back recovers them, in the same command.
+    const farAddress = await pool.query<{ customer_address_id: string }>(
+      `INSERT INTO marketplace.customer_addresses
+         (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
+       VALUES ($1,$2,$6,'SYNTH Cart Away','400001',
+         ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,$5)
+       RETURNING customer_address_id`,
+      [
+        createUuidV7(),
+        customerId,
+        72.8777,
+        19.076,
+        createUuidV7(),
+        `SYNTH-ADDRESS-CART-AWAY-${customerId.replaceAll('-', '').slice(-10).toUpperCase()}`,
+      ],
+    );
+    const movedAway = await cart.setCartAddress({
+      context: context(customerId),
+      customer_address_id: farAddress.rows[0]?.customer_address_id as UuidV7,
+      now,
+    });
+    check(
+      movedAway.groups.length > 0 &&
+        movedAway.groups.every(
+          (g) => g.lifecycle_state === 'INVALID' && g.invalid_reason === 'ADDRESS_OUT_OF_ZONE',
+        ),
+      'Changing to an address outside every zone did not invalidate each group with the reason',
+    );
+    const movedBack = await cart.setCartAddress({
+      context: context(customerId),
+      customer_address_id: addressId,
+      now,
+    });
+    check(
+      movedBack.groups.every((g) => g.lifecycle_state === 'ACTIVE' && g.invalid_reason === null),
+      'Changing back to a covered address did not recover the groups',
+    );
+
+    // An unpublished store is the third group reason.
+    await pool.query(
+      "UPDATE marketplace.vendor_publication_cases SET lifecycle_state='PAUSED' WHERE vendor_location_id=$1",
+      [storeC.locationId],
+    );
+    await cart.revalidate({ context: context(customerId), now });
+    const paused = (await cart.currentCart({ context: context(customerId), now })).groups.find(
+      (g) => g.vendor_location_id === storeC.locationId,
+    );
+    check(
+      paused?.lifecycle_state === 'INVALID' && paused.invalid_reason === 'STORE_UNPUBLISHED',
+      'A paused publication did not invalidate the group as unpublished',
+    );
+    await pool.query(
+      "UPDATE marketplace.vendor_publication_cases SET lifecycle_state='PUBLISHED' WHERE vendor_location_id=$1",
+      [storeC.locationId],
+    );
+    await cart.revalidate({ context: context(customerId), now });
+
+    // Lines. A second product in store C makes isolation observable: retiring
+    // the first leaves the second, and the group, ACTIVE. The quote would
+    // have dropped a retired, unpriced or stock-less line without a word.
+    const productC2 = await makeProduct(
+      catalogue,
+      storeC.ownerUserId,
+      storeC.locationId,
+      'C2',
+      now,
+    );
+    const withSecond = await cart.addLine({
+      context: context(customerId),
+      vendor_location_id: storeC.locationId,
+      catalogue_variant_id: productC2.catalogue_variant_id,
+      quantity: 1,
+      now,
+    });
+    const groupCBefore = withSecond.groups.find((g) => g.vendor_location_id === storeC.locationId);
+    check(groupCBefore?.lines.length === 2, 'Store C did not get its second line');
+    const retiredProduct = await catalogue.setLifecycle({
+      context: vendorContext(storeC.ownerUserId),
+      vendor_location_id: storeC.locationId,
+      catalogue_product_id: productC.catalogue_product_id,
+      expected_version: 1,
+      lifecycle_state: 'INACTIVE',
+      now,
+    });
+    const retiredOutcome = (await cart.revalidate({ context: context(customerId), now })).find(
+      (o) => o.vendor_location_id === storeC.locationId,
+    );
+    check(
+      retiredOutcome?.invalidated === false && retiredOutcome.stale_line_ids.length === 1,
+      'Retiring one product did not mark exactly its line stale, or invalidated the group',
+    );
+    const groupCRetired = (
+      await cart.currentCart({ context: context(customerId), now })
+    ).groups.find((g) => g.vendor_location_id === storeC.locationId);
+    const retiredLine = groupCRetired?.lines.find(
+      (l) => l.catalogue_variant_id === productC.catalogue_variant_id,
+    );
+    const siblingLine = groupCRetired?.lines.find(
+      (l) => l.catalogue_variant_id === productC2.catalogue_variant_id,
+    );
+    check(
+      groupCRetired?.lifecycle_state === 'ACTIVE' &&
+        retiredLine?.lifecycle_state === 'STALE' &&
+        retiredLine.stale_reason === 'PRODUCT_NO_LONGER_ACTIVE' &&
+        siblingLine?.lifecycle_state === 'ACTIVE' &&
+        siblingLine.stale_reason === null,
+      'A retired product was not isolated to its own line with the reason',
+    );
+    await rejects(
+      () =>
+        cart.setLineQuantity({
+          context: context(customerId),
+          cart_line_id: retiredLine.cart_line_id,
+          expected_version: retiredLine.version,
+          quantity: 3,
+          now,
+        }),
+      CustomerCartNotFoundError,
+      'A stale line accepted a quantity change',
+    );
+    await catalogue.setLifecycle({
+      context: vendorContext(storeC.ownerUserId),
+      vendor_location_id: storeC.locationId,
+      catalogue_product_id: productC.catalogue_product_id,
+      expected_version: retiredProduct.version,
+      lifecycle_state: 'ACTIVE',
+      now,
+    });
+    const revivedOutcome = (await cart.revalidate({ context: context(customerId), now })).find(
+      (o) => o.vendor_location_id === storeC.locationId,
+    );
+    check(
+      revivedOutcome?.revived_line_ids.length === 1 &&
+        revivedOutcome.revived_line_ids[0] === retiredLine.cart_line_id,
+      'A product brought back did not revive its line on refresh',
+    );
+
+    // No current price: the quote joins prices on effective_until IS NULL and
+    // would have dropped the line.
+    await pool.query(
+      'UPDATE marketplace.catalogue_prices SET effective_until=$2 WHERE catalogue_variant_id=$1 AND effective_until IS NULL',
+      [productC2.catalogue_variant_id, new Date(now.getTime() + 1_000)],
+    );
+    await cart.revalidate({ context: context(customerId), now });
+    const unpriced = (await cart.currentCart({ context: context(customerId), now })).groups
+      .find((g) => g.vendor_location_id === storeC.locationId)
+      ?.lines.find((l) => l.catalogue_variant_id === productC2.catalogue_variant_id);
+    check(
+      unpriced?.lifecycle_state === 'STALE' && unpriced.stale_reason === 'PRICE_WITHDRAWN',
+      'A line with no current price was not marked stale as unpriced',
+    );
+    await catalogue.setVariantPrice({
+      context: vendorContext(storeC.ownerUserId),
+      vendor_location_id: storeC.locationId,
+      catalogue_variant_id: productC2.catalogue_variant_id,
+      price_minor: 12000,
+      now,
+    });
+    await cart.revalidate({ context: context(customerId), now });
+
+    // No inventory row: the store has never said whether it has this, and
+    // the quote's inventory join would have dropped the line. Remove is the
+    // way out for a stale line, and it works on one.
+    await pool.query(
+      `DELETE FROM marketplace.inventory_items
+        WHERE vendor_location_id=$1 AND product_reference=$2`,
+      [storeC.locationId, 'SYNTH-PROD-CARTC2'],
+    );
+    await cart.revalidate({ context: context(customerId), now });
+    const unknownStock = (await cart.currentCart({ context: context(customerId), now })).groups
+      .find((g) => g.vendor_location_id === storeC.locationId)
+      ?.lines.find((l) => l.catalogue_variant_id === productC2.catalogue_variant_id);
+    check(
+      unknownStock?.lifecycle_state === 'STALE' &&
+        unknownStock.stale_reason === 'AVAILABILITY_UNKNOWN',
+      'A line with no inventory row was not marked stale as availability unknown',
+    );
+    const afterStaleRemoval = await cart.removeLine({
+      context: context(customerId),
+      cart_line_id: unknownStock.cart_line_id,
+      now,
+    });
+    check(
+      afterStaleRemoval.groups
+        .find((g) => g.vendor_location_id === storeC.locationId)
+        ?.lines.every((l) => l.catalogue_variant_id !== productC2.catalogue_variant_id) === true,
+      'A stale line could not be removed',
+    );
+
+    // Repeated quantity updates (requirement 5): five in a row, each against
+    // the version the last one returned, land on the last value with the
+    // version advanced once per update -- and the audit trail has five rows.
+    let stepped = (await cart.currentCart({ context: context(customerId), now })).groups
+      .find((g) => g.vendor_location_id === storeC.locationId)
+      ?.lines.find((l) => l.catalogue_variant_id === productC.catalogue_variant_id);
+    check(stepped !== undefined, 'The store C line to step is missing');
+    const startVersion = stepped.version;
+    for (const quantity of [2, 3, 4, 5, 6]) {
+      const next = await cart.setLineQuantity({
+        context: context(customerId),
+        cart_line_id: stepped.cart_line_id,
+        expected_version: stepped.version,
+        quantity,
+        now,
+      });
+      stepped = next.groups
+        .find((g) => g.vendor_location_id === storeC.locationId)
+        ?.lines.find((l) => l.cart_line_id === stepped?.cart_line_id);
+      check(stepped !== undefined, 'A stepped line vanished');
+    }
+    check(
+      stepped.quantity === 6 && stepped.version === startVersion + 5,
+      'Five consecutive quantity updates did not land on the last value with five version steps',
+    );
+    const stepEvents = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM marketplace.cart_events
+        WHERE cart_line_id=$1 AND event_type='LINE_QUANTITY_CHANGED'`,
+      [stepped.cart_line_id],
+    );
+    check(
+      Number(stepEvents.rows[0]?.count) >= 5,
+      'Repeated quantity updates did not each leave audit evidence',
+    );
+
+    // The table refuses the states the service could reach by mistake: a stale
+    // line or an invalid group with no reason to show for it.
+    await rejects(
+      () =>
+        pool.query(
+          `UPDATE marketplace.cart_lines SET lifecycle_state='STALE' WHERE cart_line_id=$1`,
+          [stepped?.cart_line_id],
+        ),
+      Error,
+      'The table let a line go stale with no reason',
+    );
+    await rejects(
+      () =>
+        pool.query(
+          `UPDATE marketplace.cart_vendor_groups SET lifecycle_state='INVALID' WHERE cart_vendor_group_id=$1`,
+          [groupCBefore?.cart_vendor_group_id],
+        ),
+      Error,
+      'The table let a group go invalid with no reason',
     );
 
     // 8. Cart items are never represented as reserved inventory: adding and

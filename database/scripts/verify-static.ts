@@ -155,6 +155,7 @@ assert(
       '0080_vendor_self_delivery',
       '0081_shop_request_pipeline',
       '0082_storefront_freshness_copy',
+      '0083_cart_recovery',
     ]),
   'Unexpected reviewed migrations',
 );

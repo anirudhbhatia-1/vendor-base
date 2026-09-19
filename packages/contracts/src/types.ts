@@ -197,6 +197,12 @@ export type CartLine = {
   quantity: number;
   substitution_preference: SubstitutionPreference;
   lifecycle_state: string;
+  /**
+   * Set while the line is STALE: PRODUCT_NO_LONGER_ACTIVE, PRICE_WITHDRAWN or
+   * AVAILABILITY_UNKNOWN. The quote would drop such a line without a word, so
+   * the basket has to say it and offer removal.
+   */
+  stale_reason: string | null;
   version: number;
   /** Current catalogue facts. A cart holds no price snapshot; the quote does. */
   title: string;
@@ -215,6 +221,12 @@ export type CartVendorGroup = {
   customer_note: string | null;
   tip_minor: number;
   lifecycle_state: string;
+  /**
+   * Set while the group is INVALID: STORE_CLOSED, STORE_UNPUBLISHED or
+   * ADDRESS_OUT_OF_ZONE. Revalidation clears it when the store or address
+   * changes back; until then the quote leaves this store out.
+   */
+  invalid_reason: string | null;
   version: number;
   lines: CartLine[];
   /** The named store (MKT-01) and whether this group can be ordered from. */
@@ -229,6 +241,16 @@ export type CartVendorGroup = {
    * chose it. The quote blocks such a group; the repair is one of `fulfilment_modes`.
    */
   fulfilment_method_offered: boolean;
+};
+
+export type RevalidationOutcome = {
+  cart_vendor_group_id: string;
+  vendor_location_id: string;
+  invalidated: boolean;
+  reason: string | null;
+  recovered: boolean;
+  stale_line_ids: string[];
+  revived_line_ids: string[];
 };
 
 export type Cart = {

@@ -321,3 +321,45 @@ test('sign-in announces a failure assertively and progress politely', () => {
   assert.ok(source.includes('showError('), 'failure paths use the assertive helper');
   assert.ok(source.includes('showStatus('), 'progress paths use the polite helper');
 });
+
+test('the basket says why a store or a line cannot be ordered, and offers the way out', () => {
+  const source = code('checkout-panel.tsx');
+  const groupCard = source.slice(
+    source.indexOf('function GroupCard'),
+    source.indexOf('export function'),
+  );
+  assert.ok(
+    groupCard.includes("group.lifecycle_state === 'INVALID'") &&
+      groupCard.includes('groupUnavailableSentence(group.invalid_reason, t)'),
+    'an invalid group is explained by the reason revalidation recorded',
+  );
+  assert.ok(groupCard.includes('removeGroup(group)'), 'and can be removed as a whole');
+  assert.ok(
+    groupCard.includes("line.lifecycle_state === 'STALE'") &&
+      groupCard.includes('lineStaleSentence(line.stale_reason, t)'),
+    'a stale line is explained by its reason',
+  );
+  assert.ok(
+    groupCard.includes('removeLine(line)'),
+    'and can be removed without a quantity to step',
+  );
+  // A stale line has nothing to step: the stepper and the substitution
+  // choice are for a line the store can still supply.
+  assert.ok(
+    /stale \? \(\s*<Button/.test(groupCard) && /stale \? null : \(\s*<SelectField/.test(groupCard),
+    'the stepper and substitution choice give way to removal on a stale line',
+  );
+});
+
+test('a recheck reports a change when a line went stale or something came back, not only when a group failed', () => {
+  const source = code('cart-store.tsx');
+  const revalidate = source.slice(source.indexOf('const revalidate = useCallback'));
+  for (const field of [
+    'entry.invalidated',
+    'entry.recovered',
+    'entry.stale_line_ids.length > 0',
+    'entry.revived_line_ids.length > 0',
+  ]) {
+    assert.ok(revalidate.includes(field), field);
+  }
+});
