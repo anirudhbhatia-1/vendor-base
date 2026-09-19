@@ -1,10 +1,19 @@
 import { createHmac } from 'node:crypto';
-import { createUuidV7 } from '@neighbourhood-store/domain-types';
+import { createRequestId, createUuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import { CatalogueProductService } from '../src/catalogue-products.js';
 import { CustomerCartService } from '../src/customer-cart.js';
+import { resolveFinancialPolicy } from '../src/financial-policy.js';
 import { CheckoutNotFoundError, GroupedCheckoutService } from '../src/grouped-checkout.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
+import { calculateDistanceAmount } from '../src/money-policy.js';
+import {
+  activateConfigurationVersion,
+  approveConfigurationVersion,
+  createConfigurationDraft,
+  scheduleConfigurationVersion,
+  validateConfigurationVersion,
+} from '../src/versioned-configuration.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
 import { check, customerContext, vendorContext } from './verify-support.js';
 
@@ -80,9 +89,14 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
     await pool.query(
       `INSERT INTO marketplace.customer_addresses
         (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
-       VALUES ($1,$2,'SYNTH-ADDRESS-CHECKOUT','SYNTH Checkout Home','302020',
+       VALUES ($1,$2,$4,'SYNTH Checkout Home','302020',
          ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
-      [addressId, customerId, createUuidV7()],
+      [
+        addressId,
+        customerId,
+        createUuidV7(),
+        `SYNTH-ADDRESS-CHECKOUT-${customerId.replaceAll('-', '').slice(-10).toUpperCase()}`,
+      ],
     );
     const cart = await carts.currentCart({ context: customerContext(customerId), now });
     await carts.setCartAddress({
@@ -107,6 +121,35 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       now,
     });
     check(quote.groups.length === 2, 'The two valid store groups were not quoted');
+    // 7.1 at the connected layer: the amounts the quote stores are the pricing
+    // module's, fed the store's real route distance and the active policy, and
+    // the policy version that priced it is stamped on the quote. Every line is
+    // one unit at ₹100; the address sits on store A and about 111 m from store
+    // B, both inside the 2 km the base fee includes.
+    const { version_reference: policyAtQuote } = await resolveFinancialPolicy(pool, { at: now });
+    check(
+      /^SYNTH-POLICY-FIN-V\d+-[0-9A-F]{8}$/.test(quote.policy_version_reference) &&
+        quote.policy_version_reference === policyAtQuote,
+      `The quote does not carry the policy version in force when it was priced (${quote.policy_version_reference})`,
+    );
+    for (const group of quote.groups) {
+      const route = await pool.query<{ metres: string }>(
+        `SELECT ST_Distance(l.coordinates, a.coordinates)::bigint::text AS metres
+           FROM marketplace.vendor_locations l, marketplace.customer_addresses a
+          WHERE l.vendor_location_id=$1 AND a.customer_address_id=$2`,
+        [group.vendor_location_id, addressId],
+      );
+      const metres = Number(route.rows[0]?.metres);
+      check(
+        group.item_minor === 10_000 &&
+          group.delivery_minor === calculateDistanceAmount(metres) &&
+          group.delivery_minor === 1_500 &&
+          group.tip_minor === 0 &&
+          group.total_minor === 11_500,
+        `A quoted group's amounts are not the pricing module's for its route (${JSON.stringify({ item: group.item_minor, delivery: group.delivery_minor, tip: group.tip_minor, total: group.total_minor, metres })})`,
+      );
+    }
+    check(quote.total_minor === 23_000, 'The quote total is not the sum of its groups');
     check(
       quote.blocked_groups.length === 1 &&
         quote.blocked_groups[0]?.reason_code === 'INVENTORY_UNAVAILABLE',
@@ -149,6 +192,22 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
     check(
       counts.rows[0]?.orders === '2' && counts.rows[0]?.allocations === '2',
       'Replay duplicated orders or allocations',
+    );
+    const stamped = await pool.query<{ policy_version_reference: string; item_minor: string }>(
+      `SELECT pa.policy_version_reference, pa.item_minor::text AS item_minor
+         FROM marketplace.payment_allocations pa
+         JOIN marketplace.checkout_groups cg ON cg.payment_transaction_id=pa.payment_transaction_id
+        WHERE cg.checkout_group_id=$1`,
+      [placed.checkout_group_id],
+    );
+    check(
+      stamped.rows.length === 2 &&
+        stamped.rows.every(
+          (row) =>
+            row.policy_version_reference === quote.policy_version_reference &&
+            row.item_minor === '10000',
+        ),
+      'The allocations do not carry the policy version and amounts the quote was priced with',
     );
     await rejectsNotFound(() =>
       checkout.get({
@@ -293,9 +352,14 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
     await pool.query(
       `INSERT INTO marketplace.customer_addresses
         (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
-       VALUES ($1,$2,'SYNTH-ADDRESS-CHECKOUT-METHOD','SYNTH Checkout Method Home','302020',
+       VALUES ($1,$2,'SYNTH-ADDRESS-CHECKOUT-METHOD-' || $4,'SYNTH Checkout Method Home','302020',
          ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
-      [collectorAddressId, collectorId, createUuidV7()],
+      [
+        collectorAddressId,
+        collectorId,
+        createUuidV7(),
+        collectorId.replaceAll('-', '').slice(-10).toUpperCase(),
+      ],
     );
     const methodCart = await carts.currentCart({ context: customerContext(collectorId), now });
     await carts.setCartAddress({
@@ -368,6 +432,95 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       withdrawnQuote.groups.length === 1 &&
         withdrawnQuote.groups[0]?.vendor_location_id === deliveringStore.locationId,
       'Blocking the withdrawn group also dropped its healthy sibling',
+    );
+
+    // 7.1 requirement 2, the other half: a policy version is attached so the
+    // order can be priced and settled under it later. A new policy version
+    // comes into force an hour after these quotes; the earlier quote keeps its
+    // version, a later quote takes the new one, and resolving the policy "as
+    // of" the earlier instant still finds the version then in force. The
+    // resolver used to consider ACTIVE rows only, so the first policy change
+    // made every earlier order unsettleable. The new version carries the same
+    // amounts, so nothing else in the ladder prices differently after it.
+    const proposerId = createUuidV7();
+    const approverId = createUuidV7();
+    for (const actorId of [proposerId, approverId]) {
+      await pool.query(
+        `INSERT INTO marketplace.users (user_id, created_at, updated_at)
+         VALUES ($1,$2,$2) ON CONFLICT (user_id) DO NOTHING`,
+        [actorId, now],
+      );
+    }
+    const before = await resolveFinancialPolicy(pool, { at: now });
+    const successorFrom = new Date(now.getTime() + 60 * 60_000);
+    const successor = await createConfigurationDraft(pool, {
+      actor_id: proposerId,
+      configuration_key: 'finance.financial_policy',
+      configuration_kind: 'SETTING',
+      configuration_value: { ...before.policy },
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: proposerId,
+      configuration_version_id: successor.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: successor.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: successor.configuration_version_id,
+      effective_from: successorFrom,
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: approverId,
+      at: successorFrom,
+      configuration_version_id: successor.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    const afterAtQuote = await resolveFinancialPolicy(pool, { at: now });
+    check(
+      afterAtQuote.version_reference === before.version_reference &&
+        afterAtQuote.version_reference === quote.policy_version_reference,
+      'After a policy change, the version in force when the order was quoted no longer resolves',
+    );
+    const afterLater = await resolveFinancialPolicy(pool, {
+      at: new Date(successorFrom.getTime() + 1_000),
+    });
+    check(
+      afterLater.version_reference !== before.version_reference &&
+        /^SYNTH-POLICY-FIN-V\d+-[0-9A-F]{8}$/.test(afterLater.version_reference),
+      'The successor policy does not resolve once in force',
+    );
+    // A quote priced *after* the change but *for* an instant before it is the
+    // case that separates "the policy as of the quote" from "the policy now":
+    // the wall clock is long past the successor, and only the quote's own
+    // instant can pick the predecessor.
+    const beforeSuccessorQuote = await checkout.createQuote({
+      context: customerContext(collectorId),
+      cart_id: methodCart.cart_id,
+      now: new Date(now.getTime() + 12 * 60_000),
+    });
+    check(
+      beforeSuccessorQuote.checkout_quote_id !== withdrawnQuote.checkout_quote_id &&
+        beforeSuccessorQuote.policy_version_reference === before.version_reference,
+      `A quote for an instant before the policy change was priced under the successor (${beforeSuccessorQuote.policy_version_reference})`,
+    );
+    const laterQuote = await checkout.createQuote({
+      context: customerContext(collectorId),
+      cart_id: methodCart.cart_id,
+      now: new Date(successorFrom.getTime() + 2_000),
+    });
+    check(
+      laterQuote.policy_version_reference === afterLater.version_reference &&
+        laterQuote.checkout_quote_id !== withdrawnQuote.checkout_quote_id,
+      'A quote priced after the policy change did not carry the successor version',
     );
   } finally {
     await Promise.all([checkout.close(), inventory.close(), catalogue.close(), carts.close()]);

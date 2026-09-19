@@ -302,6 +302,35 @@ export async function verifyVersionedConfiguration(connectionString: string): Pr
     ) {
       throw new Error('Activation did not supersede the prior scoped version');
     }
+    // History survives supersession. The superseded version was in force for
+    // ten seconds before its replacement; resolving as of an instant inside
+    // that window must return it, and as of an instant after must return the
+    // replacement. The resolver used to consider ACTIVE rows only, so every
+    // earlier instant resolved to nothing once a key had been changed once.
+    const asOfBefore = await resolveConfiguration(pool, {
+      configuration_key: flagKey,
+      at: new Date(baseTime.getTime() + 5_000),
+    });
+    if (
+      asOfBefore?.configuration_version_id !== globalActive.configuration_version_id ||
+      asOfBefore.configuration_value !== false
+    ) {
+      throw new Error(
+        'Resolving as of an instant before supersession did not return the version then in force',
+      );
+    }
+    const asOfAfter = await resolveConfiguration(pool, {
+      configuration_key: flagKey,
+      at: new Date(baseTime.getTime() + 15_000),
+    });
+    if (
+      asOfAfter?.configuration_version_id !== replacement.configuration_version_id ||
+      asOfAfter.configuration_value !== true
+    ) {
+      throw new Error(
+        'Resolving as of an instant after supersession did not return the replacement',
+      );
+    }
 
     const rollbackDraft = await createConfigurationRollbackDraft(pool, {
       actor_id: proposerId,

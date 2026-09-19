@@ -212,7 +212,7 @@
       "name": "Transparent pricing",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Quote shows per-group item/delivery/tip/buffer breakdown",
+      "notes": "Quote shows per-group item/delivery/tip/buffer breakdown. Audit run 41: amounts asserted against the pricing module at the connected layer, D-05 worked examples table-driven, the policy version stamped and resolvable as of the quote instant after a later policy change.",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -259,7 +259,7 @@
       "name": "Versioned operating policies",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "ConfigurationAdminService with full lifecycle",
+      "notes": "ConfigurationAdminService with full lifecycle. Audit run 41: resolving as of a past instant now finds the SUPERSEDED version then in force; before that the first change to a key made every earlier order unsettleable.",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {

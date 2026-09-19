@@ -737,7 +737,14 @@ export async function resolveConfiguration(
             configuration_kind, value_type, configuration_value, scope_kind,
             scope_reference, status, rollback_of_version_id, effective_from, effective_until
        FROM marketplace.configuration_versions
-      WHERE configuration_key = $1 AND status = 'ACTIVE'
+      WHERE configuration_key = $1
+        -- A superseded version was in force between its effective_from and the
+        -- moment its successor took over, which activation records as its
+        -- effective_until. Resolving "as of" an instant in that window has to
+        -- find it: an order is settled under the policy it was quoted with, and
+        -- until this clause every policy change made every earlier order
+        -- unsettleable (no policy "active" at its quoted instant).
+        AND status IN ('ACTIVE', 'SUPERSEDED')
         AND ($2::text IS NULL OR configuration_kind = $2)
         AND effective_from <= $3 AND (effective_until IS NULL OR effective_until > $3)
         AND (

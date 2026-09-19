@@ -35,7 +35,7 @@ Only one `SCHEDULED` and one `ACTIVE` version may exist for a key/scope. Activat
 
 Rollback never reactivates or edits an older row. `createConfigurationRollbackDraft` copies a previously active version into a new higher-numbered `DRAFT`, records `rollback_of_version_id`, and requires the same validation, different-actor approval, scheduling, and activation path as any other change.
 
-Historical business records and lifecycle evidence therefore continue to point at the versions that actually governed them.
+Historical business records and lifecycle evidence therefore continue to point at the versions that actually governed them — and can be resolved again. `resolveConfiguration` takes an `at` instant and considers `ACTIVE` and `SUPERSEDED` versions whose effective window covers it (activation stamps the predecessor's `effective_until` with the successor's `effective_from`, so the windows never overlap). Until audit run 41 it considered `ACTIVE` rows only, so the first change to a key made every earlier instant resolve to nothing: an order quoted under policy v1 could not be settled once v2 was active, because "the policy as of when it was quoted" no longer existed. The configuration verifier resolves as of an instant on each side of a supersession; the checkout verifier prices a quote, activates a successor policy, and asserts the quote's own instant still resolves its version while a later quote takes the successor.
 
 ## Feature-flag evaluation
 

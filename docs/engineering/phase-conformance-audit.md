@@ -609,7 +609,7 @@ The best-covered step in Phase 3. Every requirement already had a real assertion
 | 1 | Scoped, versioned configuration records | Met. A draft starts at version one in `DRAFT`; scoped versions activate independently. |
 | 2 | Draft, validation, approval, schedule, active, superseded, rollback lifecycle | Met. Self-approval is refused, an invalid lifecycle jump is refused, activation supersedes the prior scoped version, and rollback creates a new attributable version from history rather than resurrecting the old row. |
 | 3 | Safe flag evaluation by internal user, vendor, category, zone or cohort | Met, and it fails safe. |
-| 4 | Preserve configuration versions on created business records | Met. A business record is asserted to retain its effective configuration version. |
+| 4 | Preserve configuration versions on created business records | Met as recorded here; **corrected in run 41**: the record retained the reference, but the resolver could not resolve a superseded version, so the preserved reference was unusable after the first change to the key. |
 | 5 | Invalid and overlap constraint tests | Met. Concurrent overlapping schedules produce exactly one winner; a non-boolean feature flag is refused by the database. |
 
 **Requirement 3 fails safe by construction, and that is asserted.** An unresolved flag returns `enabled: false` rather than throwing or defaulting on, and a resolved value that is not a boolean throws rather than being coerced — so a stored `"true"` string cannot quietly enable anything. The verifier covers both, including deterministic specific-to-global scope precedence. The five gated capabilities are all `UNAVAILABLE` in the registry, consistent with D-15.
@@ -1290,6 +1290,41 @@ One defect the table check caught before any probe: removing a `STALE` line left
 - **No UI or API claims cart inventory is reserved**: met. The verifier asserts `inventory_reservations` stays empty across the whole scenario; the basket copy says "Nothing is reserved" in the guest path and the quote is where holds begin.
 
 **Phase 6 status: VERIFIED_LOCAL.** All seven steps are VERIFIED_LOCAL (6.1–6.3 in runs 33–35, 6.4–6.7 in runs 37–40). Open by scope note, not by gate: the preferred store and the shop request have no customer or admin surface (`backend_only`); store images, per-store policy text and offers are not modelled; tipping is priced but not enabled or catalogued; the discovery multi-page ordering test recorded at 6.2.
+
+## Run 41 (19 September 2026) — step 7.1, pricing and policy evaluation
+
+The pure pricing function was in good shape. The step's requirements are about what surrounds it — the policy version attached to a quote, the D-05 examples, the refusals at the boundary — and there the connected layer asserted almost nothing: the quote's amounts were never checked, the policy stamp was never checked, and the one thing the stamp exists for turned out not to work. Sixteen unit tests and eleven connected assertions added; six mutation probes, all caught.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Item subtotal, discount, tax, delivery fee, tip, authorization buffer, final amount, in integer minor units | Met in the module (discount, tax and buffer are explicit zeros, as D-05 requires). **Unasserted at the connected layer**: nothing checked that the quote stored the module's amounts for the store's real route — P41-02. |
+| 2 | Attach active policy/configuration versions | Attached: `finance.financial_policy` is resolved as of the quote's instant, stamped on the quote and on every allocation. **It could not be used**: the resolver considered `ACTIVE` rows only, so after the first policy change every earlier order's version resolved to nothing — P41-01. |
+| 3 | Independent vendor-group calculations plus a combined total | Met, unit-tested. |
+| 4 | Reject unsupported currency, negative results, overflow, invalid rounding | Currency is refused where it can enter — the policy reader (`not priced in INR`) and the schema (`vendor_locations.currency = 'INR'`) — but the reader had no test. Negatives, overflow and fractions refused; overflow and fractions had no test. |
+| 5 | Table-driven policy examples from D-05 | **Not table-driven, and not D-05's examples.** Three scalar assertions on 2 km, 5 km and 2001 m; worked example 1 (₹349) appeared nowhere. |
+
+**P41-01 — the attached version resolved to nothing once superseded.** `resolveConfiguration` filtered `status = 'ACTIVE'` and `effective_from <= at`. Activation marks the predecessor `SUPERSEDED` with `effective_until` set to the successor's `effective_from`, so a superseded version has exactly the window it governed — and was excluded anyway. `OrderMoneyOrchestrator.recordDeliveryEarnings` resolves the policy `at: row.quoted_at`, with a comment saying the order "settles under the rules it was sold under even if the fee model has since changed"; after any change, that call threw `FinancialPolicyUnavailableError` for every order quoted before it, and settlement went to the dead-letter path. Run 19 recorded requirement 4 of step 3.7 ("preserve configuration versions on created business records") as met because the record retained the reference; retaining a reference nothing can resolve is not preservation. **Run 19's verdict on 3.7 requirement 4 is corrected here.** The resolver now considers `ACTIVE` and `SUPERSEDED` rows within their effective window. The configuration verifier resolves as of an instant on each side of a supersession; the checkout verifier prices a quote, activates a successor policy with identical amounts an hour later, and asserts that the quote's own instant still resolves its version, that a quote *made after the change for an instant before it* is priced under the predecessor (the case that separates "as of the quote" from "as of the wall clock"), and that a later quote takes the successor.
+
+**P41-02 — the quote's amounts were never checked.** The verifier asserted how many groups were quoted and never what they cost. It now reads each store's route distance from PostGIS and asserts item ₹100, delivery = `calculateDistanceAmount(route)` = ₹15 (both stores inside the included 2 km), tip 0, total ₹115, quote ₹230, and that the allocations carry the same amounts and the same policy reference after placement.
+
+**Requirement 5 now is a table.** `checkout-pricing.spec.ts` drives seven D-05 rows through `calculateCheckoutPricing` — worked example 1 (₹300 + ₹39 + ₹10 = ₹349), the 2 km included distance, 2001 m (0.8 paise rounds to 1), 2003 m (2.4 rounds to 2), 2007 m (5.6 rounds to 6), the 40 km boundary (₹15 + 38 × ₹8 = ₹319) and a zero-distance route (the base fee, not nothing) — plus the refusal past 40 km and worked example 6 (₹1 of fictional tax over three lines is 34, 33, 33). Overflow across three groups and fractional amounts are refused with the field named. A new `financial-policy.spec.ts` proves the reader refuses a non-INR policy, a missing, fractional or negative field, and the absence of any policy, and that the reference names the version number and row.
+
+**Scope notes.** (1) D-05 says "no tax-exempt claim", and `catalogue_products.tax_basis` admits `EXEMPT`, which every verifier fixture uses; the quote stores `tax_minor = 0` regardless, so no record *computes* an exemption, but the catalogue field is a claim in D-05's sense. An owner decision, not a fix here. (2) `route_metres` is `ST_Distance` — a straight line, not a route; D-05 says "route km". Recorded, not changed: a routing provider is outside D-15's boundary. (3) Tip is priced and always zero (run 39).
+
+**Mutation results.** Four connected probes on a rebuilt database and two unit probes, each restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Resolver back to `status = 'ACTIVE'` | *Resolving as of an instant before supersession did not return the version then in force* (configuration verifier, first in the ladder) |
+| Quote resolves the policy at the wall clock instead of its own instant | *A quote for an instant before the policy change was priced under the successor (…V2…)* |
+| Quote stamps a constant reference | *The quote does not carry the policy version in force when it was priced* |
+| Allocations stamp a constant reference | *The allocations do not carry the policy version and amounts the quote was priced with* |
+| `roundHalfUp` bias removed | four unit tests, including *D-05: one metre past the included distance is 0.8 paise, rounded half-up to 1* |
+| Currency check removed from the reader | *a policy in any currency but INR is refused, not priced as rupees* |
+
+**Verification.** `pnpm db:verify` exit 0 — 84 migrations, full ladder; `grouped_checkout` 32 assertions (23 after batch 10); `money_lifecycle` unchanged at 23. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 523 pass / 0 fail (+16). The checkout verifier's two fixed address references are unique per run, so it re-runs on one database.
+
+**Step 7.1: VERIFIED_LOCAL**, with the tax-basis and straight-line-distance scope notes carried for an owner.
 
 ## Session handoff — end of run 2 (6 September 2026)
 
