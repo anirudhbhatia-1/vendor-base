@@ -19,7 +19,9 @@ import {
   customerApiClient,
   readCustomerSession,
 } from './customer-session';
+import { freshnessSentence, weightVarianceSentence } from './availability-copy';
 import { displayLabel } from './display';
+import { useLocale } from './locale';
 import { StatePill } from './state-pill';
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:3001';
@@ -34,6 +36,7 @@ export function ProductPage({
   const [store, setStore] = useState<Storefront | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { busyVariantIds, quantityOf, setQuantity } = useCart();
+  const { t } = useLocale();
 
   useEffect(() => {
     let active = true;
@@ -74,6 +77,8 @@ export function ProductPage({
   const title = displayLabel(product.title);
   const quantity = quantityOf(product.catalogue_variant_id);
   const imageId = product.image_ids[0];
+  const freshness = freshnessSentence(product, t);
+  const variance = weightVarianceSentence(product, t);
   const update = (next: number) =>
     setQuantity({
       catalogueVariantId: product.catalogue_variant_id,
@@ -117,6 +122,7 @@ export function ProductPage({
             />
           </div>
           <p>{product.unit_label}</p>
+          {freshness ? <p>{freshness}</p> : null}
           <p>
             {product.substitution_available
               ? 'If this runs out, the shop can propose a replacement. You approve it before packing.'
@@ -126,6 +132,7 @@ export function ProductPage({
             <p>
               The shop confirms the final weight. You approve any material increase before payment
               changes.
+              {variance ? ` ${variance}` : null}
             </p>
           ) : null}
           {quantity > 0 ? (

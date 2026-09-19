@@ -40,7 +40,12 @@ never to a store the customer has no eligibility path to.
   itself a funnel event (`SEARCH_ZERO_RESULT`), not silently dropped.
 - **Storefront freshness** joins each active `catalogue_products` row to `inventory_items` by
   `(vendor_location_id, product_reference)`. A product with no matching inventory row is reported
-  `is_stale: true` rather than guessed-available. A product under an open
+  `is_stale: true` rather than guessed-available. A product with one also carries `freshness`
+  (`FRESH` within fifteen minutes of the shop's confirmation, `STALE` within an hour, `EXPIRED`
+  beyond — the one definition in `catalogue-freshness-moderation.ts`, shared with the 5.7
+  availability read) and `last_confirmed_at`; the tier informs the customer and never gates an
+  add, because reservations prevent overselling and the shop confirms at acceptance. A loose
+  product carries `permitted_weight_variance_bps` so the sheet can state the bound. A product under an open
   `CORRECTION_REQUIRED`/`RESTRICTED` moderation case is excluded entirely, reusing the Phase 5.7
   moderation boundary.
 - **Favourites and the preferred store are independent** of eligibility. Losing zone coverage never
@@ -73,6 +78,9 @@ The pipeline side lives under `admin/shop-requests` (global admin scope): `GET` 
 ordered by distance with a funnel event, a real catalogue product/inventory row joined correctly
 into the storefront (price, availability, staleness), a not-found storefront for an unknown
 location, search ranking with a zero-result funnel event, recent-search dedup and deletion,
+the freshness tier fresh at confirmation and expired an hour later without hiding the product,
+the loose product's weight bound and a packaged product's absence of one, no cross-vendor mixing
+in either direction between two published in-zone stores,
 favourite add/idempotent re-add/removal with eligibility from the address and an unknown store
 refused, the preferred store returned with its eligibility for an out-of-zone and an in-zone
 store with exactly one row, shop-request dedup per pin with acceptance in a new pin and in Hindi,

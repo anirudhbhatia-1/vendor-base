@@ -128,7 +128,17 @@ export type Product = {
   variable_weight: boolean;
   price_minor: number | null;
   availability_state: string | null;
+  /** No inventory row at all: the shop has never said whether it has this. */
   is_stale: boolean;
+  /**
+   * How recently the shop confirmed the stock: FRESH within fifteen minutes,
+   * STALE within an hour, EXPIRED beyond; null when there is no inventory row.
+   * Shown, never used to refuse an add — the shop confirms at acceptance.
+   */
+  freshness: 'EXPIRED' | 'FRESH' | 'STALE' | null;
+  last_confirmed_at: string | null;
+  /** Variable weight only: how far the final weight may differ, in basis points. */
+  permitted_weight_variance_bps: number | null;
   substitution_available: boolean;
   /**
    * Identifiers of this product's servable images, in display order.

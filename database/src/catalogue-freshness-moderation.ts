@@ -74,7 +74,13 @@ function correction(value: string | undefined): string | null {
   }
   return normalized;
 }
-function freshness(lastConfirmedAt: Date, now: Date): AvailabilityFreshness {
+/**
+ * The one definition of how fresh a vendor's stock confirmation is. The
+ * storefront (6.5) shows the same tier this module's customer availability
+ * read (5.7) does; two definitions had let a product confirmed days ago look
+ * fresh on the store page while this read called it expired.
+ */
+export function availabilityFreshness(lastConfirmedAt: Date, now: Date): AvailabilityFreshness {
   const age = Math.max(0, now.getTime() - lastConfirmedAt.getTime());
   if (age <= FRESH_MS) return 'FRESH';
   if (age <= STALE_MS) return 'STALE';
@@ -84,7 +90,7 @@ function customerRecord(row: CustomerRow, now: Date): CustomerAvailabilityRecord
   return Object.freeze({
     availability_state: row.availability_state,
     display_name: row.display_name,
-    freshness: freshness(row.last_confirmed_at, now),
+    freshness: availabilityFreshness(row.last_confirmed_at, now),
     inventory_item_id: parseUuidV7(row.inventory_item_id),
     last_confirmed_at: row.last_confirmed_at.toISOString(),
     product_reference: row.product_reference,

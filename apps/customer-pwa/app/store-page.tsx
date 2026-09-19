@@ -25,6 +25,7 @@ import {
   customerApiClient,
   readCustomerSession,
 } from './customer-session';
+import { freshnessSentence, weightVarianceSentence } from './availability-copy';
 import { displayLabel } from './display';
 import { useLocale } from './locale';
 import { StatePill } from './state-pill';
@@ -50,6 +51,8 @@ function ProductSheet({
   const imageId = product.image_ids[0];
   const quantity = quantityOf(product.catalogue_variant_id);
   const supportsPlatformDelivery = storefront.fulfilment_modes.includes('PLATFORM_DELIVERY');
+  const freshness = freshnessSentence(product, t);
+  const variance = weightVarianceSentence(product, t);
 
   return (
     <Sheet
@@ -129,6 +132,12 @@ function ProductSheet({
           <dt>{t('customer.product.store', 'Sold by')}</dt>
           <dd>{displayLabel(storefront.location_name)}</dd>
         </div>
+        {freshness ? (
+          <div>
+            <dt>{t('customer.product.freshness', 'Stock check')}</dt>
+            <dd>{freshness}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>{t('customer.product.substitution', 'If it runs out')}</dt>
           <dd>
@@ -151,6 +160,7 @@ function ProductSheet({
                 'customer.product.weight.detail',
                 'Sold loose. The store weighs it and the final price follows the actual weight — a material difference comes back to you to approve.',
               )}
+              {variance ? ` ${variance}` : null}
             </dd>
           </div>
         ) : null}

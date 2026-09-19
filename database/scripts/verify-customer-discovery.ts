@@ -277,9 +277,32 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
       now,
     });
 
+    // A loose product with a weight bound, so the storefront's variable-weight
+    // estimate (6.5 requirement 3) is observable rather than always null. In a
+    // category of its own so the FRUIT_VEGETABLE ranking and filter assertions
+    // below keep their exact counts.
+    const loose = await catalogue.createProduct({
+      context: vendorContext(near.ownerUserId),
+      vendor_location_id: near.locationId,
+      product_reference: 'SYNTH-PROD-LOOSE',
+      title: 'SYNTH Loose Pumpkin',
+      category: 'STAPLES',
+      unit_label: 'KG',
+      tax_basis: 'EXEMPT',
+      variable_weight: true,
+      permitted_weight_variance_bps: 1000,
+      sku: 'SYNTH-SKU-LOOSE',
+      variant_title: 'SYNTH Loose Pumpkin Kilo',
+      price_minor: 4000,
+      initial_stock_quantity: 12,
+      low_stock_threshold: 2,
+      now,
+    });
+
     const storefront = await discovery.storefront({
       context: context(customerId),
       vendor_location_id: near.locationId,
+      now,
     });
     const listed = storefront.products.find(
       (p) => p.catalogue_product_id === product.catalogue_product_id,
@@ -291,6 +314,64 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
       'Storefront did not resolve live availability',
     );
     check(!listed.is_stale, 'A product with a confirmed inventory row was reported stale');
+
+    // 6.5 requirement 3: availability freshness is the 5.7 tier, not merely
+    // "has an inventory row". Confirmed at `now`, the stock is FRESH; read an
+    // hour and a minute later it is EXPIRED, and the confirmation time is
+    // carried so a client can say when. Neither tier hides the product.
+    check(
+      listed.freshness === 'FRESH' &&
+        listed.last_confirmed_at !== null &&
+        listed.last_confirmed_at.getTime() === now.getTime(),
+      'A just-confirmed product was not reported FRESH with its confirmation time',
+    );
+    const later = await discovery.publicStorefront({
+      vendor_location_id: near.locationId,
+      now: new Date(now.getTime() + 61 * 60_000),
+    });
+    const listedLater = later.products.find(
+      (p) => p.catalogue_product_id === product.catalogue_product_id,
+    );
+    check(
+      listedLater?.freshness === 'EXPIRED' && listedLater.is_stale === false,
+      'A confirmation over an hour old was not reported EXPIRED, or hid the product',
+    );
+    check(
+      listedLater.availability_state === 'AVAILABLE',
+      'An expired confirmation changed the availability state itself',
+    );
+    const listedLoose = storefront.products.find(
+      (p) => p.catalogue_product_id === loose.catalogue_product_id,
+    );
+    check(
+      listedLoose?.variable_weight === true && listedLoose.permitted_weight_variance_bps === 1000,
+      'The loose product did not carry its permitted weight variance',
+    );
+    check(
+      listed.permitted_weight_variance_bps === null,
+      'A packaged product carried a weight variance',
+    );
+
+    // 6.5 requirement 5: no cross-vendor catalogue mixing. The midtown store's
+    // product is published and in zone, and must not appear on the near store's
+    // page, nor the near store's on midtown's.
+    const midtownPage = await discovery.publicStorefront({
+      vendor_location_id: midtown.locationId,
+      now,
+    });
+    check(
+      !storefront.products.some(
+        (p) => p.catalogue_product_id === midtownProduct.catalogue_product_id,
+      ) &&
+        !midtownPage.products.some((p) => p.catalogue_product_id === product.catalogue_product_id),
+      'A storefront listed another vendor’s product',
+    );
+    check(
+      midtownPage.products.some(
+        (p) => p.catalogue_product_id === midtownProduct.catalogue_product_id,
+      ),
+      'The midtown storefront did not list its own product',
+    );
 
     // 4. A store the customer never viewed is not reachable through the
     // storefront endpoint; an unpublished/absent location resolves not-found.

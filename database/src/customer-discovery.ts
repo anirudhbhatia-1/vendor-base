@@ -1,3 +1,7 @@
+import {
+  availabilityFreshness,
+  type AvailabilityFreshness,
+} from './catalogue-freshness-moderation.js';
 import { createDatabasePool } from './database-pool.js';
 import {
   createUuidV7,
@@ -44,7 +48,22 @@ export interface StorefrontProduct {
   readonly variable_weight: boolean;
   readonly price_minor: number | null;
   readonly availability_state: string | null;
+  /** No inventory row at all: the shop has never said whether it has this. */
   readonly is_stale: boolean;
+  /**
+   * How recently the shop confirmed the stock, on the tiers 5.7 defines;
+   * null when there is no inventory row. Informational — it never gates a
+   * purchase, because reservations prevent overselling and the shop confirms
+   * at acceptance.
+   */
+  readonly freshness: AvailabilityFreshness | null;
+  readonly last_confirmed_at: Date | null;
+  /**
+   * For a variable-weight product, how far the final weight may differ from
+   * the ordered one, in basis points; null when the product is not sold by
+   * weight or the shop set no bound.
+   */
+  readonly permitted_weight_variance_bps: number | null;
   readonly substitution_available: boolean;
   /**
    * Identifiers of this product's servable images, in display order.
@@ -655,13 +674,15 @@ export class CustomerDiscoveryService {
   async storefront(input: {
     readonly context: RequestContext;
     readonly vendor_location_id: UuidV7;
+    readonly now?: Date;
   }): Promise<Storefront> {
-    const storefront = await this.#storefront(input.vendor_location_id);
+    const now = input.now ?? new Date();
+    const storefront = await this.#storefront(input.vendor_location_id, now);
     await recordEvent(this.#pool, {
       user_id: customer(input.context),
       event_type: 'STORE_VIEWED',
       context: input.context,
-      now: new Date(),
+      now,
     });
     return storefront;
   }
@@ -674,11 +695,14 @@ export class CustomerDiscoveryService {
    * this is the store page `architecture.md` §6.1 asks to be public, minus the
    * per-user view event.
    */
-  async publicStorefront(input: { readonly vendor_location_id: UuidV7 }): Promise<Storefront> {
-    return this.#storefront(input.vendor_location_id);
+  async publicStorefront(input: {
+    readonly vendor_location_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<Storefront> {
+    return this.#storefront(input.vendor_location_id, input.now ?? new Date());
   }
 
-  async #storefront(vendorLocationId: UuidV7): Promise<Storefront> {
+  async #storefront(vendorLocationId: UuidV7, now: Date): Promise<Storefront> {
     const input = { vendor_location_id: vendorLocationId };
     const location = await this.#pool.query<{
       location_name: string;
@@ -736,14 +760,16 @@ export class CustomerDiscoveryService {
       category: string;
       unit_label: string;
       variable_weight: boolean;
+      permitted_weight_variance_bps: number | null;
       price_minor: string | null;
       availability_state: string | null;
+      last_confirmed_at: Date | null;
       substitution_available: boolean;
       image_ids: string[];
     }>(
       `SELECT p.catalogue_product_id, v.catalogue_variant_id, p.product_reference, p.title, p.category, p.unit_label,
-              p.variable_weight, price.price_minor::text AS price_minor,
-              item.availability_state,
+              p.variable_weight, p.permitted_weight_variance_bps, price.price_minor::text AS price_minor,
+              item.availability_state, item.last_confirmed_at,
               EXISTS (
                 SELECT 1 FROM marketplace.catalogue_product_substitutions s
                  WHERE s.catalogue_variant_id = v.catalogue_variant_id AND s.lifecycle_state = 'ACTIVE'
@@ -800,6 +826,15 @@ export class CustomerDiscoveryService {
             price_minor: row.price_minor === null ? null : Number(row.price_minor),
             availability_state: row.availability_state,
             is_stale: row.availability_state === null,
+            freshness:
+              row.last_confirmed_at === null
+                ? null
+                : availabilityFreshness(row.last_confirmed_at, now),
+            last_confirmed_at: row.last_confirmed_at,
+            permitted_weight_variance_bps:
+              row.permitted_weight_variance_bps === null
+                ? null
+                : Number(row.permitted_weight_variance_bps),
             substitution_available: row.substitution_available,
             image_ids: Object.freeze([...row.image_ids]),
           }),

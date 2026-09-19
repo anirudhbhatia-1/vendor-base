@@ -1181,6 +1181,37 @@ One process failure worth recording: the first probe was restored with `git chec
 
 **Step 6.4: VERIFIED_LOCAL.** Scope notes: the request has no customer nomination UI and the queue has no admin UI, recorded as `backend_only` in the matrix; the vendor-side view of a request (the "vendor pipeline" alternative the step names) is the onboarding lead itself.
 
+## Run 38 (19 September 2026) — step 6.5, storefront and product browsing
+
+The step names five requirements. Three held with scope notes. Requirement 3 was met for price, unit and substitution and **not** for availability freshness or the variable-weight estimate, and requirement 5 — no cross-vendor catalogue mixing — was asserted nowhere. Seven assertions added, four mutation probes, all caught.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Identity header, images, description, hours, rating, minimum, methods, policies, offers | Name, description, category, hours, rating, minimum and capacity-checked methods are projected. **Store images and per-store policies are not modelled** (product images are); offers are catalogued Later (CUS-68). Scope note, not a defect in this step. |
+| 2 | Categories, product search, product cards, product detail | Met: the store page filters by category and searches within the store; the product page is a dedicated route. |
+| 3 | Price, unit, availability freshness, variable-weight estimate, substitution behaviour | Price, unit and substitution held. **Freshness was "has an inventory row"; the 5.7 tiers never reached the customer** — P38-01. **The variable-weight bound was not projected** — P38-02. |
+| 4 | Accessible loading, empty, unavailable, stale, error states | Met: `LoadingState`, `EmptyState`, `ErrorState`, the availability pill and the stale label are all rendered from the store page. |
+| 5 | Prove no cross-vendor catalogue mixing | **Not proven.** The storefront query was scoped by `vendor_location_id`, and no assertion would have noticed if it were not — P38-03. |
+
+**P38-01 — two definitions of stale, and the customer got the weaker one.** Run 32 recorded that freshness has three tiers (`FRESH` within fifteen minutes, `STALE` within an hour, `EXPIRED` beyond) and "appears in discovery". It appeared in `GET catalogue/locations/:id/availability`, which no customer surface calls. The storefront — what a customer actually browses — reported `is_stale` only when a product had *no* inventory row, so a product the shop last confirmed three days ago showed as `AVAILABLE` with nothing to say otherwise. The storefront now carries `freshness` and `last_confirmed_at`, computed by the same exported `availabilityFreshness` the 5.7 read uses, so there is one definition. The product sheet and product page say it in a sentence ("Stock confirmed by the store in the last 15 minutes." / "…within the last hour." / "The store last confirmed stock over an hour ago. It reconfirms when it accepts your order."), registered en and hi in migration 0082. Run 32's judgement that freshness informs and does not gate stands: `is_stale` keeps its meaning and nothing new disables the add.
+
+**P38-02 — "variable-weight estimate" was a fixed sentence.** The product carries `permitted_weight_variance_bps` (0017, bounded 0–10000 for loose products) and the store page said "the store weighs it" with no number. The storefront projects the bound and the sheet appends "The final weight may differ from what you order by up to 10%."; the percentage is composed in the client from basis points, with a `{percent}` placeholder in both languages. `availability-copy.ts` holds both sentences with a unit test (3 tests) rather than the source-inspection style of the other PWA specs, because the tier-to-sentence mapping is logic.
+
+**P38-03 — cross-vendor mixing had no assertion.** The verifier already had two published in-zone stores each with a product; it never asked whether one store's page listed the other's. It now asserts both directions. The first probe against it — dropping the vendor predicate — failed at bind time (*"bind message supplies 1 parameters, but prepared statement requires 0"*) and was redone with the parameter kept (`$1::uuid IS NOT NULL`), so that it fails at the assertion, as runs 17, 30 and 35 required.
+
+**Mutation results.** Four probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Storefront vendor predicate neutralised (parameter kept) | *A storefront listed another vendor's product* |
+| `availabilityFreshness` never returns EXPIRED | *A confirmation over an hour old was not reported EXPIRED, or hid the product* |
+| Storefront freshness forced FRESH | same assertion — proves the storefront uses the shared function, not a copy |
+| Weight variance not projected | *The loose product did not carry its permitted weight variance* |
+
+**Verification.** `pnpm db:verify` exit 0 — 83 migrations, full ladder; `customer_discovery` 79 assertions (72 after run 37); launch readiness 76 with the five new keys covered en and hi. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm contracts:check` exit 0; `pnpm test:unit` 502 pass / 0 fail (+3).
+
+**Step 6.5: VERIFIED_LOCAL**, with the requirement-1 scope note: store images, per-store policy text and offers are not modelled; the first two are not in the feature catalogue at all and should be added as entries with an owner decision, the third is Later.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

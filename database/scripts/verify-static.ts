@@ -154,6 +154,7 @@ assert(
       '0079_fulfilment_method_unavailable',
       '0080_vendor_self_delivery',
       '0081_shop_request_pipeline',
+      '0082_storefront_freshness_copy',
     ]),
   'Unexpected reviewed migrations',
 );

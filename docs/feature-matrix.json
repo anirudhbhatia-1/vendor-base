@@ -892,7 +892,7 @@
       "name": "Product detail",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Dedicated product detail sheet with unit, price, availability freshness, substitution rule and variable-weight explanation",
+      "notes": "Dedicated product detail sheet with unit, price, availability freshness (the server tier since audit run 38 -- before that only 'no inventory row'), substitution rule and the variable-weight bound as a percentage",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -937,7 +937,7 @@
       "name": "Variable-weight products",
       "status": "partial_workflow",
       "target_stage": null,
-      "notes": "The weigh-and-decide loop is wired end to end; no automated test asserts it yet",
+      "notes": "The weigh-and-decide loop is wired end to end; no automated test asserts it yet. The storefront carries permitted_weight_variance_bps and the product sheet shows it as a percentage (audit run 38).",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -961,7 +961,7 @@
       "name": "Availability freshness",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "is_stale flag disables Add button",
+      "notes": "is_stale (no inventory row) disables Add. Audit run 38: the storefront also carries the 5.7 freshness tier (FRESH/STALE/EXPIRED) and last_confirmed_at, one definition shared with the availability read, and the product sheet says it; the tier informs and never gates.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
