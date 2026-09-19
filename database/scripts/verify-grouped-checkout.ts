@@ -834,6 +834,176 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         laterQuote.checkout_quote_id !== withdrawnQuote.checkout_quote_id,
       'A quote priced after the policy change did not carry the successor version',
     );
+
+    // 7.3: the quote is bound to the cart's content. A retry replays it; a
+    // change re-quotes and retires the earlier one; placing a quote the cart
+    // has moved on from is refused; and a store or a line the quote cannot
+    // carry is returned as a blocked group, never silently left out.
+    const changer = await customerWithCart('CHANGER');
+    const storeB = stores[1];
+    const productB = products[1];
+    check(storeB !== undefined && productB !== undefined, 'Store B fixture missing');
+    const t0 = new Date(successorFrom.getTime() + 10 * 60_000);
+    await carts.addLine({
+      context: customerContext(changer.userId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: productA.catalogue_variant_id,
+      quantity: 1,
+      now: t0,
+    });
+    const first = await checkout.createQuote({
+      context: customerContext(changer.userId),
+      cart_id: changer.cartId,
+      now: t0,
+    });
+    const firstRetry = await checkout.createQuote({
+      context: customerContext(changer.userId),
+      cart_id: changer.cartId,
+      now: new Date(t0.getTime() + 1_000),
+    });
+    check(
+      firstRetry.checkout_quote_id === first.checkout_quote_id,
+      'A retry with the same content, after the first quote had held its stock, did not replay',
+    );
+    // Add a second store. The live quote no longer describes the cart.
+    await carts.addLine({
+      context: customerContext(changer.userId),
+      vendor_location_id: storeB.locationId,
+      catalogue_variant_id: productB.catalogue_variant_id,
+      quantity: 1,
+      now: new Date(t0.getTime() + 2_000),
+    });
+    const second = await checkout.createQuote({
+      context: customerContext(changer.userId),
+      cart_id: changer.cartId,
+      now: new Date(t0.getTime() + 3_000),
+    });
+    check(
+      second.checkout_quote_id !== first.checkout_quote_id && second.groups.length === 2,
+      `Re-quoting a changed cart returned the earlier quote, or not both stores (${second.groups.length} groups)`,
+    );
+    const retired = await pool.query<{ lifecycle_state: string; holds: string; events: string }>(
+      `SELECT q.lifecycle_state,
+              (SELECT count(*) FROM marketplace.checkout_quote_lines ql
+                JOIN marketplace.checkout_quote_groups qg USING (checkout_quote_group_id)
+                JOIN marketplace.inventory_reservations r ON r.reservation_id=ql.inventory_reservation_id
+                WHERE qg.checkout_quote_id=q.checkout_quote_id AND r.reservation_state='SOFT_HELD')::text AS holds,
+              (SELECT count(*) FROM marketplace.inventory_events e
+                JOIN marketplace.checkout_quote_lines ql ON ql.inventory_reservation_id=e.reservation_id
+                JOIN marketplace.checkout_quote_groups qg USING (checkout_quote_group_id)
+                WHERE qg.checkout_quote_id=q.checkout_quote_id AND e.event_type='RELEASED'
+                  AND e.reason_code='QUOTE_SUPERSEDED')::text AS events
+         FROM marketplace.checkout_quotes q WHERE q.checkout_quote_id=$1`,
+      [first.checkout_quote_id],
+    );
+    check(
+      retired.rows[0]?.lifecycle_state === 'INVALID' &&
+        retired.rows[0].holds === '0' &&
+        retired.rows[0].events === '1',
+      `The superseded quote was not retired with its hold given back (${JSON.stringify(retired.rows[0])})`,
+    );
+    // The cart moves on again after the second quote; placing that quote is
+    // refused, because the order would not be the basket.
+    const changerCart = await carts.currentCart({
+      context: customerContext(changer.userId),
+      now: t0,
+    });
+    const lineB = changerCart.groups
+      .find((g) => g.vendor_location_id === storeB.locationId)
+      ?.lines.find((l) => l.catalogue_variant_id === productB.catalogue_variant_id);
+    check(lineB !== undefined, 'The changer cart has no store B line');
+    await carts.setLineQuantity({
+      context: customerContext(changer.userId),
+      cart_line_id: lineB.cart_line_id,
+      expected_version: lineB.version,
+      quantity: 2,
+      now: new Date(t0.getTime() + 4_000),
+    });
+    await rejects(
+      () =>
+        checkout.place({
+          context: customerContext(changer.userId),
+          checkout_quote_id: second.checkout_quote_id,
+          provider_scenario: 'SUCCESS',
+          idempotency_key: `phase7-changed-${changer.userId}`,
+          now: new Date(t0.getTime() + 5_000),
+        }),
+      CheckoutConflictError,
+      'A quote whose cart had changed was placed anyway',
+    );
+    // A store that cannot take the order is a blocked group with a reason,
+    // not a group missing from the quote. Pause store B's storefront.
+    await pool.query(
+      "UPDATE marketplace.vendor_publication_cases SET lifecycle_state='PAUSED' WHERE vendor_location_id=$1",
+      [storeB.locationId],
+    );
+    const pausedQuote = await checkout.createQuote({
+      context: customerContext(changer.userId),
+      cart_id: changer.cartId,
+      now: new Date(t0.getTime() + 6_000),
+    });
+    check(
+      pausedQuote.groups.length === 1 &&
+        pausedQuote.groups[0]?.vendor_location_id === storeA.locationId &&
+        pausedQuote.blocked_groups.length === 1 &&
+        pausedQuote.blocked_groups[0]?.vendor_location_id === storeB.locationId &&
+        pausedQuote.blocked_groups[0].reason_code === 'STORE_UNAVAILABLE',
+      `A paused store was not returned as a blocked group with STORE_UNAVAILABLE (${JSON.stringify(pausedQuote.blocked_groups)})`,
+    );
+    await pool.query(
+      "UPDATE marketplace.vendor_publication_cases SET lifecycle_state='PUBLISHED' WHERE vendor_location_id=$1",
+      [storeB.locationId],
+    );
+    // A line the store can no longer supply blocks its group rather than
+    // being left out of it: the basket said two items, the order had one.
+    const extraReference = `SYNTH-PROD-EXTRA-${Date.now()}`;
+    const extra = await catalogue.createProduct({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_location_id: storeA.locationId,
+      product_reference: extraReference,
+      title: 'SYNTH Extra Product',
+      category: 'FRUIT_VEGETABLE',
+      unit_label: 'EACH',
+      tax_basis: 'EXEMPT',
+      variable_weight: false,
+      sku: `SYNTH-SKU-EXTRA-${Date.now()}`,
+      variant_title: 'SYNTH Extra Variant',
+      price_minor: 5_000,
+      initial_stock_quantity: 5,
+      low_stock_threshold: 1,
+      now: t0,
+    });
+    await carts.addLine({
+      context: customerContext(changer.userId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: extra.catalogue_variant_id,
+      quantity: 1,
+      now: new Date(t0.getTime() + 7_000),
+    });
+    await pool.query(
+      'UPDATE marketplace.catalogue_prices SET effective_until=$2 WHERE catalogue_variant_id=$1 AND effective_until IS NULL',
+      [extra.catalogue_variant_id, new Date(t0.getTime() + 8_000)],
+    );
+    const shortQuote = await checkout.createQuote({
+      context: customerContext(changer.userId),
+      cart_id: changer.cartId,
+      now: new Date(t0.getTime() + 9_000),
+    });
+    check(
+      shortQuote.groups.length === 1 &&
+        shortQuote.groups[0]?.vendor_location_id === storeB.locationId &&
+        shortQuote.blocked_groups.length === 1 &&
+        shortQuote.blocked_groups[0]?.vendor_location_id === storeA.locationId &&
+        shortQuote.blocked_groups[0].reason_code === 'LINE_UNAVAILABLE',
+      `A group with an unpriced line was quoted short, or blocked for the wrong reason (${JSON.stringify({ groups: shortQuote.groups.map((g) => g.vendor_location_id), blocked: shortQuote.blocked_groups })})`,
+    );
+    await catalogue.setVariantPrice({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: extra.catalogue_variant_id,
+      price_minor: 5_000,
+      now: new Date(t0.getTime() + 10_000),
+    });
   } finally {
     await Promise.all([checkout.close(), inventory.close(), catalogue.close(), carts.close()]);
     await pool.end();

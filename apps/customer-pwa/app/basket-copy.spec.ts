@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { groupUnavailableSentence, lineStaleSentence } from './basket-copy.js';
+import {
+  groupUnavailableSentence,
+  lineStaleSentence,
+  quoteBlockedSentence,
+} from './basket-copy.js';
 
 const fallback = (_key: string, text: string) => text;
 
@@ -26,4 +30,16 @@ test('the sentences are translated by key', () => {
   const hindi = (key: string, text: string) =>
     key === 'customer.cart.group.reason.store_closed' ? 'दुकान बंद है' : text;
   assert.equal(groupUnavailableSentence('STORE_CLOSED', hindi), 'दुकान बंद है');
+});
+
+test('a blocked quote group is explained by its reason, and a new reason is still a problem', () => {
+  assert.match(quoteBlockedSentence('STORE_UNAVAILABLE', fallback), /cannot take orders right now/);
+  assert.match(
+    quoteBlockedSentence('FULFILMENT_METHOD_UNAVAILABLE', fallback),
+    /no longer offers the way/,
+  );
+  assert.match(quoteBlockedSentence('LINE_UNAVAILABLE', fallback), /no longer supply an item/);
+  assert.match(quoteBlockedSentence('MINIMUM_NOT_MET', fallback), /under the store’s minimum/);
+  assert.match(quoteBlockedSentence('INVENTORY_UNAVAILABLE', fallback), /not have enough/);
+  assert.match(quoteBlockedSentence('SOMETHING_NEW', fallback), /cannot take this order/);
 });

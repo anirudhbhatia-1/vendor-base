@@ -59,3 +59,40 @@ export function lineStaleSentence(reason: string | null, t: Translate): string |
       );
   }
 }
+
+/**
+ * What the quote says about a store group it could not carry, by the reason
+ * the server returned. The quote used to print the code in lower case; the
+ * reason is the thing the customer can act on.
+ */
+export function quoteBlockedSentence(reason: string, t: Translate): string {
+  switch (reason) {
+    case 'STORE_UNAVAILABLE':
+      return t(
+        'customer.quote.blocked.store_unavailable',
+        'The store cannot take orders right now, or does not deliver to this address.',
+      );
+    case 'FULFILMENT_METHOD_UNAVAILABLE':
+      return t(
+        'customer.quote.blocked.fulfilment_method_unavailable',
+        'The store no longer offers the way you chose to receive this order. Pick another in your basket.',
+      );
+    case 'LINE_UNAVAILABLE':
+      return t(
+        'customer.quote.blocked.line_unavailable',
+        'The store can no longer supply an item in this group. Recheck your basket and remove it.',
+      );
+    case 'MINIMUM_NOT_MET':
+      return t(
+        'customer.quote.blocked.minimum_not_met',
+        'This group is under the store’s minimum order. Add a little more.',
+      );
+    case 'INVENTORY_UNAVAILABLE':
+      return t(
+        'customer.quote.blocked.inventory_unavailable',
+        'The store does not have enough of something in this group. Lower the quantity or remove it.',
+      );
+    default:
+      return t('customer.quote.blocked.other', 'This store cannot take this order right now.');
+  }
+}

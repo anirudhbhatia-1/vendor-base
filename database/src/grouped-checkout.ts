@@ -35,14 +35,31 @@ export class CheckoutPaymentDeclinedError extends Error {}
 type QuoteLineRow = {
   cart_line_id: string;
   catalogue_variant_id: string;
+  /**
+   * Whether the store can supply this line at all: an active variant of an
+   * active product with a current price and a stock record. A line that
+   * cannot be supplied blocks its group rather than being left out of it.
+   */
+  supplied: boolean;
+  inventory_item_id: string | null;
+  product_title: string | null;
+  variant_title: string | null;
+  quantity: number;
+  unit_price_minor: string | null;
+  product_version: number | null;
+  variant_version: number | null;
+  exact_available_quantity: string | null;
+  quantity_basis: 'COUNTED' | 'VENDOR_CONFIRMS' | null;
+  inventory_version: number | null;
+};
+/** A line the classification proved supplied, so every catalogue field is present. */
+type SuppliedLineRow = QuoteLineRow & {
   inventory_item_id: string;
   product_title: string;
   variant_title: string;
-  quantity: number;
   unit_price_minor: string;
   product_version: number;
   variant_version: number;
-  exact_available_quantity: string | null;
   quantity_basis: 'COUNTED' | 'VENDOR_CONFIRMS';
   inventory_version: number;
 };
@@ -50,6 +67,13 @@ type GroupRow = {
   cart_vendor_group_id: string;
   vendor_location_id: string;
   fulfilment_method: 'CUSTOMER_PICKUP' | 'PLATFORM_DELIVERY' | 'VENDOR_DELIVERY';
+  /**
+   * The store can take an order at all: active location and vendor, a
+   * published storefront, and a service zone covering the address. Every
+   * group is returned whatever this says, so a store that cannot is blocked
+   * with a reason rather than left out of the quote.
+   */
+  store_available: boolean;
   /** Whether the store still offers `fulfilment_method`; false blocks the group. */
   method_offered: boolean;
   tip_minor: string;
@@ -57,6 +81,47 @@ type GroupRow = {
   route_metres: string;
   lines: QuoteLineRow[];
 };
+type SuppliedGroupRow = Omit<GroupRow, 'lines'> & { lines: SuppliedLineRow[] };
+
+/**
+ * The identity of a quote: who is buying, from which cart, to which address,
+ * and exactly what -- each group's method and tip, each line's variant,
+ * quantity, price and catalogue versions. Not the stock on the shelf, which
+ * the quote's own hold changes, and not the policy, which the quote stamps.
+ * A retry with the same content replays the live quote; any change to it
+ * re-quotes; placing a quote whose content no longer matches the cart is
+ * refused.
+ */
+export function quoteContentDigest(input: {
+  readonly user_id: string;
+  readonly cart_id: string;
+  readonly customer_address_id: string;
+  readonly groups: readonly GroupRow[];
+}): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        user: input.user_id,
+        cart: input.cart_id,
+        address: input.customer_address_id,
+        groups: input.groups.map((group) => ({
+          group: group.cart_vendor_group_id,
+          location: group.vendor_location_id,
+          method: group.fulfilment_method,
+          tip: group.tip_minor,
+          lines: group.lines.map((line) => ({
+            line: line.cart_line_id,
+            variant: line.catalogue_variant_id,
+            quantity: line.quantity,
+            price: line.unit_price_minor,
+            product_version: line.product_version,
+            variant_version: line.variant_version,
+          })),
+        })),
+      }),
+    )
+    .digest('hex');
+}
 type InventoryItemRow = {
   readonly exact_available_quantity: string | number | null;
   readonly quantity_basis: 'COUNTED' | 'VENDOR_CONFIRMS';
@@ -192,86 +257,76 @@ export class GroupedCheckoutService {
       );
       if (!cart.rows[0]?.customer_address_id)
         throw new CheckoutConflictError('Active cart requires a delivery address');
-      const activeQuote = await client.query<{ checkout_quote_id: string }>(
+      const addressId = cart.rows[0].customer_address_id;
+      // Bound to the cart's content first. A retry with the same content
+      // replays the live quote -- the first quote's own hold has changed the
+      // stock, which is why stock is not part of the identity -- and a change
+      // to the content supersedes any live quote that no longer matches it.
+      const digest = quoteContentDigest({
+        user_id: userId,
+        cart_id: input.cart_id,
+        customer_address_id: addressId,
+        groups: (await this.#loadCartGroups(client, userId, input.cart_id)).rows,
+      });
+      const replay = await client.query<{ checkout_quote_id: string }>(
         `SELECT checkout_quote_id FROM marketplace.checkout_quotes
-          WHERE cart_id=$1 AND customer_user_id=$2 AND lifecycle_state='ACTIVE' AND expires_at>$3
-          ORDER BY created_at DESC LIMIT 1`,
-        [input.cart_id, userId, now],
+          WHERE cart_id=$1 AND customer_user_id=$2 AND quote_digest=$3
+            AND lifecycle_state='ACTIVE' AND expires_at>$4`,
+        [input.cart_id, userId, digest, now],
       );
-      if (activeQuote.rows[0])
-        return this.#projectQuote(client, activeQuote.rows[0].checkout_quote_id);
-      // This cart's earlier quotes that have lapsed still hold their units
-      // until the sweep reaches them, and the stock read below would count
-      // those units as gone -- so a customer re-quoting the last units on the
-      // shelf was blocked by their own dead hold. Give them back first.
-      const lapsed = await client.query<{ checkout_quote_id: UuidV7 }>(
-        `SELECT checkout_quote_id FROM marketplace.checkout_quotes
-          WHERE cart_id=$1 AND customer_user_id=$2 AND lifecycle_state='ACTIVE' AND expires_at<=$3
+      if (replay.rows[0]) return this.#projectQuote(client, replay.rows[0].checkout_quote_id);
+      // Every other quote this cart still holds: lapsed ones, and live ones the
+      // cart has since changed away from. Their holds go back before the stock
+      // is read, so the customer is never blocked by their own earlier quote.
+      const stale = await client.query<{ checkout_quote_id: UuidV7; lapsed: boolean }>(
+        `SELECT checkout_quote_id, (expires_at<=$3) AS lapsed FROM marketplace.checkout_quotes
+          WHERE cart_id=$1 AND customer_user_id=$2 AND lifecycle_state='ACTIVE'
           FOR UPDATE`,
         [input.cart_id, userId, now],
       );
-      for (const quote of lapsed.rows) {
+      for (const quote of stale.rows) {
         await this.#releaseQuote(
           client,
           input.context,
           quote.checkout_quote_id,
           now,
-          'QUOTE_EXPIRED',
+          quote.lapsed ? 'QUOTE_EXPIRED' : 'QUOTE_SUPERSEDED',
         );
         await client.query(
-          `UPDATE marketplace.checkout_quotes SET lifecycle_state='EXPIRED',updated_at=$2 WHERE checkout_quote_id=$1`,
-          [quote.checkout_quote_id, now],
+          `UPDATE marketplace.checkout_quotes SET lifecycle_state=$2,updated_at=$3 WHERE checkout_quote_id=$1`,
+          [quote.checkout_quote_id, quote.lapsed ? 'EXPIRED' : 'INVALID', now],
         );
       }
-      const groups = await client.query<GroupRow>(
-        `SELECT g.cart_vendor_group_id,g.vendor_location_id,g.fulfilment_method,g.tip_minor::text,l.minimum_order_minor::text,
-          ST_Distance(l.coordinates,a.coordinates)::bigint::text route_metres,
-          EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes m
-                   WHERE m.vendor_location_id=g.vendor_location_id
-                     AND m.fulfilment_mode=g.fulfilment_method
-                     AND m.approval_state='APPROVED') method_offered,
-          json_agg(json_build_object('cart_line_id',cl.cart_line_id,'catalogue_variant_id',v.catalogue_variant_id,
-            'inventory_item_id',i.inventory_item_id,'product_title',p.title,'variant_title',v.variant_title,
-            'quantity',cl.quantity,'unit_price_minor',price.price_minor,'product_version',p.version,
-            'variant_version',v.version,'exact_available_quantity',i.exact_available_quantity,
-            'quantity_basis',i.quantity_basis,'inventory_version',i.version)) lines
-        FROM marketplace.cart_vendor_groups g JOIN marketplace.carts c ON c.cart_id=g.cart_id
-        JOIN marketplace.customer_addresses a ON a.customer_address_id=c.customer_address_id
-        JOIN marketplace.vendor_locations l ON l.vendor_location_id=g.vendor_location_id
-        JOIN marketplace.vendors vendor ON vendor.vendor_id=l.vendor_id
-        JOIN marketplace.cart_lines cl ON cl.cart_vendor_group_id=g.cart_vendor_group_id AND cl.lifecycle_state='ACTIVE'
-        JOIN marketplace.catalogue_product_variants v ON v.catalogue_variant_id=cl.catalogue_variant_id AND v.lifecycle_state='ACTIVE'
-        JOIN marketplace.catalogue_products p ON p.catalogue_product_id=v.catalogue_product_id AND p.lifecycle_state='ACTIVE'
-        JOIN marketplace.catalogue_prices price ON price.catalogue_variant_id=v.catalogue_variant_id AND price.effective_until IS NULL
-        JOIN marketplace.inventory_items i ON i.vendor_location_id=g.vendor_location_id AND i.product_reference=p.product_reference
-        WHERE c.cart_id=$1 AND c.user_id=$2 AND g.lifecycle_state='ACTIVE' AND l.lifecycle_state='ACTIVE' AND vendor.lifecycle_state='ACTIVE'
-          AND EXISTS (SELECT 1 FROM marketplace.vendor_service_zones z WHERE z.vendor_location_id=l.vendor_location_id AND z.lifecycle_state='ACTIVE' AND ST_Covers(z.boundary,a.coordinates))
-        GROUP BY g.cart_vendor_group_id,g.fulfilment_method,l.minimum_order_minor,l.coordinates,a.coordinates ORDER BY g.vendor_location_id`,
-        [input.cart_id, userId],
-      );
+      const groups = await this.#loadCartGroups(client, userId, input.cart_id);
       if (!groups.rows.length) throw new CheckoutConflictError('No cart group can be quoted');
       const classified = groups.rows.map((group) => {
         const subtotal = group.lines.reduce(
-          (sum, line) => sum + Number(line.unit_price_minor) * line.quantity,
+          (sum, line) => sum + Number(line.unit_price_minor ?? 0) * line.quantity,
           0,
         );
-        // CUS-33: a group asking for a method the store does not offer is blocked
-        // with a stable reason, ahead of minimum and stock, because it is the one
-        // the customer can repair without changing what they are buying.
-        const reason = !group.method_offered
-          ? 'FULFILMENT_METHOD_UNAVAILABLE'
-          : subtotal < Number(group.minimum_order_minor)
-            ? 'MINIMUM_NOT_MET'
-            : group.lines.some(
-                  (line) =>
-                    line.quantity_basis === 'COUNTED' &&
-                    Number(line.exact_available_quantity) < line.quantity,
-                )
-              ? 'INVENTORY_UNAVAILABLE'
-              : null;
+        // Ordered by what the customer can repair: a store that cannot take
+        // the order at all, then a method it does not offer (CUS-33), then a
+        // line it can no longer supply, then the minimum, then stock.
+        const reason = !group.store_available
+          ? 'STORE_UNAVAILABLE'
+          : !group.method_offered
+            ? 'FULFILMENT_METHOD_UNAVAILABLE'
+            : group.lines.some((line) => !line.supplied)
+              ? 'LINE_UNAVAILABLE'
+              : subtotal < Number(group.minimum_order_minor)
+                ? 'MINIMUM_NOT_MET'
+                : group.lines.some(
+                      (line) =>
+                        line.quantity_basis === 'COUNTED' &&
+                        Number(line.exact_available_quantity) < line.quantity,
+                    )
+                  ? 'INVENTORY_UNAVAILABLE'
+                  : null;
         return { group, reason };
       });
-      const valid = classified.filter((entry) => entry.reason === null).map((entry) => entry.group);
+      const valid = classified
+        .filter((entry) => entry.reason === null)
+        .map((entry) => entry.group as unknown as SuppliedGroupRow);
       if (!valid.length) throw new CheckoutConflictError('Every cart group is blocked');
       // The quote is priced by whichever policy version is in force right now,
       // and stamps that version so nothing can re-price it later under another.
@@ -289,22 +344,6 @@ export class GroupedCheckoutService {
         })),
         financialPolicy,
       );
-      const digest = createHash('sha256')
-        .update(
-          JSON.stringify({
-            userId,
-            cart: input.cart_id,
-            address: cart.rows[0].customer_address_id,
-            groups: valid,
-            pricing,
-          }),
-        )
-        .digest('hex');
-      const replay = await client.query(
-        `SELECT * FROM marketplace.checkout_quotes WHERE quote_digest=$1 AND lifecycle_state='ACTIVE' AND expires_at>$2`,
-        [digest, now],
-      );
-      if (replay.rows[0]) return this.#projectQuote(client, replay.rows[0].checkout_quote_id);
       const quoteId = createUuidV7({ now_ms: now.getTime() });
       const contextIds = ids(input.context);
       await client.query(
@@ -313,7 +352,7 @@ export class GroupedCheckoutService {
           quoteId,
           userId,
           input.cart_id,
-          cart.rows[0].customer_address_id,
+          addressId,
           digest,
           pricing.total_minor,
           pricing.policy_version_reference,
@@ -493,6 +532,20 @@ export class GroupedCheckoutService {
         [input.checkout_quote_id],
       );
       if (changed.rows[0]) throw new CheckoutConflictError('Quote contents changed');
+      // The cart itself may have moved on since the quote: a line added or
+      // removed, a quantity, a method, the address. The quote is for what was
+      // quoted, and an order for a cart that no longer matches it is refused.
+      const currentAddress = await client.query<{ customer_address_id: string | null }>(
+        `SELECT customer_address_id FROM marketplace.carts WHERE cart_id=$1 AND user_id=$2`,
+        [q.cart_id, userId],
+      );
+      const cartDigest = quoteContentDigest({
+        user_id: userId,
+        cart_id: q.cart_id,
+        customer_address_id: currentAddress.rows[0]?.customer_address_id ?? '',
+        groups: (await this.#loadCartGroups(client, userId, q.cart_id)).rows,
+      });
+      if (cartDigest !== q.quote_digest) throw new CheckoutConflictError('Quote contents changed');
       const checkoutId = createUuidV7();
       const paymentId = createUuidV7();
       const checkoutRef = reference('CHECKOUT', checkoutId);
@@ -1251,6 +1304,54 @@ export class GroupedCheckoutService {
       ],
     );
   }
+  /**
+   * Every active group of the cart with every active line, whatever state the
+   * store, catalogue or shelf is in. Inner joins used to drop a closed or
+   * unpublished store, an out-of-zone address, and any line without a
+   * current price or stock record, so a group could vanish from the quote or
+   * be quoted short without a word. Each condition is now a flag the
+   * classification turns into a blocked reason.
+   */
+  async #loadCartGroups(client: Pick<PoolClient, 'query'>, userId: UuidV7, cartId: UuidV7) {
+    return client.query<GroupRow>(
+      `SELECT g.cart_vendor_group_id,g.vendor_location_id,g.fulfilment_method,g.tip_minor::text,
+              l.minimum_order_minor::text,
+              ST_Distance(l.coordinates,a.coordinates)::bigint::text route_metres,
+              (l.lifecycle_state='ACTIVE' AND vendor.lifecycle_state='ACTIVE'
+               AND EXISTS (SELECT 1 FROM marketplace.vendor_publication_cases pub
+                            WHERE pub.vendor_location_id=l.vendor_location_id AND pub.lifecycle_state='PUBLISHED')
+               AND EXISTS (SELECT 1 FROM marketplace.vendor_service_zones z
+                            WHERE z.vendor_location_id=l.vendor_location_id AND z.lifecycle_state='ACTIVE'
+                              AND ST_Covers(z.boundary,a.coordinates))) store_available,
+              EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes m
+                       WHERE m.vendor_location_id=g.vendor_location_id
+                         AND m.fulfilment_mode=g.fulfilment_method
+                         AND m.approval_state='APPROVED') method_offered,
+              json_agg(json_build_object('cart_line_id',cl.cart_line_id,'catalogue_variant_id',cl.catalogue_variant_id,
+                'supplied',(v.catalogue_variant_id IS NOT NULL AND p.catalogue_product_id IS NOT NULL
+                            AND price.price_minor IS NOT NULL AND i.inventory_item_id IS NOT NULL),
+                'inventory_item_id',i.inventory_item_id,'product_title',p.title,'variant_title',v.variant_title,
+                'quantity',cl.quantity,'unit_price_minor',price.price_minor,'product_version',p.version,
+                'variant_version',v.version,'exact_available_quantity',i.exact_available_quantity,
+                'quantity_basis',i.quantity_basis,'inventory_version',i.version) ORDER BY cl.created_at, cl.cart_line_id) lines
+         FROM marketplace.cart_vendor_groups g
+         JOIN marketplace.carts c ON c.cart_id=g.cart_id
+         JOIN marketplace.customer_addresses a ON a.customer_address_id=c.customer_address_id
+         JOIN marketplace.vendor_locations l ON l.vendor_location_id=g.vendor_location_id
+         JOIN marketplace.vendors vendor ON vendor.vendor_id=l.vendor_id
+         JOIN marketplace.cart_lines cl ON cl.cart_vendor_group_id=g.cart_vendor_group_id AND cl.lifecycle_state='ACTIVE'
+         LEFT JOIN marketplace.catalogue_product_variants v ON v.catalogue_variant_id=cl.catalogue_variant_id AND v.lifecycle_state='ACTIVE'
+         LEFT JOIN marketplace.catalogue_products p ON p.catalogue_product_id=v.catalogue_product_id AND p.lifecycle_state='ACTIVE'
+         LEFT JOIN marketplace.catalogue_prices price ON price.catalogue_variant_id=v.catalogue_variant_id AND price.effective_until IS NULL
+         LEFT JOIN marketplace.inventory_items i ON i.vendor_location_id=g.vendor_location_id AND i.product_reference=p.product_reference
+        WHERE c.cart_id=$1 AND c.user_id=$2 AND g.lifecycle_state='ACTIVE'
+        GROUP BY g.cart_vendor_group_id,g.vendor_location_id,g.fulfilment_method,g.tip_minor,
+                 l.vendor_location_id,l.minimum_order_minor,l.coordinates,a.coordinates,l.lifecycle_state,vendor.lifecycle_state
+        ORDER BY g.vendor_location_id`,
+      [cartId, userId],
+    );
+  }
+
   /**
    * Gives back what a quote still holds. Restoring the units, recomputing the
    * shelf state and recording the event are the inventory module's job; this

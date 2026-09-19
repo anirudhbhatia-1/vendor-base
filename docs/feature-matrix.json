@@ -1171,7 +1171,7 @@
       "name": "Multi-store quote",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Per-group totals, fulfilment, promise; a collected group carries no delivery fee (batch 10)",
+      "notes": "Per-group totals, fulfilment, promise; a collected group carries no delivery fee (batch 10). Audit run 43: bound to the cart's content -- a retry replays, a change re-quotes, a changed cart cannot place the old quote; every group returned quoted or blocked with a reason the checkout explains by store. The promise is fixed copy, not a calculation.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6111,7 +6111,7 @@
       "name": "Quote snapshots",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "checkout_quote_lines with product/price snapshots",
+      "notes": "checkout_quote_lines with product/price snapshots. Audit run 43: a group with a line the store cannot supply is blocked LINE_UNAVAILABLE rather than quoted without it.",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {

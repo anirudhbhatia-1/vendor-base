@@ -1363,6 +1363,40 @@ Both now call one exported routine, `releaseReservationsLocked`, which locks the
 
 **Step 7.2: VERIFIED_LOCAL**, with the variant-scope note carried.
 
+## Run 43 (19 September 2026) — step 7.3, quote creation
+
+Two of the five requirements were met. The quote was *not* bound to the cart's content, retry was idempotent only by accident of a shortcut that returned the wrong quote once the cart changed, and "blocked groups returned explicitly" held for three reasons and silently failed for the rest — a closed or paused store vanished from the quote, and a group with an unpriced line was quoted without it. Migration 0084; twenty connected assertions and one unit test added; seven mutation probes, all caught, one redone to reproduce the old behaviour rather than a new refusal.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Revalidate every vendor group | Location, vendor, zone, method, minimum and stock were checked. **Publication was not** — a paused storefront could be quoted — and every group that failed a join was dropped rather than revalidated — P43-03. |
+| 2 | Calculate route, fee, promise, minimum, availability, buffer | Fee, minimum and availability calculated (run 41 for the fee). Route is a straight line (run 41). **The promise is fixed copy** ("Arrives in 45–75 minutes") — a scope note for an owner, since an ETA model is a product decision. Buffer is an explicit zero. |
+| 3 | Return quoted and blocked groups explicitly | Explicit for method, minimum and stock. **Silent for everything else** — P43-03. |
+| 4 | Bind the quote to customer, cart, address, group content, versions and expiry | Customer, cart, address and expiry were columns. **Content was not binding**: the digest hashed the shelf, and nothing compared the cart to the quote at placement — P43-01, P43-02. |
+| 5 | Make quote retry idempotent | **By accident.** The digest never matched a retry; a cart-only shortcut covered for it and returned a stale quote after any change — P43-01. |
+
+**P43-01 — the digest could not match, so a shortcut returned the wrong quote.** `quote_digest` hashed the groups *including* each line's `exact_available_quantity` and inventory version. The first quote's own hold changes both, so the digest of an identical retry never equalled the stored one, and the replay-by-digest path was dead. A shortcut ahead of it returned any live quote for the cart, content unread — so a customer who quoted, added a line, and quoted again within five minutes got the first quote back, and would have paid for a basket that was not theirs. The digest is now `quoteContentDigest`: customer, cart, address, each group's method and tip, each line's variant, quantity, price and catalogue versions — never the shelf, never the policy (which the quote stamps). A retry replays the live quote with that digest; anything else retires the cart's live quotes as `INVALID` (`QUOTE_SUPERSEDED`) and lapsed ones as `EXPIRED`, holds given back, before the stock is read. `quote_digest` was globally unique, which a content digest cannot be — the same basket re-quoted after lapsing is the same content — so 0084 replaces it with uniqueness among live quotes.
+
+**P43-02 — placement never looked at the cart.** `place()` checked that the *catalogue* had not moved (product, variant and price versions, store state) and never that the *cart* had not: a line added or removed, a quantity changed, a method or the address switched after the quote were all placed as quoted. It now recomputes the content digest from the cart and refuses `Quote contents changed` on a mismatch. Probes 43 (quantity dropped from the digest) and 44 (the check removed) both land on *A quote whose cart had changed was placed anyway*.
+
+**P43-03 — a group that could not be quoted was not blocked; it was gone.** The group query joined location, vendor, zone, variant, product, price and inventory with inner joins. A closed, unpublished or out-of-zone store produced no row and therefore no blocked group — the customer saw the store in the basket and not in the quote, with no reason (`STORE_UNAVAILABLE` was in the table's reason list and produced by nothing). Worse, the *line* joins were inner too: a group with two lines, one of which had lost its price or its stock record, was quoted with one line, so the basket said two items and the order had one. The loader now takes every active group and every active line with left joins and flags, and the classification names the reason in the order the customer can repair it: `STORE_UNAVAILABLE`, `FULFILMENT_METHOD_UNAVAILABLE`, `LINE_UNAVAILABLE` (new in 0084), `MINIMUM_NOT_MET`, `INVENTORY_UNAVAILABLE`. The checkout used to print the code in lower case; it now names the store and says the reason in a sentence (six keys, en and hi, in 0084).
+
+**Mutation results.** Seven probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Digest replay removed | *Quote retry was not idempotent* |
+| Live quotes not retired on re-quote (lapsed only) | *The superseded quote was not retired with its hold given back ({"lifecycle_state":"ACTIVE","holds":"1"})* |
+| Line quantity dropped from the digest | *A quote whose cart had changed was placed anyway* |
+| Placement no longer compares the cart | same |
+| Publication ignored in store availability | *A paused store was not returned as a blocked group with STORE_UNAVAILABLE ([])* |
+| Unsupplied line no longer blocks (first attempt) | **failed before the assertion** on `checkout_quote_lines.unit_price_minor NOT NULL` — the new loader carries the line to the insert, where the old one had dropped it; redone |
+| Unsupplied line silently left out — the old behaviour | *A group with an unpriced line was quoted short, or blocked for the wrong reason ({"groups":[…, …],"blocked":[]})* |
+
+**Verification.** `pnpm db:verify` exit 0 — 85 migrations, full ladder; `grouped_checkout` 53 assertions (45 after run 42); launch readiness 76 with the six new keys covered en and hi. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 524 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 7.3: VERIFIED_LOCAL**, with the promise (fixed copy) and route (straight line) scope notes carried for an owner.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

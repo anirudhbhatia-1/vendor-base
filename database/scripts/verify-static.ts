@@ -156,6 +156,7 @@ assert(
       '0081_shop_request_pipeline',
       '0082_storefront_freshness_copy',
       '0083_cart_recovery',
+      '0084_quote_content_binding',
     ]),
   'Unexpected reviewed migrations',
 );

@@ -25,7 +25,7 @@ import {
   formatCountdown,
   formatMoneyMinor,
 } from '@neighbourhood-store/ui';
-import { groupUnavailableSentence, lineStaleSentence } from './basket-copy';
+import { groupUnavailableSentence, lineStaleSentence, quoteBlockedSentence } from './basket-copy';
 import { useCart } from './cart-store';
 import { customerApiClient } from './customer-session';
 import { displayLabel, shortReference } from './display';
@@ -544,9 +544,20 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
                 'customer.quote.blocked',
                 'These stores cannot take your order right now. The rest of your basket is unaffected:',
               )}{' '}
-              {quote.blocked_groups
-                .map((blocked) => blocked.reason_code.replaceAll('_', ' ').toLowerCase())
-                .join('; ')}
+              <ul>
+                {quote.blocked_groups.map((blocked) => (
+                  <li key={blocked.vendor_location_id}>
+                    <strong>
+                      {displayLabel(
+                        cart?.groups.find(
+                          (group) => group.vendor_location_id === blocked.vendor_location_id,
+                        )?.location_name ?? 'A store',
+                      )}
+                    </strong>
+                    : {quoteBlockedSentence(blocked.reason_code, t)}
+                  </li>
+                ))}
+              </ul>
             </Notice>
           ) : null}
 
