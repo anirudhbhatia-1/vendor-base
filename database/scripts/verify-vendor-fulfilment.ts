@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   createAuthenticatedActor,
   createRequestContext,
+  createRequestId,
   createUuidV7,
   parseUuidV7,
   type UuidV7,
@@ -29,6 +30,17 @@ import { PartnerAvailabilityService } from '../src/partner-availability.js';
 import { GroupedCheckoutService } from '../src/grouped-checkout.js';
 import { IdentityAccessService } from '../src/identity-access.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
+import {
+  DEFAULT_ALERT_ESCALATION_SECONDS,
+  LocalNotificationService,
+} from '../src/local-notifications.js';
+import {
+  activateConfigurationVersion,
+  approveConfigurationVersion,
+  createConfigurationDraft,
+  scheduleConfigurationVersion,
+  validateConfigurationVersion,
+} from '../src/versioned-configuration.js';
 import {
   DEFAULT_ACCEPT_DEADLINE_SECONDS,
   FulfilmentAuthorizationError,
@@ -64,6 +76,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     inventory,
   });
   const assignments = new AssignmentCustodyService({ connection_string: connectionString });
+  const notifications = new LocalNotificationService({ connection_string: connectionString });
   const now = new Date();
   const customerId = createUuidV7();
   const strangerCustomerId = createUuidV7();
@@ -193,6 +206,253 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           order.accept_by instanceof Date && order.accept_by.getTime() === expectedAcceptBy,
       ),
       `Placing an order did not set accept_by to placement + ${DEFAULT_ACCEPT_DEADLINE_SECONDS}s (${JSON.stringify(placed.orders.map((order) => order.accept_by))})`,
+    );
+
+    // 8.1 -- the shop is told. One alert per staff member of the location,
+    // in-app and push, carrying the server's deadline and asking the device
+    // to sound; once per order and person however often the outbox retries.
+    // Until audit run 49 nothing told a shop about a new order.
+    const pickerId = createUuidV7();
+    await pool.query(
+      "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+      [pickerId],
+    );
+    const pickerRoleId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.role_assignments
+        (role_assignment_id,user_id,role_key,state,valid_from,valid_until,
+         granted_by_user_id,request_id,correlation_id,created_at,updated_at)
+       VALUES ($1,$2,'VENDOR_PICKER','ACTIVE',$3,NULL,$4,$5,$5,$3,$3)`,
+      [pickerRoleId, pickerId, now, storeA.ownerUserId, createUuidV7()],
+    );
+    await pool.query(
+      `INSERT INTO marketplace.staff_memberships
+        (staff_membership_id, role_assignment_id, user_id, vendor_location_id)
+       VALUES ($1,$2,$3,$4)`,
+      [createUuidV7(), pickerRoleId, pickerId, storeA.locationId],
+    );
+    // Store B has a picker too -- the escalation must pass them by -- and a
+    // picker whose role was revoked, who is no longer staff at all.
+    const pickerBId = createUuidV7();
+    await pool.query(
+      "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+      [pickerBId],
+    );
+    const pickerBRoleId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.role_assignments
+        (role_assignment_id,user_id,role_key,state,valid_from,valid_until,
+         granted_by_user_id,request_id,correlation_id,created_at,updated_at)
+       VALUES ($1,$2,'VENDOR_PICKER','ACTIVE',$3,NULL,$4,$5,$5,$3,$3)`,
+      [pickerBRoleId, pickerBId, now, storeB.ownerUserId, createUuidV7()],
+    );
+    await pool.query(
+      `INSERT INTO marketplace.staff_memberships
+        (staff_membership_id, role_assignment_id, user_id, vendor_location_id)
+       VALUES ($1,$2,$3,$4)`,
+      [createUuidV7(), pickerBRoleId, pickerBId, storeB.locationId],
+    );
+    const formerPickerId = createUuidV7();
+    await pool.query(
+      "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+      [formerPickerId],
+    );
+    const formerRoleId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.role_assignments
+        (role_assignment_id,user_id,role_key,state,valid_from,valid_until,
+         granted_by_user_id,request_id,correlation_id,created_at,updated_at,
+         revoked_at,revoke_reason)
+       VALUES ($1,$2,'VENDOR_PICKER','REVOKED',$3,NULL,$4,$5,$5,$3,$3,$3,'STAFF_LEFT')`,
+      [formerRoleId, formerPickerId, now, storeB.ownerUserId, createUuidV7()],
+    );
+    await pool.query(
+      `INSERT INTO marketplace.staff_memberships
+        (staff_membership_id, role_assignment_id, user_id, vendor_location_id)
+       VALUES ($1,$2,$3,$4)`,
+      [createUuidV7(), formerRoleId, formerPickerId, storeB.locationId],
+    );
+    const alertedA = await notifications.alertStaffOfPlacedOrder({
+      context: systemContext(systemActorId),
+      vendor_order_id: orderA.vendor_order_id,
+      now: placedAt,
+    });
+    const alertedAgain = await notifications.alertStaffOfPlacedOrder({
+      context: systemContext(systemActorId),
+      vendor_order_id: orderA.vendor_order_id,
+      now: new Date(placedAt.getTime() + 500),
+    });
+    const alertedB = await notifications.alertStaffOfPlacedOrder({
+      context: systemContext(systemActorId),
+      vendor_order_id: orderB.vendor_order_id,
+      now: placedAt,
+    });
+    check(
+      alertedA === 2 && alertedAgain === 2 && alertedB === 2,
+      `A placed order did not alert every current staff member of its shop, and no one else (${alertedA}/${alertedAgain}/${alertedB})`,
+    );
+    const alertIntents = await pool.query<{ recipient_user_id: string; channels: string[] }>(
+      `SELECT recipient_user_id, channels FROM marketplace.notification_intents
+        WHERE source_kind='vendor_order' AND source_id=$1 AND source_event_type='PLACED'
+        ORDER BY recipient_user_id`,
+      [orderA.vendor_order_id],
+    );
+    check(
+      alertIntents.rows.length === 2 &&
+        [storeA.ownerUserId, pickerId].every((userId) =>
+          alertIntents.rows.some((row) => row.recipient_user_id === userId),
+        ) &&
+        alertIntents.rows.every(
+          (row) => row.channels.includes('IN_APP') && row.channels.includes('PUSH'),
+        ),
+      `The alert was not one in-app-and-push intent per staff member (${JSON.stringify(alertIntents.rows)})`,
+    );
+    await notifications.deliverPending({
+      context: systemContext(systemActorId),
+      now: new Date(placedAt.getTime() + 1_000),
+    });
+    const pickerInbox = (await notifications.list({
+      context: vendorContext(pickerId),
+      unread_only: true,
+    })) as readonly {
+      in_app_notification_id: UuidV7;
+      template_key: string;
+      template_payload: Record<string, unknown>;
+    }[];
+    const pickerAlert = pickerInbox.find(
+      (notice) => notice.template_key === 'vendor_order_event.placed',
+    );
+    check(
+      pickerAlert !== undefined &&
+        pickerAlert.template_payload['vendor_order_id'] === orderA.vendor_order_id &&
+        pickerAlert.template_payload['audible'] === true &&
+        pickerAlert.template_payload['accept_by'] === new Date(expectedAcceptBy).toISOString() &&
+        pickerAlert.template_payload['order_reference'] === orderA.order_reference,
+      `The picker's device did not receive an audible alert carrying the deadline (${JSON.stringify(pickerInbox)})`,
+    );
+    // An order that is not waiting is not announced: the outbox may replay
+    // long after the shop answered.
+    const ownerInboxBefore = await notifications.list({
+      context: vendorContext(storeB.ownerUserId),
+    });
+    check(
+      ownerInboxBefore.length === 1,
+      `Store B's owner has ${ownerInboxBefore.length} notices before any escalation`,
+    );
+    check(
+      (await notifications.list({ context: vendorContext(formerPickerId) })).length === 0,
+      'A revoked picker was alerted of a new order',
+    );
+
+    // 8.1 -- escalation. Nobody at store B opened the alert: after the
+    // configured wait, still inside the deadline, the owner is raised on
+    // every configured channel -- SMS by default. Store A's picker opened
+    // theirs, so store A is left alone. Once per order and owner.
+    check(pickerAlert !== undefined, 'No picker alert to acknowledge');
+    await notifications.markRead({
+      context: vendorContext(pickerId),
+      in_app_notification_id: pickerAlert.in_app_notification_id,
+      now: new Date(placedAt.getTime() + 2_000),
+    });
+    const tooEarly = await notifications.escalateUnacknowledgedOrders({
+      context: systemContext(systemActorId),
+      now: new Date(placedAt.getTime() + (DEFAULT_ALERT_ESCALATION_SECONDS - 10) * 1_000),
+    });
+    check(tooEarly === 0, `An alert was escalated before its wait ran out (${tooEarly})`);
+    const escalationAt = new Date(
+      placedAt.getTime() + (DEFAULT_ALERT_ESCALATION_SECONDS + 10) * 1_000,
+    );
+    const escalated = await notifications.escalateUnacknowledgedOrders({
+      context: systemContext(systemActorId),
+      now: escalationAt,
+    });
+    const escalatedAgain = await notifications.escalateUnacknowledgedOrders({
+      context: systemContext(systemActorId),
+      now: new Date(escalationAt.getTime() + 1_000),
+    });
+    check(
+      escalated === 1 && escalatedAgain === 0,
+      `Escalation did not raise exactly the one unheard order once, to its owner alone (${escalated}/${escalatedAgain})`,
+    );
+    const escalation = await pool.query<{
+      recipient_user_id: string;
+      channels: string[];
+      source_id: string;
+      template_key: string;
+    }>(
+      `SELECT recipient_user_id, channels, source_id, template_key
+         FROM marketplace.notification_intents WHERE source_event_type='PLACED_ESCALATION'`,
+    );
+    check(
+      escalation.rows.length === 1 &&
+        escalation.rows[0]?.recipient_user_id === storeB.ownerUserId &&
+        escalation.rows[0]?.source_id === orderB.vendor_order_id &&
+        escalation.rows[0]?.template_key === 'vendor_order_event.placed_escalation' &&
+        escalation.rows[0]?.channels.includes('SMS'),
+      `The escalation did not reach store B's owner by SMS for the unheard order (${JSON.stringify(escalation.rows)})`,
+    );
+    await notifications.deliverPending({
+      context: systemContext(systemActorId),
+      now: new Date(escalationAt.getTime() + 2_000),
+    });
+    const ownerInboxAfter = (await notifications.list({
+      context: vendorContext(storeB.ownerUserId),
+      unread_only: true,
+    })) as readonly { template_key: string; template_payload: Record<string, unknown> }[];
+    check(
+      ownerInboxAfter.some(
+        (notice) =>
+          notice.template_key === 'vendor_order_event.placed_escalation' &&
+          notice.template_payload['vendor_order_id'] === orderB.vendor_order_id,
+      ),
+      `Store B's owner did not receive the escalation (${JSON.stringify(ownerInboxAfter)})`,
+    );
+
+    // The wait and the channels are configuration, not constants: an
+    // activated `vendor.order_alert_escalation` setting replaces both.
+    const policyProposerId = createUuidV7();
+    const policyApproverId = createUuidV7();
+    for (const actorId of [policyProposerId, policyApproverId]) {
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [actorId]);
+    }
+    const policyDraft = await createConfigurationDraft(pool, {
+      actor_id: policyProposerId,
+      configuration_key: 'vendor.order_alert_escalation',
+      configuration_kind: 'SETTING',
+      configuration_value: { after_seconds: 45, channels: ['PUSH', 'SMS'] },
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: policyProposerId,
+      configuration_version_id: policyDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: policyApproverId,
+      configuration_version_id: policyDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: policyApproverId,
+      configuration_version_id: policyDraft.configuration_version_id,
+      effective_from: new Date(now.getTime() - 1_000),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: policyApproverId,
+      at: now,
+      configuration_version_id: policyDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    const configuredPolicy = await notifications.escalationPolicy(now);
+    check(
+      configuredPolicy.after_seconds === 45 &&
+        configuredPolicy.channels.length === 2 &&
+        configuredPolicy.channels.includes('SMS') &&
+        !configuredPolicy.channels.includes('IN_APP'),
+      `An activated escalation setting did not replace the defaults (${JSON.stringify(configuredPolicy)})`,
     );
 
     // 8.2 -- vendor B declines their order. Sibling A must stay PLACED with
@@ -2736,6 +2996,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     await catalogue.close();
     await inventory.close();
     await access.close();
+    await notifications.close();
     await pool.end();
   }
 }

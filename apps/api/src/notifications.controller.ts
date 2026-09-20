@@ -22,11 +22,16 @@ export class NotificationsController {
 
   @Get()
   @RequireSession()
-  list(@Query('unread_only') unread?: string) {
-    return this.notifications.list({
-      context: currentRequestContext(),
-      unread_only: unread === 'true',
-    });
+  async list(@Query('unread_only') unread?: string) {
+    // The contract names the list (`notifications`); a bare array left the
+    // reference interceptor to wrap it as `data`, and every inbox that read
+    // `notifications` off the answer showed nothing, always (audit run 49).
+    return {
+      notifications: await this.notifications.list({
+        context: currentRequestContext(),
+        unread_only: unread === 'true',
+      }),
+    };
   }
 
   @Post(':in_app_notification_id/read')

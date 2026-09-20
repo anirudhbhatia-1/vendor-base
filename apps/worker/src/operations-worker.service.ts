@@ -276,6 +276,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
             dispatch: this.#dispatch,
             fulfilment: this.#fulfilment,
             log: (name, fields) => workerLogger.event(name, fields),
+            notifications: this.#notifications,
             now: () => new Date(),
             orderMoney: this.#orderMoney,
           },
@@ -388,6 +389,11 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#partnerWait.advanceDue({ context, now }),
         0,
       );
+      const escalations = await pass(
+        'notifications.escalateUnacknowledgedOrders',
+        () => this.#notifications.escalateUnacknowledgedOrders({ context, now }),
+        0,
+      );
       const notificationSignals = await pass(
         'notifications.syncDomainSignals',
         () => this.#notifications.syncDomainSignals({ context, now }),
@@ -465,6 +471,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         controls.incidents +
         waitTimers +
         notificationSignals +
+        escalations +
         notifications +
         configurations.length +
         dispatch.offered +
@@ -480,6 +487,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           incident_controls: controls.incidents,
           wait_timers: waitTimers,
           notification_signals: notificationSignals,
+          alert_escalations: escalations,
           notifications,
           configurations: configurations.length,
           dispatch_offered: dispatch.offered,

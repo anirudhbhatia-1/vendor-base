@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -22,6 +22,7 @@ import {
 import { vendorApiClient, vendorRequest } from './authenticated-api';
 import { displayName, shortReference } from './display';
 import { drain, enqueue, queuedActions } from './offline-queue';
+import { alertsToAcknowledge, chime } from './order-alerts';
 
 type Order = {
   vendor_order_id: string;
@@ -968,6 +969,46 @@ export function OrdersPanel({ vendorLocationId }: { readonly vendorLocationId: s
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  /**
+   * The bell (8.1). Each load of the list asks for this user's unread alerts;
+   * the ones for orders now on screen sound once and are marked read, which is
+   * the acknowledgement the worker's escalation sweep looks for. A hidden tab
+   * acknowledges nothing: nobody saw it.
+   */
+  const sounded = useRef(new Set<string>());
+  useEffect(() => {
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    const waiting = orders
+      .filter((order) => order.lifecycle_state === 'PLACED')
+      .map((order) => order.vendor_order_id);
+    if (waiting.length === 0) return;
+    let stale = false;
+    void (async () => {
+      try {
+        const client = await vendorApiClient();
+        const body = await client.notifications.list({ unread_only: true });
+        const alerts = alertsToAcknowledge(body.notifications ?? [], waiting);
+        if (stale || alerts.length === 0) return;
+        const fresh = alerts.filter((alert) => !sounded.current.has(alert.vendor_order_id));
+        if (fresh.length > 0) {
+          for (const alert of fresh) sounded.current.add(alert.vendor_order_id);
+          chime();
+          setNotice(`${fresh.length} new ${fresh.length === 1 ? 'order' : 'orders'} waiting.`);
+        }
+        await Promise.all(
+          alerts.map((alert) => client.notifications.markRead(alert.in_app_notification_id)),
+        );
+      } catch {
+        // The order is on screen regardless; the unread alert escalates to
+        // the owner, which is the right outcome for a console that cannot
+        // reach the API.
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [orders]);
 
   const flushQueue = useCallback(async () => {
     const result = await drain(async (action) => {

@@ -2570,7 +2570,7 @@
       "name": "Real-time new-order alerts",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "New orders poll in without a manual refresh and pause on a hidden tab",
+      "notes": "The worker alerts every staff member of the shop (in-app + push, audible, carrying accept_by) when an order is placed; the console sounds and acknowledges the alerts for orders it shows; an alert nobody opened is escalated to the owners on the configured channels (vendor.order_alert_escalation, default 60s on IN_APP+PUSH+SMS). Until audit run 49 the console polled in silence and nothing was ever escalated.",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2582,12 +2582,17 @@
         "tests": true
       },
       "files": [
+        "database/src/local-notifications.ts",
+        "apps/worker/src/domain-event-handler.ts",
+        "apps/vendor-pwa/app/order-alerts.ts",
         "apps/vendor-pwa/app/orders-panel.tsx",
         "apps/vendor-pwa/app/vendor-panels.spec.ts"
       ],
       "phase_steps": ["8.1"],
       "verified_by": [
+        "apps/vendor-pwa/app/order-alerts.spec.ts",
         "apps/vendor-pwa/app/vendor-panels.spec.ts",
+        "apps/worker/src/domain-event-handler.spec.ts",
         "database/scripts/verify-vendor-fulfilment.ts"
       ]
     },
@@ -3035,7 +3040,7 @@
       "name": "Notification escalation settings",
       "status": "ui_only",
       "target_stage": "5",
-      "notes": "Hard-coded text. Cannot be edited",
+      "notes": "Hard-coded text. Cannot be edited. The platform-side escalation policy (wait and channels for an unacknowledged new-order alert) is the admin configuration vendor.order_alert_escalation since audit run 49; a shop's own choice of channels remains this ui_only gap.",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {

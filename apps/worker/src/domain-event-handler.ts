@@ -59,6 +59,12 @@ export interface DomainEventDependencies {
       readonly reason_code: string;
     }): Promise<unknown>;
   };
+  readonly notifications: {
+    alertStaffOfPlacedOrder(input: {
+      readonly context: RequestContext;
+      readonly vendor_order_id: UuidV7;
+    }): Promise<number>;
+  };
   readonly log: (event: string, fields: Record<string, unknown>) => void;
   readonly now: () => Date;
 }
@@ -123,6 +129,18 @@ export async function handleDomainEvent(
       });
     }
   } else if (event.event_type === 'order.placed') {
+    // The shop is told first (8.1): every staff member's device, sounding,
+    // with the deadline the server set. Until audit run 49 nothing told the
+    // shop; the console polled a list in silence while the deadline ran.
+    const alerted = await deps.notifications.alertStaffOfPlacedOrder({
+      context,
+      vendor_order_id: event.aggregate_id,
+    });
+    deps.log('vendor_order.staff_alerted', {
+      event_id: event.event_id,
+      recipients: alerted,
+      vendor_order_id: event.aggregate_id,
+    });
     await deps.dispatch.dispatchPlacedOrder({
       context,
       event_id: event.event_id,

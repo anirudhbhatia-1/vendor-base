@@ -13,6 +13,7 @@ import {
   type PushProvider,
   type SmsProvider,
 } from './provider-ports.js';
+import { resolveConfiguration } from './versioned-configuration.js';
 
 export class NotificationAuthorizationError extends Error {}
 export class NotificationNotFoundError extends Error {}
@@ -20,6 +21,15 @@ export class NotificationInputError extends Error {}
 
 type Channel = 'IN_APP' | 'PUSH' | 'SMS';
 type Scenario = ProviderScenario;
+
+/** An unheard new-order alert is raised to the owners after this long. */
+export const DEFAULT_ALERT_ESCALATION_SECONDS = 60;
+/** Where the escalation goes when no policy is active: a text message, too. */
+export const DEFAULT_ALERT_ESCALATION_CHANNELS: readonly Channel[] = Object.freeze([
+  'IN_APP',
+  'PUSH',
+  'SMS',
+]);
 
 function actor(context: RequestContext) {
   if (!context.actor) throw new NotificationAuthorizationError();
@@ -111,6 +121,172 @@ export class LocalNotificationService {
       ],
     );
     return result.rows[0];
+  }
+
+  /**
+   * The shop's alert for a new order (8.1): one intent per staff member of
+   * the location, in-app and push, carrying the order's reference and the
+   * server's deadline and asking the device to sound. Idempotent per order
+   * and person. Until audit run 49 nothing told a shop about a new order:
+   * the customer was notified of every state change and the console polled
+   * a list in silence.
+   */
+  async alertStaffOfPlacedOrder(input: {
+    context: RequestContext;
+    vendor_order_id: UuidV7;
+    now?: Date;
+  }) {
+    system(input.context);
+    const now = input.now ?? new Date();
+    const order = await this.#pool.query<{
+      order_reference: string;
+      vendor_location_id: string;
+      accept_by: Date | null;
+      lifecycle_state: string;
+    }>(
+      `SELECT order_reference, vendor_location_id, accept_by, lifecycle_state
+         FROM marketplace.vendor_orders WHERE vendor_order_id=$1`,
+      [input.vendor_order_id],
+    );
+    const found = order.rows[0];
+    if (!found || found.lifecycle_state !== 'PLACED') return 0;
+    const staff = await this.#staffOf(found.vendor_location_id, now);
+    for (const member of staff) {
+      await this.enqueue({
+        context: input.context,
+        recipient_user_id: member.user_id,
+        notification_kind: 'ORDER_STATUS',
+        template_key: 'vendor_order_event.placed',
+        template_payload: {
+          accept_by: found.accept_by?.toISOString() ?? null,
+          audible: true,
+          order_reference: found.order_reference,
+          vendor_location_id: found.vendor_location_id,
+          vendor_order_id: input.vendor_order_id,
+        },
+        channels: ['IN_APP', 'PUSH'],
+        source_kind: 'vendor_order',
+        source_id: input.vendor_order_id,
+        source_event_type: 'PLACED',
+        deduplication_key: `vendor_alert:${input.vendor_order_id}:${member.user_id}`,
+        now,
+      });
+    }
+    return staff.length;
+  }
+
+  /**
+   * The escalation (8.1): an order still PLACED after the configured wait,
+   * still inside its deadline, whose alert nobody at the shop has opened,
+   * is raised to the owners on the configured channels -- SMS among them by
+   * default, because a push that went unheard is what this is for. Once per
+   * order and owner; an alert that was read is an alert that was heard.
+   */
+  async escalateUnacknowledgedOrders(input: { context: RequestContext; now?: Date }) {
+    system(input.context);
+    const now = input.now ?? new Date();
+    const policy = await this.escalationPolicy(now);
+    const overdue = await this.#pool.query<{
+      vendor_order_id: string;
+      order_reference: string;
+      vendor_location_id: string;
+      accept_by: Date;
+    }>(
+      `SELECT o.vendor_order_id, o.order_reference, o.vendor_location_id, o.accept_by
+         FROM marketplace.vendor_orders o
+        WHERE o.lifecycle_state='PLACED'
+          AND o.accept_by IS NOT NULL AND o.accept_by > $1
+          AND o.created_at <= $1::timestamptz - make_interval(secs => $2)
+          AND NOT EXISTS (
+            SELECT 1 FROM marketplace.in_app_notifications n
+             WHERE n.template_key='vendor_order_event.placed'
+               AND n.template_payload->>'vendor_order_id' = o.vendor_order_id::text
+               AND n.read_at IS NOT NULL)
+          AND NOT EXISTS (
+            SELECT 1 FROM marketplace.notification_intents i
+             WHERE i.source_kind='vendor_order' AND i.source_id=o.vendor_order_id
+               AND i.source_event_type='PLACED_ESCALATION')
+        ORDER BY o.created_at LIMIT 100`,
+      [now, policy.after_seconds],
+    );
+    let escalated = 0;
+    for (const order of overdue.rows) {
+      const owners = (await this.#staffOf(order.vendor_location_id, now)).filter(
+        (member) => member.role_key === 'VENDOR_OWNER',
+      );
+      for (const owner of owners) {
+        await this.enqueue({
+          context: input.context,
+          recipient_user_id: owner.user_id,
+          notification_kind: 'OPERATIONS',
+          template_key: 'vendor_order_event.placed_escalation',
+          template_payload: {
+            accept_by: order.accept_by.toISOString(),
+            audible: true,
+            order_reference: order.order_reference,
+            vendor_location_id: order.vendor_location_id,
+            vendor_order_id: order.vendor_order_id,
+          },
+          channels: policy.channels,
+          source_kind: 'vendor_order',
+          source_id: parseUuidV7(order.vendor_order_id),
+          source_event_type: 'PLACED_ESCALATION',
+          deduplication_key: `vendor_alert_escalation:${order.vendor_order_id}:${owner.user_id}`,
+          now,
+        });
+        escalated += 1;
+      }
+    }
+    return escalated;
+  }
+
+  /**
+   * How long an unheard alert waits and where the escalation goes:
+   * `vendor.order_alert_escalation` (a SETTING: `after_seconds` 15-600 and
+   * `channels`), or the defaults below when none is active.
+   */
+  async escalationPolicy(at?: Date): Promise<{
+    readonly after_seconds: number;
+    readonly channels: readonly Channel[];
+  }> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: 'vendor.order_alert_escalation',
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value as
+      { after_seconds?: unknown; channels?: unknown } | null | undefined;
+    const after =
+      typeof value?.after_seconds === 'number' &&
+      Number.isSafeInteger(value.after_seconds) &&
+      value.after_seconds >= 15 &&
+      value.after_seconds <= 600
+        ? value.after_seconds
+        : DEFAULT_ALERT_ESCALATION_SECONDS;
+    const channels =
+      Array.isArray(value?.channels) &&
+      value.channels.length > 0 &&
+      value.channels.every((channel) => ['IN_APP', 'PUSH', 'SMS'].includes(String(channel)))
+        ? (value.channels as Channel[])
+        : DEFAULT_ALERT_ESCALATION_CHANNELS;
+    return Object.freeze({ after_seconds: after, channels: Object.freeze([...channels]) });
+  }
+
+  /** The people a location's alerts go to: its live staff, with their role. */
+  async #staffOf(vendorLocationId: string, now: Date) {
+    const result = await this.#pool.query<{ user_id: string; role_key: string }>(
+      `SELECT DISTINCT ra.user_id, ra.role_key
+         FROM marketplace.staff_memberships sm
+         JOIN marketplace.role_assignments ra USING (role_assignment_id)
+         JOIN marketplace.users u ON u.user_id = ra.user_id
+        WHERE sm.vendor_location_id=$1 AND ra.state='ACTIVE' AND u.state='ACTIVE'
+          AND ra.valid_from <= $2 AND (ra.valid_until IS NULL OR ra.valid_until > $2)`,
+      [vendorLocationId, now],
+    );
+    return result.rows.map((row) => ({
+      user_id: parseUuidV7(row.user_id),
+      role_key: row.role_key,
+    }));
   }
 
   async syncDomainSignals(input: { context: RequestContext; now?: Date; limit?: number }) {

@@ -44,6 +44,11 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   vendor_orders in the same checkout_group untouched.
 - `timeoutOverdueAccepts` uses `FOR UPDATE SKIP LOCKED` so parallel workers don't collide, and
   transitions overdue orders to `EXPIRED` with `decline_reason_code = 'ACCEPT_DEADLINE_TIMEOUT'`.
+- The shop is told (8.1, audit run 49): the worker alerts every current staff member of the
+  location when `order.placed` is delivered (in-app and push, audible, carrying `accept_by`), the
+  console sounds and acknowledges the alerts for the orders it shows, and an alert nobody opened
+  within `vendor.order_alert_escalation` (default 60 s) is escalated once to the owners on the
+  configured channels, SMS among them. See `local-notification-delivery.md`.
 - Mark-ready refuses if any line row is missing a pick or any proposal is still `PENDING`; a
   proposal must be answered (or timed-out) before its vendor_order can leave picking.
 - Pickup OTP is a six-digit random number stored as SHA-256; the plaintext is returned to the

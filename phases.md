@@ -1387,4 +1387,6 @@ Step 7.8 is **VERIFIED_LOCAL** as of run 48 (20 September 2026), and with it Pha
 
 Phase 7 exit gate: one checkout creates one group and one order per valid vendor (runs 43, 45, 48); a duplicate creates no duplicate payment, order, allocation, hold, event or notification (run 48's footprint; notifications follow the outbox, which is proven single); an invalid or failed group releases only its own resources (runs 42, 43, 44, 48).
 
-Continue the step audit from 8.1 while keeping the Phase 2 gates (branch protection) visible.
+Step 8.1 is **VERIFIED_LOCAL** as of run 49 (20 September 2026). The deadline, the timeout and the customer's notice held; the shop's alert and its escalation did not exist — the customer was told of every state change while the shop's console polled a list in silence. Now: the worker alerts every current staff member of the location when `order.placed` is delivered (in-app and push, audible, carrying `accept_by`, once per order and person), the console sounds and acknowledges the alerts for the orders it shows, and an alert nobody opened within the configured wait (`vendor.order_alert_escalation`, default 60 s) is escalated once to the owners on the configured channels, SMS among them. Found beside it: `GET /notifications` answered a bare array that the interceptor wrapped as `data`, so every inbox reading `notifications` had always been empty. Seven mutation probes, all caught.
+
+Continue the step audit from 8.2 while keeping the Phase 2 gates (branch protection) visible.

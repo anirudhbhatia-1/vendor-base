@@ -1626,6 +1626,40 @@ The step is the proof, so the audit is of the proofs: eleven named scenarios and
 
 **Step 7.8: VERIFIED_LOCAL. Phase 7 exit gate: met.**
 
+## Run 49 (20 September 2026) — step 8.1, vendor alert and response deadline
+
+Five requirements. Three held: the countdown is the server's `accept_by` (Phase D, run 47's projection carries it), `timeoutOverdueAccepts` expires the unanswered order at the deadline, and the customer is told `TIMED_OUT` with the holds released (fulfilment verifier). Two were absent: nothing alerted the shop, and nothing escalated. One live defect found beside them. No migration; nineteen connected assertions, three unit tests, seven mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Push/audible alert to authorized devices | **Absent.** The customer was notified of every state change; the shop's console polled a list every fifteen seconds in silence — P49-01. |
+| 2 | Escalate after non-acknowledgement on configured channels | **Absent.** No acknowledgement existed to miss — P49-02. |
+| 3 | Server-owned countdown | Met: `accept_by` is written at placement and the console counts down from it. |
+| 4 | Auto-timeout at deadline | Met: the worker sweep, `FOR UPDATE SKIP LOCKED`, `ACCEPT_DEADLINE_TIMEOUT`. |
+| 5 | Customer told; reservations and allocations released | Met: `syncDomainSignals` carries `TIMED_OUT`; the release is the decline path's. |
+
+**P49-01 — the shop that was never told.** `alertStaffOfPlacedOrder` (`local-notifications.ts`), called by the worker's `order.placed` handler before dispatch looks for a partner: one `vendor_order_event.placed` intent per current staff member of the location — an active role assignment with a membership there; a revoked picker is nobody — in-app and push, payload `order_reference`, `accept_by`, `audible: true`, deduplicated on order and person so the outbox may retry, and nothing for an order no longer `PLACED`. The vendor console (`order-alerts.ts`) asks for its unread alerts on every load of the list, sounds two synthesised notes for orders it has not sounded for, and marks the alerts for the orders it is showing read; a hidden tab acknowledges nothing, and a page nobody has touched cannot sound (browser policy), which is what the push is for.
+
+**P49-02 — the escalation.** `escalateUnacknowledgedOrders` in the worker sweep: an order still `PLACED` after `after_seconds`, still inside `accept_by`, with no read `placed` alert for it and no escalation already sent, is raised once to the location's owners as `vendor_order_event.placed_escalation` on the policy's channels. The policy is the `SETTING` `vendor.order_alert_escalation` (`after_seconds` 15–600, `channels` ⊆ {IN_APP, PUSH, SMS}), resolved through the versioned-configuration workflow the admin already has; defaults 60 seconds on all three, SMS because an unheard push is what this is for.
+
+**P49-03 — the inbox that showed nothing.** `GET /notifications` returned a bare array; the reference interceptor wraps a bare value as `data`, and the contract, the customer inbox and the native app all read `notifications` off the answer — so the customer's inbox had always been empty. The controller answers `{ notifications }`; a controller unit test pins it.
+
+**Mutation results.** Seven probes on `local-notifications.ts`, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Deduplication key includes the time (alerts repeat on retry) | *The alert was not one in-app-and-push intent per staff member (…four intents…)* |
+| The read-alert clause dropped (an acknowledged order escalates) | *Escalation did not raise exactly the one unheard order once, to its owner alone (2/0)* |
+| The wait dropped (escalation at once) | *An alert was escalated before its wait ran out (1)* |
+| SMS dropped from the default channels | *The escalation did not reach store B's owner by SMS for the unheard order* |
+| Revoked role assignments counted as staff | *A placed order did not alert every current staff member of its shop, and no one else (2/2/3)* |
+| The configured `after_seconds` ignored | *An activated escalation setting did not replace the defaults ({"after_seconds":60 …})* |
+| Escalation to all staff rather than owners | *…to its owner alone (2/0)* — after store B was given a picker; the first form of the walk let this one through |
+
+**Verification.** `pnpm db:verify` exit 0 — 94 migration files (0000–0093), full ladder; `vendor_fulfilment` 187 assertions (177 after run 47). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 563 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 8.1: VERIFIED_LOCAL.**
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

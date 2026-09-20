@@ -45,6 +45,12 @@ function dependencies(input: { readonly method?: string } = {}) {
         calls.push('forceOffline');
       },
     },
+    notifications: {
+      alertStaffOfPlacedOrder: async () => {
+        calls.push('alertStaffOfPlacedOrder');
+        return 2;
+      },
+    },
     log: () => undefined,
     now: () => new Date('2026-09-18T10:00:00.000Z'),
   };
@@ -92,7 +98,8 @@ test('each answer to a placed order settles the group authorization', async () =
 test('a placed order is offered to partners', async () => {
   const { calls, deps } = dependencies();
   await handleDomainEvent(deps, context, event('order.placed'));
-  assert.deepEqual(calls, ['dispatchPlacedOrder']);
+  // The shop's devices sound before dispatch looks for a partner (8.1).
+  assert.deepEqual(calls, ['alertStaffOfPlacedOrder', 'dispatchPlacedOrder']);
 });
 
 test('a returned order opens a case rather than dividing money', async () => {
