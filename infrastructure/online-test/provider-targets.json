@@ -16,23 +16,16 @@
     "push": "FCM and Web Push",
     "observability": "Grafana Cloud Free",
     "analytics": "PostHog Free",
-    "routing": "Mapbox Directions and Matrix (D-17) for road distance and travel time; the labelled estimate until MAPBOX_ACCESS_TOKEN is injected"
+    "routing": "Mapbox Directions and Matrix (D-17) for road distance and travel time, live in the Azure environment since release f661558; the labelled estimate only if the token is withdrawn"
   },
-  "notYetConnected": [
-    "objectStorage",
-    "malwareScanning",
-    "push",
-    "observability",
-    "analytics",
-    "routing"
-  ],
+  "notYetConnected": ["objectStorage", "malwareScanning", "push", "observability", "analytics"],
   "externalResourceState": {
     "pwaAndCdn": "provisioned",
     "database": "provisioned-synthetic-development-project",
     "objectStorage": "not-activated",
     "compute": "provisioned",
     "remainingProviders": "not-connected",
-    "routing": "adapter-implemented-token-not-configured"
+    "routing": "connected-public-token-in-release-env"
   },
   "credentialPolicy": "Provider credentials are stored only in provider secret stores, the company password manager and the VM's uncommitted release.env, and are never committed.",
   "supersededTargets": {
