@@ -152,6 +152,23 @@ export class VendorOrderFulfilmentController {
     }
   }
 
+  @Get(':vendor_order_id/decline-preview')
+  @vendorFulfil
+  async declinePreview(
+    @Param('vendor_location_id') locationId: string,
+    @Param('vendor_order_id') orderId: string,
+  ) {
+    try {
+      return await this.fulfilment.previewDecline({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+        vendor_location_id: uuid(locationId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
   @Post(':vendor_order_id/decline')
   @vendorFulfil
   async decline(

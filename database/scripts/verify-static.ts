@@ -166,6 +166,7 @@ assert(
       '0091_vendor_onboarding_read',
       '0092_group_summary_state',
       '0093_checkout_failed_event',
+      '0094_cancel_after_acceptance',
     ]),
   'Unexpected reviewed migrations',
 );

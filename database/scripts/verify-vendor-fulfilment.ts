@@ -455,6 +455,54 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       `An activated escalation setting did not replace the defaults (${JSON.stringify(configuredPolicy)})`,
     );
 
+    // 8.2 -- before declining, the shop reads what declining would do: the
+    // customer's money released for this order alone, the units back on the
+    // shelf, the siblings untouched, and its own record; and the reasons it
+    // may give are the standard list. Until audit run 50 the console computed
+    // a sentence from the order total, and any shouting-snake-case string was
+    // a reason.
+    const impact = await fulfilment.previewDecline({
+      context: vendorContext(storeB.ownerUserId),
+      vendor_order_id: orderB.vendor_order_id,
+      vendor_location_id: storeB.locationId,
+      now: new Date(now.getTime() + 2_500),
+    });
+    check(
+      impact.can_decline &&
+        impact.released_minor === orderB.total_minor &&
+        impact.sibling_orders === 1 &&
+        impact.lines.length >= 1 &&
+        impact.lines.every((line) => line.units_returned === line.quantity) &&
+        impact.acceptance.answered === 0 &&
+        impact.acceptance.answered_after === 1 &&
+        (impact.reasons as readonly string[]).includes('STOCK_MISMATCH') &&
+        !(impact.reasons as readonly string[]).includes('ACCEPT_DEADLINE_TIMEOUT'),
+      `The decline preview did not state the money, the units, the siblings and the record (${JSON.stringify(impact)})`,
+    );
+    await rejects(
+      () =>
+        fulfilment.previewDecline({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderB.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+        }),
+      FulfilmentNotFoundError,
+      "Another shop could preview a decline of store B's order",
+    );
+    await rejects(
+      () =>
+        fulfilment.decline({
+          context: vendorContext(storeB.ownerUserId),
+          vendor_order_id: orderB.vendor_order_id,
+          vendor_location_id: storeB.locationId,
+          expected_version: orderB.version,
+          reason_code: 'OUT_OF_STOCK',
+          now: new Date(now.getTime() + 2_600),
+        }),
+      FulfilmentInputError,
+      'A reason outside the standard list was accepted for a decline',
+    );
+
     // 8.2 -- vendor B declines their order. Sibling A must stay PLACED with
     // its holds intact.
     const declined = await fulfilment.decline({
@@ -462,10 +510,40 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_order_id: orderB.vendor_order_id,
       vendor_location_id: storeB.locationId,
       expected_version: orderB.version,
-      reason_code: 'OUT_OF_STOCK',
+      reason_code: 'STOCK_MISMATCH',
       note: 'SYNTH decline for sibling-isolation test.',
       now: new Date(now.getTime() + 3_000),
     });
+    const impactAfter = await fulfilment.previewDecline({
+      context: vendorContext(storeB.ownerUserId),
+      vendor_order_id: orderB.vendor_order_id,
+      vendor_location_id: storeB.locationId,
+      now: new Date(now.getTime() + 3_500),
+    });
+    check(
+      !impactAfter.can_decline && impactAfter.released_minor === 0,
+      `A declined order's preview still offered a decline with money to release (${JSON.stringify(impactAfter)})`,
+    );
+    // 8.2 -- only a placed order can be accepted: the declined one is refused
+    // for its state, before anything about its stock is looked at.
+    let acceptDeclinedRefusal: unknown = null;
+    try {
+      await fulfilment.accept({
+        context: vendorContext(storeB.ownerUserId),
+        vendor_order_id: orderB.vendor_order_id,
+        vendor_location_id: storeB.locationId,
+        expected_version: declined.version,
+        preparation_estimate_seconds: 600,
+        now: new Date(now.getTime() + 3_600),
+      });
+    } catch (error) {
+      acceptDeclinedRefusal = error;
+    }
+    check(
+      acceptDeclinedRefusal instanceof FulfilmentConflictError &&
+        acceptDeclinedRefusal.message.includes('Only a placed order'),
+      `A declined order was not refused acceptance for its state (${String(acceptDeclinedRefusal)})`,
+    );
     check(declined.lifecycle_state === 'CANCELLED', 'Decline did not cancel the order');
     const siblingCheck = await fulfilment.getOrder({
       context: vendorContext(storeA.ownerUserId),
@@ -544,6 +622,49 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     check(
       accepted.lifecycle_state === 'ACCEPTED' && accepted.preparation_estimate_seconds === 900,
       'Accept did not persist prep estimate',
+    );
+    // 8.2 -- the acceptance is the sale: the order's holds are COMMITTED in
+    // the acceptance's own transaction, recorded against it, with the shelf
+    // as the hold left it (the units were taken when the hold was placed);
+    // and the acceptance is in the history with the estimate as given. Until
+    // audit run 50 the holds were committed at pickup, from the worker, one
+    // transaction each.
+    const acceptedHolds = await pool.query<{
+      state: string;
+      reason: string | null;
+      shelf: string;
+      held: string;
+    }>(
+      `SELECT ir.reservation_state AS state,
+              (SELECT e.reason_code FROM marketplace.inventory_events e
+                WHERE e.reservation_id = ir.reservation_id AND e.event_type='COMMITTED'
+                ORDER BY e.reservation_version DESC LIMIT 1) AS reason,
+              i.exact_available_quantity::text AS shelf, ir.quantity::text AS held
+         FROM marketplace.vendor_order_lines l
+         JOIN marketplace.inventory_reservations ir ON ir.reservation_id=l.inventory_reservation_id
+         JOIN marketplace.inventory_items i ON i.inventory_item_id=ir.inventory_item_id
+        WHERE l.vendor_order_id=$1`,
+      [orderA.vendor_order_id],
+    );
+    check(
+      acceptedHolds.rows.length >= 1 &&
+        acceptedHolds.rows.every(
+          (row) =>
+            row.state === 'COMMITTED' &&
+            row.reason === 'VENDOR_ACCEPTED' &&
+            Number(row.shelf) === 8 - Number(row.held),
+        ),
+      `Accepting did not commit the order's holds in the acceptance (${JSON.stringify(acceptedHolds.rows)})`,
+    );
+    const acceptedEvent = await pool.query<{ note: string | null }>(
+      `SELECT note FROM marketplace.vendor_order_events
+        WHERE vendor_order_id=$1 AND event_type='ACCEPTED'`,
+      [orderA.vendor_order_id],
+    );
+    check(
+      acceptedEvent.rows.length === 1 &&
+        acceptedEvent.rows[0]?.note === 'Preparation estimate 900s',
+      `The acceptance is not in the history with its estimate (${JSON.stringify(acceptedEvent.rows)})`,
     );
 
     // 8.2 -- another vendor cannot touch this order.
@@ -1034,7 +1155,10 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_order_id: orderA.vendor_order_id,
       now: new Date(now.getTime() + 13_000),
     });
-    check(committed >= 1, 'Inventory commit for pickup did not run');
+    check(
+      committed === 0,
+      `Pickup found ${committed} holds still to commit: the acceptance should have committed them`,
+    );
     const finalState = await pool.query<{ state: string }>(
       `SELECT ir.reservation_state AS state FROM marketplace.vendor_order_lines l
          JOIN marketplace.inventory_reservations ir ON ir.reservation_id=l.inventory_reservation_id
@@ -1474,7 +1598,10 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_order_id: orderV.vendor_order_id,
       now: new Date(selfBase.getTime() + 6_500),
     });
-    check(selfInventory >= 1, 'Inventory commit for a self-delivery did not run');
+    check(
+      selfInventory === 0,
+      `A self-delivery found ${selfInventory} holds still to commit at departure`,
+    );
 
     // At the door. The customer opens their code; the shop's staff type it.
     const doorCode = await fulfilment.issueVendorDeliveryOtp({
@@ -1668,6 +1795,21 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         storeC.locationId,
         new Date(now.getTime() + 22_000),
       ],
+    );
+    // 8.2 -- past the deadline the shop can no longer accept, whether or not
+    // the sweep has reached the order yet.
+    await rejects(
+      () =>
+        fulfilment.accept({
+          context: vendorContext(storeC.ownerUserId),
+          vendor_order_id: timeoutOrderId,
+          vendor_location_id: storeC.locationId,
+          expected_version: 1,
+          preparation_estimate_seconds: 600,
+          now: new Date(now.getTime() + 30_000),
+        }),
+      FulfilmentConflictError,
+      'An order past its response deadline was accepted',
     );
     const expired = await fulfilment.timeoutOverdueAccepts({
       context: systemContext(systemActorId),
@@ -2188,6 +2330,176 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       await dispatch.close();
       await availability.close();
     }
+
+    // 8.2 -- an accepted order's stock is committed, not held; a customer
+    // who cancels it while it is being prepared gets the units back on the
+    // shelf all the same. Until audit run 50 the release looked for holds
+    // only, so committed stock stayed sold to nobody.
+    const cancelBase = new Date(now.getTime() + 80_000);
+    const cancelSuffix = `${Date.now()}X`;
+    const cancelProduct = await catalogue.createProduct({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_location_id: storeA.locationId,
+      product_reference: `SYNTH-PROD-X${cancelSuffix}`,
+      title: 'SYNTH Cancelled Product',
+      category: 'FRUIT_VEGETABLE',
+      unit_label: 'EACH',
+      tax_basis: 'EXEMPT',
+      variable_weight: false,
+      sku: `SYNTH-SKU-X${cancelSuffix}`,
+      variant_title: 'SYNTH Cancelled Variant',
+      price_minor: 12_000,
+      initial_stock_quantity: 5,
+      low_stock_threshold: 1,
+      now: cancelBase,
+    });
+    const cancelCart = await carts.currentCart({
+      context: customerContext(customerId),
+      now: cancelBase,
+    });
+    await carts.setCartAddress({
+      context: customerContext(customerId),
+      customer_address_id: addressId,
+      now: cancelBase,
+    });
+    await carts.addLine({
+      context: customerContext(customerId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: cancelProduct.catalogue_variant_id,
+      quantity: 2,
+      now: cancelBase,
+    });
+    const cancelQuote = await checkout.createQuote({
+      context: customerContext(customerId),
+      cart_id: cancelCart.cart_id,
+      now: cancelBase,
+    });
+    const cancelPlaced = await checkout.place({
+      context: customerContext(customerId),
+      checkout_quote_id: cancelQuote.checkout_quote_id,
+      provider_scenario: 'SUCCESS',
+      idempotency_key: 'phase8-cancel-001',
+      now: new Date(cancelBase.getTime() + 1_000),
+    });
+    const orderX = cancelPlaced.orders.find(
+      (o: { readonly vendor_location_id: UuidV7 }) => o.vendor_location_id === storeA.locationId,
+    );
+    check(orderX !== undefined, 'Cancellation order was not placed at storeA');
+    const acceptedX = await fulfilment.accept({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderX.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: orderX.version,
+      preparation_estimate_seconds: 600,
+      now: new Date(cancelBase.getTime() + 2_000),
+    });
+    const cancelledX = await fulfilment.cancelByCustomer({
+      context: customerContext(customerId),
+      vendor_order_id: orderX.vendor_order_id,
+      expected_version: acceptedX.version,
+      reason_code: 'CHANGED_MIND',
+      now: new Date(cancelBase.getTime() + 3_000),
+    });
+    const shelfX = await pool.query<{ state: string; shelf: string }>(
+      `SELECT ir.reservation_state AS state, i.exact_available_quantity::text AS shelf
+         FROM marketplace.vendor_order_lines l
+         JOIN marketplace.inventory_reservations ir ON ir.reservation_id=l.inventory_reservation_id
+         JOIN marketplace.inventory_items i ON i.inventory_item_id=ir.inventory_item_id
+        WHERE l.vendor_order_id=$1`,
+      [orderX.vendor_order_id],
+    );
+    check(
+      cancelledX.lifecycle_state === 'CANCELLED' &&
+        shelfX.rows.length === 1 &&
+        shelfX.rows[0]?.state === 'RELEASED' &&
+        shelfX.rows[0]?.shelf === '5',
+      `A customer's cancellation of an accepted order did not return its committed units (${JSON.stringify(shelfX.rows)})`,
+    );
+
+    // 8.2 -- an order whose hold lapsed before the shop answered cannot be
+    // accepted on stock that went back to the shelf: refused, and the order
+    // left PLACED as it was, its version untouched.
+    const lapseBase = new Date(cancelBase.getTime() + 10_000);
+    const lapseSuffix = `${Date.now()}L`;
+    const lapseProduct = await catalogue.createProduct({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_location_id: storeA.locationId,
+      product_reference: `SYNTH-PROD-L${lapseSuffix}`,
+      title: 'SYNTH Lapsed Product',
+      category: 'FRUIT_VEGETABLE',
+      unit_label: 'EACH',
+      tax_basis: 'EXEMPT',
+      variable_weight: false,
+      sku: `SYNTH-SKU-L${lapseSuffix}`,
+      variant_title: 'SYNTH Lapsed Variant',
+      price_minor: 12_000,
+      initial_stock_quantity: 5,
+      low_stock_threshold: 1,
+      now: lapseBase,
+    });
+    const lapseCart = await carts.currentCart({
+      context: customerContext(customerId),
+      now: lapseBase,
+    });
+    await carts.setCartAddress({
+      context: customerContext(customerId),
+      customer_address_id: addressId,
+      now: lapseBase,
+    });
+    await carts.addLine({
+      context: customerContext(customerId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: lapseProduct.catalogue_variant_id,
+      quantity: 1,
+      now: lapseBase,
+    });
+    const lapseQuote = await checkout.createQuote({
+      context: customerContext(customerId),
+      cart_id: lapseCart.cart_id,
+      now: lapseBase,
+    });
+    const lapsePlaced = await checkout.place({
+      context: customerContext(customerId),
+      checkout_quote_id: lapseQuote.checkout_quote_id,
+      provider_scenario: 'SUCCESS',
+      idempotency_key: 'phase8-lapse-001',
+      now: new Date(lapseBase.getTime() + 1_000),
+    });
+    const orderY = lapsePlaced.orders.find(
+      (o: { readonly vendor_location_id: UuidV7 }) => o.vendor_location_id === storeA.locationId,
+    );
+    check(orderY !== undefined, 'Lapse order was not placed at storeA');
+    await pool.query(
+      `UPDATE marketplace.inventory_reservations SET expires_at=$2
+        WHERE reservation_id IN (SELECT inventory_reservation_id FROM marketplace.vendor_order_lines
+                                  WHERE vendor_order_id=$1)`,
+      [orderY.vendor_order_id, new Date(lapseBase.getTime() + 1_500)],
+    );
+    await inventory.expireDue({
+      context: systemContext(systemActorId),
+      now: new Date(lapseBase.getTime() + 2_000),
+    });
+    await rejects(
+      () =>
+        fulfilment.accept({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderY.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          expected_version: orderY.version,
+          preparation_estimate_seconds: 600,
+          now: new Date(lapseBase.getTime() + 3_000),
+        }),
+      FulfilmentConflictError,
+      'An order whose hold had lapsed was accepted',
+    );
+    const lapsedOrder = await fulfilment.getOrder({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderY.vendor_order_id,
+    });
+    check(
+      lapsedOrder.lifecycle_state === 'PLACED' && lapsedOrder.version === orderY.version,
+      `A refused acceptance left the order changed (${lapsedOrder.lifecycle_state} v${lapsedOrder.version})`,
+    );
 
     // 8.10 -- why a finished order finished (the collection view is asserted
     // above, while the real partner is at the counter).

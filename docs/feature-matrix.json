@@ -2623,7 +2623,7 @@
       "name": "Accept order",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Accept with expected_version and preparation_estimate",
+      "notes": "Accept with expected_version and preparation_estimate; the acceptance commits the order's inventory holds in its own transaction and refuses an order whose hold lapsed (audit run 50)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2646,7 +2646,7 @@
       "name": "Impact-aware decline",
       "status": "complete_local_synthetic",
       "target_stage": "5",
-      "notes": "PWA sends reason_code and note. Android missing decline",
+      "notes": "The reason is one of the server's seven standard codes; the console's decline sheet shows the API's decline preview (money released, units per line, siblings, acceptance record before and after) from GET …/decline-preview (audit run 50). Android missing decline",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {

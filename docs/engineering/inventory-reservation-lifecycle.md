@@ -20,6 +20,9 @@ SOFT_HELD ──> PROVISIONAL ──> COMMITTED ──> RELEASED
     └──> EXPIRED <──┘
 ```
 
+Checkout takes the soft hold at the quote and makes it provisional at placement; the shop's
+acceptance commits it (`commitReservationsLocked`, inside the acceptance's transaction, since
+audit run 50); decline, timeout, the customer's cancellation or expiry release it.
 `SOFT_HELD` and `PROVISIONAL` carry server-time deadlines. A bounded worker command selects due records with `FOR UPDATE SKIP LOCKED`, returns counted units, writes the terminal state, and appends evidence in one transaction. `COMMITTED` has no expiry transition; cancellation or other later order policy must release it explicitly.
 
 Every accepted mutation increments the inventory-item version. Every reservation transition also increments its reservation version. Events are unique by item/version and reservation/version and reject update or deletion.

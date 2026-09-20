@@ -130,6 +130,50 @@ const DECLINE_REASONS = [
   ['TECHNICAL_ISSUE', 'A technical problem at our end'],
 ] as const;
 
+/** The label for a standard reason; a code the copy does not know is shown as words. */
+function declineReasonLabel(code: string): string {
+  return (
+    DECLINE_REASONS.find(([id]) => id === code)?.[1] ??
+    code
+      .toLowerCase()
+      .replaceAll('_', ' ')
+      .replace(/^./, (first) => first.toUpperCase())
+  );
+}
+
+/** What the API says declining would do (8.2), as the sheet shows it. */
+type DeclinePreview = {
+  readonly can_decline: boolean;
+  readonly released_minor: number;
+  readonly lines: readonly {
+    readonly product_title: string;
+    readonly quantity: number;
+    readonly units_returned: number | null;
+  }[];
+  readonly sibling_orders: number;
+  readonly acceptance: {
+    readonly window_days: number;
+    readonly answered: number;
+    readonly accepted: number;
+    readonly answered_after: number;
+  };
+  readonly reasons: readonly string[];
+};
+
+/**
+ * The shop's acceptance record as a sentence, before and after this decline.
+ * Counts, not a percentage alone: "3 of 4" says how thin the sample is.
+ */
+export function acceptanceSentence(acceptance: DeclinePreview['acceptance']): string {
+  const { accepted, answered, answered_after: after, window_days: days } = acceptance;
+  if (answered === 0) {
+    return `This would be the first order you have answered in ${days} days, and a decline.`;
+  }
+  const before = Math.round((accepted / answered) * 100);
+  const afterRate = Math.round((accepted / after) * 100);
+  return `Accepted ${accepted} of ${answered} in ${days} days (${before}%); declining makes it ${accepted} of ${after} (${afterRate}%).`;
+}
+
 /** Why the customer's own code could not be used. Recorded on the order event. */
 const PICKUP_FALLBACK_REASONS = [
   ['CUSTOMER_DEVICE_UNAVAILABLE', 'Their phone is off or out of battery'],
@@ -217,6 +261,7 @@ function OrderCard({
   const [pickSheet, setPickSheet] = useState(false);
   const [declineSheet, setDeclineSheet] = useState(false);
   const [declineReason, setDeclineReason] = useState<string>('STOCK_MISMATCH');
+  const [declinePreview, setDeclinePreview] = useState<DeclinePreview | null>(null);
   const [weightFor, setWeightFor] = useState<Pick | null>(null);
   const [weightValue, setWeightValue] = useState('');
   const [weightPrice, setWeightPrice] = useState('');
@@ -374,7 +419,24 @@ function OrderCard({
             >
               Accept
             </Button>
-            <Button onClick={() => setDeclineSheet(true)} variant="danger">
+            <Button
+              onClick={() => {
+                setDeclineSheet(true);
+                // The consequences come from the API, not from arithmetic on
+                // the card: the money released is the order's allocation, the
+                // units are the ones held, and the record is the shop's own.
+                setDeclinePreview(null);
+                void call<DeclinePreview>('/decline-preview')
+                  .then((preview) => {
+                    setDeclinePreview(preview);
+                    if (!preview.reasons.includes(declineReason) && preview.reasons[0]) {
+                      setDeclineReason(preview.reasons[0]);
+                    }
+                  })
+                  .catch(() => setDeclinePreview(null));
+              }}
+              variant="danger"
+            >
               Decline
             </Button>
           </>
@@ -615,9 +677,7 @@ function OrderCard({
                   {
                     expected_version: order.version,
                     reason_code: declineReason,
-                    note:
-                      DECLINE_REASONS.find(([id]) => id === declineReason)?.[1] ??
-                      'Store cannot fulfil this order.',
+                    note: declineReasonLabel(declineReason),
                   },
                   'decline',
                 );
@@ -633,20 +693,50 @@ function OrderCard({
         open={declineSheet}
         title="Decline this order"
       >
-        <Notice tone="warning">
-          The customer is refunded {formatMoneyMinor(order.total_minor)} for this order, its stock
-          hold is released, and no completion fee is charged to you. Their orders from other shops
-          are unaffected.
-        </Notice>
+        {declinePreview === null ? (
+          <Notice tone="warning">
+            The customer is refunded {formatMoneyMinor(order.total_minor)} for this order, its stock
+            hold is released, and no completion fee is charged to you. Their orders from other shops
+            are unaffected.
+          </Notice>
+        ) : (
+          <>
+            <Notice tone="warning">
+              The customer gets {formatMoneyMinor(declinePreview.released_minor)} back for this
+              order and no completion fee is charged to you.{' '}
+              {declinePreview.sibling_orders > 0
+                ? `Their ${declinePreview.sibling_orders} other ${
+                    declinePreview.sibling_orders === 1 ? 'order' : 'orders'
+                  } from other shops ${declinePreview.sibling_orders === 1 ? 'is' : 'are'} unaffected.`
+                : 'This is their only order in this checkout.'}
+            </Notice>
+            {declinePreview.lines.length > 0 ? (
+              <ul className="decline-lines">
+                {declinePreview.lines.map((line, index) => (
+                  <li key={`${line.product_title}-${index}`}>
+                    {line.quantity} × {displayName(line.product_title)}
+                    {line.units_returned === null
+                      ? ''
+                      : ` — ${line.units_returned} back on the shelf`}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <Notice tone="information">{acceptanceSentence(declinePreview.acceptance)}</Notice>
+            {declinePreview.can_decline ? null : (
+              <Notice tone="danger">This order can no longer be declined from here.</Notice>
+            )}
+          </>
+        )}
         <SelectField
           hint="This is recorded against your store’s acceptance record, so the reason matters."
           label="Why can you not fulfil it?"
           onChange={(event) => setDeclineReason(event.target.value)}
           value={declineReason}
         >
-          {DECLINE_REASONS.map(([id, label]) => (
+          {(declinePreview?.reasons ?? DECLINE_REASONS.map(([id]) => id)).map((id) => (
             <option key={id} value={id}>
-              {label}
+              {declineReasonLabel(id)}
             </option>
           ))}
         </SelectField>

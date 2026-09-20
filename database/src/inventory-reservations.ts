@@ -474,6 +474,83 @@ export async function releaseReservationsLocked(
   return Object.freeze(released);
 }
 
+/**
+ * Commits provisional reservations inside the caller's transaction (8.2).
+ *
+ * Vendor acceptance is what turns "held for this order" into "sold to it",
+ * and the acceptance and the commitment stand or fall together: until audit
+ * run 50 nothing committed at acceptance -- the holds were committed at
+ * pickup, one transaction each, from the outbox worker, so an accepted order
+ * spent its whole preparation on a hold with a deadline. A reservation already
+ * `COMMITTED` is left as it is (an acceptance replayed). One in any other
+ * state -- released, expired -- means its units went back to the shelf, and an
+ * order cannot be accepted on stock that may be gone. A provisional hold whose
+ * deadline has passed but which the sweep has not reached is still committed:
+ * its units are still deducted, the row is locked here, and the shop has just
+ * promised them.
+ */
+export async function commitReservationsLocked(
+  client: PoolClient,
+  input: {
+    readonly context: RequestContext;
+    readonly now: Date;
+    readonly reason_code: string;
+    readonly reservation_ids: readonly UuidV7[];
+  },
+): Promise<readonly InventoryReservationRecord[]> {
+  const who = actor(input.context, ['system', 'vendor_staff']);
+  const committed: InventoryReservationRecord[] = [];
+  for (const reservationId of input.reservation_ids) {
+    const locked = await client.query<ReservationRow>(
+      `SELECT * FROM marketplace.inventory_reservations WHERE reservation_id=$1 FOR UPDATE`,
+      [reservationId],
+    );
+    const reservation = requiredRow(locked.rows, 'Inventory reservation was not found');
+    if (reservation.reservation_state === 'COMMITTED') continue;
+    if (reservation.reservation_state !== 'PROVISIONAL') {
+      throw new InventoryConflictError(
+        `The reservation is ${reservation.reservation_state}, not provisional`,
+      );
+    }
+    const item = await lockItem(client, parseUuidV7(reservation.inventory_item_id));
+    const nextItemVersion = item.version + 1;
+    const nextReservationVersion = reservation.version + 1;
+    await client.query(
+      `UPDATE marketplace.inventory_items SET version=$2, updated_at=$3
+        WHERE inventory_item_id=$1`,
+      [item.inventory_item_id, nextItemVersion, input.now],
+    );
+    const result = await client.query<ReservationRow>(
+      `UPDATE marketplace.inventory_reservations
+          SET reservation_state='COMMITTED', version=$2, updated_at=$3
+        WHERE reservation_id=$1 RETURNING *`,
+      [reservation.reservation_id, nextReservationVersion, input.now],
+    );
+    await appendEvent(client, {
+      actor_id: who.id,
+      actor_kind: who.kind,
+      context: input.context,
+      counted_stock_applied: reservation.counted_stock_applied,
+      event_type: 'COMMITTED',
+      exact_available_quantity:
+        item.exact_available_quantity === null ? null : Number(item.exact_available_quantity),
+      inventory_item_id: parseUuidV7(item.inventory_item_id),
+      item_version: nextItemVersion,
+      now: input.now,
+      previous_state: 'PROVISIONAL',
+      quantity: Number(reservation.quantity),
+      reason_code: input.reason_code,
+      reservation_id: parseUuidV7(reservation.reservation_id),
+      reservation_version: nextReservationVersion,
+      resulting_state: 'COMMITTED',
+    });
+    committed.push(
+      reservationRecord(requiredRow(result.rows, 'Committed reservation was not returned')),
+    );
+  }
+  return Object.freeze(committed);
+}
+
 export class InventoryReservationService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {

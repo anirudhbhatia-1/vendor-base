@@ -412,7 +412,10 @@ test('vendor fulfilment addresses the location-scoped order routes', async () =>
   try {
     const client = createApiClient({ baseUrl: 'http://api.test', getToken: () => 't' });
     await client.vendor.fulfilment.pendingOrders('loc-1');
-    await client.vendor.fulfilment.accept('loc-1', 'order-1', { expected_version: 1 });
+    await client.vendor.fulfilment.accept('loc-1', 'order-1', {
+      expected_version: 1,
+      preparation_estimate_seconds: 900,
+    });
     assert.equal(captures[0]?.url, 'http://api.test/vendor/locations/loc-1/orders');
     assert.equal(captures[1]?.url, 'http://api.test/vendor/locations/loc-1/orders/order-1/accept');
   } finally {

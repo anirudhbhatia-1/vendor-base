@@ -342,6 +342,33 @@ export type VendorOrderSummary = {
   version: number;
 };
 
+/** What declining an order would do, read before the shop decides (8.2). */
+export type DeclineImpact = {
+  vendor_order_id: string;
+  order_reference: string;
+  lifecycle_state: string;
+  accept_by: string | null;
+  can_decline: boolean;
+  /** The customer's money released for this order alone, in minor units. */
+  released_minor: number;
+  lines: readonly {
+    product_title: string;
+    quantity: number;
+    /** Counted units returned to the shelf; null where the shop confirms by hand. */
+    units_returned: number | null;
+  }[];
+  /** The customer's other orders in the same checkout, untouched by the decline. */
+  sibling_orders: number;
+  acceptance: {
+    window_days: number;
+    answered: number;
+    accepted: number;
+    answered_after: number;
+  };
+  /** The standard reasons; anything else is refused. */
+  reasons: readonly string[];
+};
+
 export type CheckoutGroup = {
   checkout_group_id: string;
   checkout_reference: string;

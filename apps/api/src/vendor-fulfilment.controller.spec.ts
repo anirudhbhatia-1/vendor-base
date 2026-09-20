@@ -37,6 +37,7 @@ function historyAuth(
 const vendorRoutes = [
   'list',
   'accept',
+  'declinePreview',
   'decline',
   'startPicking',
   'markFound',

@@ -1,5 +1,6 @@
 import { errorMessageFor } from '@neighbourhood-store/domain-types';
 import type {
+  DeclineImpact,
   Address,
   AssignmentTransition,
   DeliveryAssignment,
@@ -683,11 +684,20 @@ export function createApiClient(options: ApiClientOptions) {
         pendingOrders: (vendorLocationId: string) =>
           r<{ orders: VendorOrder[] }>(`/vendor/locations/${vendorLocationId}/orders`),
 
-        accept: (vendorLocationId: string, orderId: string, body: { expected_version: number }) =>
+        accept: (
+          vendorLocationId: string,
+          orderId: string,
+          body: { expected_version: number; preparation_estimate_seconds: number },
+        ) =>
           r<VendorOrder>(`/vendor/locations/${vendorLocationId}/orders/${orderId}/accept`, {
             method: 'POST',
             json: body,
           }),
+
+        declinePreview: (vendorLocationId: string, orderId: string) =>
+          r<DeclineImpact>(
+            `/vendor/locations/${vendorLocationId}/orders/${orderId}/decline-preview`,
+          ),
 
         decline: (
           vendorLocationId: string,

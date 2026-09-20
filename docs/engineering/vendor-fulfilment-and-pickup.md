@@ -39,7 +39,22 @@ the vendor_order or line-snapshot invariants Phase 7 established:
 - Accept, start-picking, propose, mark-ready, issue-OTP, and complete-pickup all require an active
   `staff_memberships` row at the target vendor location. Every path throws `FulfilmentAuthorizationError`
   otherwise, and a cross-vendor probe returns `FulfilmentNotFoundError` (concealed).
-- Accept refuses if the response deadline (`accept_by`) has passed or the expected version is stale.
+- Accept refuses if the order is not `PLACED`, the response deadline (`accept_by`) has passed or
+  the expected version is stale. The acceptance is the sale (8.2, audit run 50): every provisional
+  hold on the order's lines is committed in the acceptance's own transaction, recorded against
+  `VENDOR_ACCEPTED`; a hold no longer held (released, expired) refuses the acceptance and leaves the
+  order as it was. The estimate is on the order and in the `ACCEPTED` event's note. Until run 50
+  the holds were committed at pickup, from the worker, one transaction each;
+  `settleInventoryOnPickup` remains as the backstop for orders accepted before.
+- Decline takes one of the standard reasons (`VENDOR_DECLINE_REASONS`: VENDOR_CLOSED,
+  STOCK_MISMATCH, WORKLOAD, SERVICEABILITY, PRICING_ERROR, PROHIBITED_ITEM, TECHNICAL_ISSUE);
+  anything else is refused. `previewDecline` (`GET …/orders/:id/decline-preview`) states what a
+  decline would do before the shop decides: the customer's money released for this order (its
+  allocation), the units back on the shelf per line, the sibling orders left untouched, the shop's
+  acceptance record before and after, and the reasons it may give.
+- A customer's cancellation of an accepted order returns its committed units (the release includes
+  `COMMITTED`), and 0094 lets a cancelled order keep its `accepted_at`: until run 50 the 0026 shape
+  constraint refused it, so every cancellation after acceptance was a 500.
 - Decline releases the vendor's own `SOFT_HELD` and `PROVISIONAL` reservations, leaving sibling
   vendor_orders in the same checkout_group untouched.
 - `timeoutOverdueAccepts` uses `FOR UPDATE SKIP LOCKED` so parallel workers don't collide, and
@@ -56,8 +71,9 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   attempt survives even though the outer pickup transaction rolls back — otherwise
   `PICKUP_OTP_MAX_ATTEMPTS` would be unenforceable.
 - A completed pickup clears the OTP hash and expiry, so a leaked slip cannot pick up the order a
-  second time. `settleInventoryOnPickup` commits every `PROVISIONAL` reservation attached to the
-  order once, and the inventory service's own version guard makes that idempotent.
+  second time. `settleInventoryOnPickup` commits any `PROVISIONAL` reservation still attached to
+  the order (none, for an order accepted since run 50), and the inventory service's own version
+  guard makes that idempotent.
 
 ## Deliberate scope decisions
 

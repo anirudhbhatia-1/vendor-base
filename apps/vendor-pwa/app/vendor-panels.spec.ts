@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { acceptanceSentence } from './orders-panel.js';
 import { statementToCsv } from './payouts-panel.js';
 import { verticesToWkt } from './service-area-panel.js';
 
@@ -95,6 +96,24 @@ test('declining states its consequences and records a real reason', () => {
     'one reason is not sent for every case',
   );
   assert.ok(source.includes('is refunded'), 'the customer impact is previewed');
+  // The preview is the API's (8.2): the money released is the order's
+  // allocation, the units the ones held, and the reasons the standard list.
+  assert.ok(
+    source.includes("call<DeclinePreview>('/decline-preview')"),
+    'the impact is asked of the API',
+  );
+  assert.ok(source.includes('declinePreview?.reasons'), 'the reasons offered are the API’s');
+});
+
+test('the acceptance record is stated as counts, before and after the decline', () => {
+  assert.equal(
+    acceptanceSentence({ window_days: 30, answered: 4, accepted: 3, answered_after: 5 }),
+    'Accepted 3 of 4 in 30 days (75%); declining makes it 3 of 5 (60%).',
+  );
+  assert.equal(
+    acceptanceSentence({ window_days: 30, answered: 0, accepted: 0, answered_after: 1 }),
+    'This would be the first order you have answered in 30 days, and a decline.',
+  );
 });
 
 test('a money amount typed by a vendor is parsed in integer minor units', () => {

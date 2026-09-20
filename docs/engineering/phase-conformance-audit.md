@@ -1660,6 +1660,43 @@ Five requirements. Three held: the countdown is the server's `accept_by` (Phase 
 
 **Step 8.1: VERIFIED_LOCAL.**
 
+## Run 50 (20 September 2026) — step 8.2, accept and decline
+
+Five requirements. Two held outright (the placed-state, deadline and version gates on accept; the estimate stored), one held in substance (siblings preserved, history written), two did not: the acceptance committed nothing, and the decline took any string for a reason and previewed nothing. A fourth defect fell out of the new proofs: no customer has ever been able to cancel an accepted order. Migration 0094; fourteen connected assertions, one unit test; eight mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Accept only from PLACED, before the deadline | Met in code; the deadline gate and the not-PLACED gate had no proof — both now walked. |
+| 2 | Commit counted inventory atomically | **Absent.** Accept touched no inventory; the holds were committed at pickup, from the worker, one transaction each (PRD: "vendor acceptance commits it") — P50-01. |
+| 3 | Store preparation estimate | Met; now also in the `ACCEPTED` event's note, so a later revision does not lose what was promised. |
+| 4 | Preview decline impact; standardized reason | **Absent.** Any shouting-snake-case string was a reason; the "preview" was a sentence the console computed from the order total — P50-02. |
+| 5 | Preserve siblings; complete audit history | Met: the sibling walk (runs 41–49); `DECLINED` with reason and note, `ACCEPTED` with the estimate. |
+
+**P50-01 — the acceptance that sold nothing.** The provisional holds placed at checkout stayed provisional through preparation and were committed by `settleInventoryOnPickup`, invoked by the worker on `vendor_order.picked_up`, one `commit` transaction per line: not atomic with anything, and an accepted order lived its whole preparation on a hold with a deadline (the run 45 fix stretched that deadline to a day rather than remove it). `commitReservationsLocked` (inventory module) now commits inside the caller's transaction; `accept` calls it after the state write, so the acceptance and the sale stand or fall together. A hold in any state but `PROVISIONAL` or `COMMITTED` — released, expired: the units went back to the shelf — refuses the acceptance (`The stock held for this order is no longer held`) and the order is left `PLACED` at its version. A provisional hold past its deadline that the sweep has not reached is committed: its units are still deducted, the row is locked, and the shop has just promised them. `settleInventoryOnPickup` stays as the backstop for orders accepted before this run and now finds nothing to do. A customer's cancellation of an accepted order releases `COMMITTED` too — before, it looked for holds only and would have left the stock sold to nobody.
+
+**P50-02 — the reason and the preview.** `VENDOR_DECLINE_REASONS` is the vocabulary (the seven the console offered, now the server's); `decline` refuses anything else at 400. `previewDecline` reads what the decline would use: the money released is the order's payment allocation (zero once declined), the units per line are the ones held, the siblings are counted, and the shop's own record over the window is given as counts before and after (`3 of 4 … 3 of 5`), with the reasons. The console's decline sheet asks for it on opening and shows the API's sentences; the reasons it offers are the API's, labelled by its own copy.
+
+**P50-03 — the cancellation that never worked.** `cancelByCustomer` allows PLACED, ACCEPTED and PICKING, but 0026's `vendor_order_accepted_after_placed` required a CANCELLED order to have no `accepted_at`, so every cancellation after acceptance died on the constraint — a 500 to the customer, since the day the route existed; nothing in the ladder had walked it. 0094 lets a cancelled order keep the time it was accepted, which is what happened.
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Accept commits nothing (old) | *Accepting did not commit the order's holds in the acceptance ([{"state":"PROVISIONAL" …}])* |
+| Any shouting-snake-case reason (old) | *A reason outside the standard list was accepted for a decline* |
+| The deadline gate dropped | *An order past its response deadline was accepted* |
+| The PLACED gate dropped | *A declined order was not refused acceptance for its state (…The stock held for this order is no longer held…)* — the commit refused it second; the walk asks for the first refusal |
+| Cancellation releases holds only (old) | *A customer's cancellation of an accepted order did not return its committed units ([{"state":"COMMITTED","shelf":"3"}])* |
+| Preview's money from the order total (old) | *A declined order's preview still offered a decline with money to release* |
+| Preview counts the order among its siblings | *The decline preview did not state the money, the units, the siblings and the record* |
+| A lapsed hold skipped rather than refused | *An order whose hold had lapsed was accepted* — after the lapsed-hold walk was written; the first form of the walk let this one through |
+
+**Forward findings.** (8.3/8.5) A line marked missing or removed during picking keeps its committed units: nothing releases a reservation per line, so the shelf undercounts by what was not taken. (9.x) A `RETURNED` order's committed units are never released. (6.x) `setCountedStock` refuses while any reservation is `SOFT_HELD`, `PROVISIONAL` or `COMMITTED`, and a completed sale's reservation stays `COMMITTED` for good — after its first completed order an item can never be recounted; the vendor's inventory list counts those units as held. A terminal state for a consumed commitment, or a stocktake that ignores commitments whose orders have ended, is the fix.
+
+**Verification.** `pnpm db:verify` exit 0 — 95 migration files (0000–0094), full ladder; `vendor_fulfilment` 201 assertions (187 after run 49). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 564 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 8.2: VERIFIED_LOCAL**, with the three forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

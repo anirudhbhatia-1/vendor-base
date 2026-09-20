@@ -10,6 +10,8 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import {
+  commitReservationsLocked,
+  InventoryConflictError,
   InventoryReservationService,
   releaseReservationsLocked,
 } from './inventory-reservations.js';
@@ -18,6 +20,53 @@ import { transaction as tx } from './transaction.js';
 
 export class FulfilmentInputError extends Error {}
 export class FulfilmentNotFoundError extends Error {}
+
+/**
+ * The reasons a shop may decline with (8.2): a fixed vocabulary, so the
+ * acceptance record, the vendor health score and the customer's notice can
+ * read them. Until audit run 50 any shouting-snake-case string was accepted,
+ * and the list lived only in the console's copy. `ACCEPT_DEADLINE_TIMEOUT` is
+ * the system's own reason and is not a choice.
+ */
+export const VENDOR_DECLINE_REASONS = Object.freeze([
+  'VENDOR_CLOSED',
+  'STOCK_MISMATCH',
+  'WORKLOAD',
+  'SERVICEABILITY',
+  'PRICING_ERROR',
+  'PROHIBITED_ITEM',
+  'TECHNICAL_ISSUE',
+] as const);
+export type VendorDeclineReason = (typeof VENDOR_DECLINE_REASONS)[number];
+
+/** What declining an order would do, computed before the shop decides. */
+export interface DeclineImpact {
+  readonly vendor_order_id: UuidV7;
+  readonly order_reference: string;
+  readonly lifecycle_state: string;
+  readonly accept_by: Date | null;
+  /** Whether the order can still be declined by the shop at all. */
+  readonly can_decline: boolean;
+  /** The customer's money released for this order alone, in minor units. */
+  readonly released_minor: number;
+  /** Every line and the units that would go back to the shelf. */
+  readonly lines: readonly {
+    readonly product_title: string;
+    readonly quantity: number;
+    /** Counted stock returned to the shelf; null where the shop confirms by hand. */
+    readonly units_returned: number | null;
+  }[];
+  /** The customer's other orders in this checkout: untouched by the decline. */
+  readonly sibling_orders: number;
+  /** The shop's acceptance record over the window, before and after. */
+  readonly acceptance: {
+    readonly window_days: number;
+    readonly answered: number;
+    readonly accepted: number;
+    readonly answered_after: number;
+  };
+  readonly reasons: readonly VendorDeclineReason[];
+}
 /**
  * Carries which kind of conflict it is.
  *
@@ -877,6 +926,11 @@ export class VendorFulfilmentService {
           WHERE vendor_order_id=$1`,
         [input.vendor_order_id, now, input.preparation_estimate_seconds, version],
       );
+      // The acceptance is the sale: the order's provisional holds are committed
+      // in this transaction, so an accepted order never sits on a hold with a
+      // deadline (8.2). A hold that is no longer held means the shelf may be
+      // short, and the shop is told rather than promised stock it may not have.
+      await this.#commitHolds(client, input.context, input.vendor_order_id, now);
       await appendEvent(client, {
         vendor_order_id: input.vendor_order_id,
         event_type: 'ACCEPTED',
@@ -885,6 +939,8 @@ export class VendorFulfilmentService {
         previous_state: 'PLACED',
         resulting_state: 'ACCEPTED',
         reason_code: 'VENDOR_ACCEPTED',
+        // The estimate as given, kept even if it is revised while picking.
+        note: `Preparation estimate ${input.preparation_estimate_seconds}s`,
         ids,
       });
       // Capture is a provider call, so it belongs on the outbox rather than in
@@ -905,6 +961,109 @@ export class VendorFulfilmentService {
   }
 
   /**
+   * What declining would do, for the shop to read before it decides (8.2):
+   * the customer's money released for this order alone, the units that go
+   * back to the shelf, the sibling orders left untouched, and the shop's own
+   * acceptance record before and after. Read-only; the numbers are the ones
+   * the decline itself would use. Until audit run 50 the console computed a
+   * sentence from the order total on its own.
+   */
+  async previewDecline(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly vendor_location_id: UuidV7;
+    readonly window_days?: number;
+    readonly now?: Date;
+  }): Promise<DeclineImpact> {
+    await requireVendorMemberPool(this.#pool, input.context, input.vendor_location_id);
+    const now = input.now ?? new Date();
+    const windowDays = Math.min(Math.max(input.window_days ?? 30, 1), 90);
+    const order = await this.#pool.query<{
+      order_reference: string;
+      lifecycle_state: string;
+      accept_by: Date | null;
+      total_minor: string;
+      checkout_group_id: string;
+      allocated_minor: string | null;
+    }>(
+      `SELECT o.order_reference, o.lifecycle_state, o.accept_by, o.total_minor::text,
+              o.checkout_group_id,
+              (SELECT allocation.allocated_total_minor::text
+                 FROM marketplace.payment_allocations allocation
+                 JOIN marketplace.checkout_groups grouping
+                   ON grouping.payment_transaction_id = allocation.payment_transaction_id
+                WHERE grouping.checkout_group_id = o.checkout_group_id
+                  AND allocation.source_order_reference = o.order_reference) AS allocated_minor
+         FROM marketplace.vendor_orders o
+        WHERE o.vendor_order_id=$1 AND o.vendor_location_id=$2`,
+      [input.vendor_order_id, input.vendor_location_id],
+    );
+    const found = order.rows[0];
+    if (!found) throw new FulfilmentNotFoundError();
+    const lines = await this.#pool.query<{
+      product_title: string;
+      quantity: number;
+      counted: boolean | null;
+      held: string | null;
+    }>(
+      `SELECT l.product_title_snapshot AS product_title, l.quantity,
+              r.counted_stock_applied AS counted, r.quantity::text AS held
+         FROM marketplace.vendor_order_lines l
+         LEFT JOIN marketplace.inventory_reservations r
+           ON r.reservation_id = l.inventory_reservation_id
+          AND r.reservation_state IN ('SOFT_HELD','PROVISIONAL','COMMITTED')
+        WHERE l.vendor_order_id=$1
+        ORDER BY l.vendor_order_line_id`,
+      [input.vendor_order_id],
+    );
+    const siblings = await this.#pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM marketplace.vendor_orders
+        WHERE checkout_group_id=$1 AND vendor_order_id<>$2`,
+      [found.checkout_group_id, input.vendor_order_id],
+    );
+    const record = await this.#pool.query<{ answered: string; accepted: string }>(
+      `SELECT count(*) FILTER (WHERE accepted_at IS NOT NULL OR decline_reason_code IS NOT NULL)::text
+                AS answered,
+              count(*) FILTER (WHERE accepted_at IS NOT NULL)::text AS accepted
+         FROM marketplace.vendor_orders
+        WHERE vendor_location_id=$1 AND created_at >= $2 AND vendor_order_id<>$3`,
+      [
+        input.vendor_location_id,
+        new Date(now.getTime() - windowDays * 86_400_000),
+        input.vendor_order_id,
+      ],
+    );
+    const answered = Number(record.rows[0]?.answered ?? '0');
+    const allocated = Number(found.allocated_minor ?? found.total_minor);
+    return Object.freeze({
+      vendor_order_id: input.vendor_order_id,
+      order_reference: found.order_reference,
+      lifecycle_state: found.lifecycle_state,
+      accept_by: found.accept_by,
+      can_decline:
+        found.lifecycle_state === 'PLACED' && (found.accept_by === null || found.accept_by > now),
+      released_minor: Number.isSafeInteger(allocated) && allocated > 0 ? allocated : 0,
+      lines: Object.freeze(
+        lines.rows.map((line) =>
+          Object.freeze({
+            product_title: line.product_title,
+            quantity: line.quantity,
+            units_returned: line.counted && line.held !== null ? Number(line.held) : null,
+          }),
+        ),
+      ),
+      sibling_orders: Number(siblings.rows[0]?.count ?? '0'),
+      acceptance: Object.freeze({
+        window_days: windowDays,
+        answered,
+        accepted: Number(record.rows[0]?.accepted ?? '0'),
+        answered_after: answered + 1,
+      }),
+      reasons: VENDOR_DECLINE_REASONS,
+    });
+  }
+
+  /**
    * Decline moves the order to CANCELLED and releases its inventory holds so
    * a sibling order in the same checkout group is not blocked. The customer
    * refund path is triggered by the outbox event this appends, not by this
@@ -919,8 +1078,10 @@ export class VendorFulfilmentService {
     readonly note?: string;
     readonly now?: Date;
   }): Promise<VendorOrderSummary> {
-    if (!reasonCode.test(input.reason_code))
-      throw new FulfilmentInputError('Reason code must be shouting-snake-case');
+    if (!(VENDOR_DECLINE_REASONS as readonly string[]).includes(input.reason_code))
+      throw new FulfilmentInputError(
+        `Decline reason must be one of ${VENDOR_DECLINE_REASONS.join(', ')}`,
+      );
     if (input.note !== undefined && (input.note.length < 1 || input.note.length > 240))
       throw new FulfilmentInputError('Note must be between 1 and 240 characters');
     const now = input.now ?? new Date();
@@ -2149,8 +2310,11 @@ export class VendorFulfilmentService {
 
   /**
    * Called by an outbox worker for a `vendor_order.picked_up` event: commits
-   * every PROVISIONAL reservation attached to the order. Idempotent through
-   * InventoryReservationService.commit's own version guard.
+   * any PROVISIONAL reservation still attached to the order. Since audit run
+   * 50 the acceptance commits them (8.2), so this finds nothing to do for an
+   * order accepted after it; it remains the backstop for orders accepted
+   * before. Idempotent through InventoryReservationService.commit's own
+   * version guard.
    */
   async settleInventoryOnPickup(input: {
     readonly context: RequestContext;
@@ -2744,13 +2908,15 @@ export class VendorFulfilmentService {
         [input.vendor_order_id, version, now],
       );
       // A cancelled order was leaving its stock held, so a sibling order in the
-      // same group could be starved of inventory nobody was going to buy.
+      // same group could be starved of inventory nobody was going to buy. An
+      // accepted order's stock is committed, not held (8.2), and goes back too.
       await this.#releaseHolds(
         client,
         input.context,
         input.vendor_order_id,
         now,
         'CUSTOMER_CANCELLED',
+        ['SOFT_HELD', 'PROVISIONAL', 'COMMITTED'],
       );
       await releaseAuthorizationForEndedOrder(client, {
         actor_id: customerId,
@@ -3097,19 +3263,50 @@ export class VendorFulfilmentService {
     vendorOrderId: UuidV7,
     now: Date,
     reasonCode: string,
+    states?: readonly ('SOFT_HELD' | 'PROVISIONAL' | 'COMMITTED')[],
   ): Promise<void> {
-    const held = await client.query<{ reservation_id: string }>(
-      `SELECT l.inventory_reservation_id AS reservation_id
-         FROM marketplace.vendor_order_lines l
-        WHERE l.vendor_order_id=$1 AND l.inventory_reservation_id IS NOT NULL`,
-      [vendorOrderId],
-    );
     await releaseReservationsLocked(client, {
       context,
       now,
       reason_code: reasonCode,
-      reservation_ids: held.rows.map((row) => parseUuidV7(row.reservation_id)),
+      reservation_ids: await this.#lineReservations(client, vendorOrderId),
+      ...(states ? { states } : {}),
     });
+  }
+
+  /** The acceptance's half of the sale: every held line becomes sold (8.2). */
+  async #commitHolds(
+    client: PoolClient,
+    context: RequestContext,
+    vendorOrderId: UuidV7,
+    now: Date,
+  ): Promise<void> {
+    try {
+      await commitReservationsLocked(client, {
+        context,
+        now,
+        reason_code: 'VENDOR_ACCEPTED',
+        reservation_ids: await this.#lineReservations(client, vendorOrderId),
+      });
+    } catch (error) {
+      if (error instanceof InventoryConflictError) {
+        throw new FulfilmentConflictError(
+          'The stock held for this order is no longer held; it cannot be accepted',
+        );
+      }
+      throw error;
+    }
+  }
+
+  async #lineReservations(client: PoolClient, vendorOrderId: UuidV7): Promise<readonly UuidV7[]> {
+    const held = await client.query<{ reservation_id: string }>(
+      `SELECT l.inventory_reservation_id AS reservation_id
+         FROM marketplace.vendor_order_lines l
+        WHERE l.vendor_order_id=$1 AND l.inventory_reservation_id IS NOT NULL
+        ORDER BY l.vendor_order_line_id`,
+      [vendorOrderId],
+    );
+    return held.rows.map((row) => parseUuidV7(row.reservation_id));
   }
 
   async #recordPick(input: {
