@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   CustomerCatalogueImageController,
   CustomerCategoriesController,
+  MapsConfigController,
   PublicDiscoveryController,
 } from './customer-catalogue.controller.js';
 import { AUTHORIZATION_REQUIREMENT } from './authorization.js';
@@ -33,6 +34,7 @@ test('the pre-sign-in catalogue surface is exactly these routes', () => {
   ]);
   assert.deepEqual(methodsOf(CustomerCategoriesController.prototype), ['list']);
   assert.deepEqual(methodsOf(CustomerCatalogueImageController.prototype), ['image']);
+  assert.deepEqual(methodsOf(MapsConfigController.prototype), ['config']);
 });
 
 test('no pre-sign-in route carries an authorization requirement', () => {
@@ -40,6 +42,7 @@ test('no pre-sign-in route carries an authorization requirement', () => {
     PublicDiscoveryController,
     CustomerCategoriesController,
     CustomerCatalogueImageController,
+    MapsConfigController,
   ]) {
     for (const method of methodsOf(controller.prototype)) {
       assert.equal(
@@ -78,4 +81,23 @@ test('the public discovery reads cannot return anything personal', () => {
       );
     }
   }
+});
+
+/**
+ * The maps configuration hands a browser the public token and nothing else:
+ * a secret (sk.) token is never given out, and no provider means no token.
+ */
+test('the maps configuration gives out only a public token, and none when maps are off', () => {
+  const routing = (provider: 'estimate' | 'mapbox', token: string | undefined) =>
+    new MapsConfigController({
+      routing: { provider, mapboxAccessToken: token, profile: 'driving', timeoutMs: 4_000 },
+    } as never).config();
+  const on = routing('mapbox', 'pk.eyJ1IjoidW5pdCIsImEiOiJ0ZXN0MDEyMyJ9.unit-test-signature');
+  assert.equal(on.provider, 'mapbox');
+  assert.match(on.access_token ?? '', /^pk\./);
+  assert.equal(on.country, 'in');
+  const secret = routing('mapbox', 'sk.eyJ1IjoidW5pdCIsImEiOiJ0ZXN0MDEyMyJ9.unit-test-signature');
+  assert.deepEqual([secret.provider, secret.access_token], ['none', null]);
+  const off = routing('estimate', undefined);
+  assert.deepEqual([off.provider, off.access_token], ['none', null]);
 });

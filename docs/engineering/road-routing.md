@@ -47,8 +47,25 @@ Quotes made before 0085 carry no route; the offer and settlement fall back to th
 
 Mutation probes recorded in the working log: pricing on the line, storing an estimate whatever the provider said, settlement and the offer measuring their own line, and discovery listing the line were each caught by the assertions above once the fulfilment fixture's address was moved off the store so a road and a line differ.
 
+## Maps in the shells: nobody types a coordinate
+
+Every role used to type latitude and longitude, or had them guessed: the customer's address form had two number fields; the vendor's application read the device and fell back to a hard-coded point in Jaipur when permission was refused; the admin's provisioning form defaulted every store to that same point; the rider went online at it whenever the phone would not say where they were; and a delivery zone was four typed corners.
+
+`LocationPicker` in `packages/ui` is one component for all of them: a Mapbox GL map (loaded from Mapbox's CDN when a picker first mounts, pinned to one version, never bundled, so the shells stay the size they were), a place search (Mapbox Geocoding v6, fenced to India and biased to where the map is looking), tap-to-place and drag, "use my location", a reverse-geocoded read-back of where the pin landed, and the hand-entered fields behind a disclosure for anyone without WebGL, without a token, or who would rather type. The public token reaches the browser through `GET catalogue/maps/config`, which hands out a `pk.` token only — a secret `sk.` token is never given to a page — and answers `provider: none` when maps are not configured, at which point every picker shows its fallback and says so. The library's own type declarations do not compile under this repository's compiler settings, so the picker is typed against a hand-written subset (`mapbox-gl-loader.ts`) of exactly what it calls.
+
+| Surface | Before | Now |
+|---|---|---|
+| Customer address (new and edit) | two number fields; device fix or nothing | search, tap, drag, device; the record still says whether the point was a device fix or a placed pin |
+| Vendor application | device fix, else a hard-coded Jaipur point | the shop placed on the map; submission refused without it |
+| Vendor delivery zone | four typed corners | a centre and a radius drawn on the map (`circleWkt`), corners by hand behind a disclosure |
+| Admin store provisioning | two text fields defaulting to one point | the store placed on the map; creation refused without it |
+| Rider going online | device fix, else a hard-coded Jaipur point | device first; if the phone will not say, the rider places themselves on the map before going online |
+
+Verified in the browser against the synthetic project on 20 September 2026: the customer address map rendered Jaipur, a search for "Vaishali Nagar" listed five places, choosing one flew the map there and dropped the pin (`26.91104, 75.73854 · Nursery Cir 10, Jaipur`), a tap moved it, the address saved at that point, editing reopened the map on the saved pin, and the home feed listed stores at their road distance and time (`10.0 km · ~22 min`, no estimate marker). The Playwright journeys grant a device position for the rider and place the customer's address through the picker.
+
 ## What remains
 
 - Configure `MAPBOX_ACCESS_TOKEN` and `ROUTING_PROVIDER=mapbox` in the Azure company-test environment's `release.env` (the templates already carry the variables) and in developers' local `.env` where real roads are wanted. Until then every route is a labelled estimate.
 - Production routing, real customer coordinates and any paid tier remain gated by PRV-04 and D-17.
-- An ETA model beyond preparation plus road time; live traffic; geocoding and the mobile map handoff (PRV-04's other halves).
+- An ETA model beyond preparation plus road time; live traffic; the mobile map handoff to a navigation app (PRV-04's remaining half). Geocoding is in place through the picker.
+- The Android shells still take coordinates the old way; they are `unverified` in the matrix and outside this change.

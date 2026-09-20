@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Header,
   Inject,
   NotFoundException,
   Param,
@@ -12,6 +13,7 @@ import { CatalogueProductService, CustomerDiscoveryService } from '@neighbourhoo
 import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import type { FastifyReply } from 'fastify';
 import { CATALOGUE_PRODUCTS, CUSTOMER_DISCOVERY } from './tokens.js';
+import { RUNTIME_CONFIG, type RuntimeConfig } from './runtime-config.js';
 import { translateDomainError } from './domain-errors.js';
 
 function requireQuery(value: string | undefined): string {
@@ -91,6 +93,36 @@ export class CustomerCatalogueImageController {
  * searches, cart, orders) stays on the authenticated
  * `customer/discovery/*` routes, which are unchanged.
  */
+/**
+ * What a browser needs to draw a map and search for a place (D-17): the
+ * provider and its public token. The token is a Mapbox `pk.` token -- scoped
+ * and made to be used from a browser -- read from the same environment the
+ * routing service uses, so no shell has to carry it at build time. When no
+ * provider is configured, every picker falls back to hand-entered
+ * coordinates and says so.
+ */
+@Controller('catalogue/maps')
+export class MapsConfigController {
+  constructor(@Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig) {}
+
+  @Get('config')
+  @Header('Cache-Control', 'no-store')
+  config() {
+    const routing = this.runtime.routing;
+    const publicToken =
+      routing.provider === 'mapbox' && routing.mapboxAccessToken?.startsWith('pk.')
+        ? routing.mapboxAccessToken
+        : null;
+    return {
+      provider: publicToken ? ('mapbox' as const) : ('none' as const),
+      access_token: publicToken,
+      country: 'in',
+      // Jaipur, the synthetic launch area, where a map opens before a point is chosen.
+      default_centre: { latitude: 26.9124, longitude: 75.7873 },
+    };
+  }
+}
+
 @Controller('catalogue')
 export class PublicDiscoveryController {
   constructor(@Inject(CUSTOMER_DISCOVERY) private readonly discovery: CustomerDiscoveryService) {}

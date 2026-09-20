@@ -9,16 +9,19 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  LocationPicker,
   Notice,
   PageHeader,
 } from '@neighbourhood-store/ui';
 import { AddressSetup } from './address-setup';
+import { useMapsConfig } from './maps-config';
 import { customerApiClient } from './customer-session';
 import { displayLabel } from './display';
 
 export function AddressManager() {
   const [addresses, setAddresses] = useState<readonly Address[]>([]);
   const [editing, setEditing] = useState<Address | null>(null);
+  const maps = useMapsConfig();
   const [adding, setAdding] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -125,6 +128,26 @@ export function AddressManager() {
               name="pin_code"
               pattern="[1-9][0-9]{5}"
               required
+            />
+            <LocationPicker
+              accessToken={maps?.access_token ?? null}
+              copy={{
+                chosenLabel: 'Delivery point',
+                deviceLabel: 'Use my current location',
+                mapHint: 'Drag the pin if the door is somewhere else.',
+              }}
+              hint="Fees and arrival times follow this point."
+              initialCentre={maps?.default_centre}
+              label="Where should we deliver?"
+              onChange={(next, how) =>
+                setEditing({
+                  ...editing,
+                  latitude: next.latitude,
+                  longitude: next.longitude,
+                  coordinate_source: how === 'DEVICE' ? 'DEVICE_LOCATION' : 'MANUAL_PIN',
+                })
+              }
+              value={{ latitude: editing.latitude, longitude: editing.longitude }}
             />
             <Field defaultValue={editing.landmark ?? ''} label="Landmark" name="landmark" />
             <Field

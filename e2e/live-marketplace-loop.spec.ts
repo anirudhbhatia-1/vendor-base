@@ -117,8 +117,11 @@ test.describe('Supabase-backed marketplace acceptance', () => {
     // Customer OTP sessions are tab-scoped by design and must survive refresh.
     await page.reload();
     await expect(page).not.toHaveURL(/\/login/);
-    await page.getByRole('button', { name: /set my location/i }).click();
-    await page.getByRole('button', { name: /save delivery address/i }).click();
+    // The delivery point is chosen on the map (D-17); the device position the
+    // test granted above is what "use my current location" places the pin at.
+    await page.getByRole('button', { name: /use my current location/i }).click();
+    await expect(page.getByText(/Delivery point:/)).not.toContainText('—');
+    await page.getByRole('button', { name: /save and find stores/i }).click();
     await expect(page.getByRole('button', { name: /see nearby stores/i })).toBeVisible();
     await page.getByRole('button', { name: /see nearby stores/i }).click();
     await expect(

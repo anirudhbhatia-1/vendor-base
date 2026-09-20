@@ -128,3 +128,16 @@ test('closing a zone sends the version it read', () => {
   assert.ok(source.includes('suspend'), 'the panel can close a zone');
   assert.ok(source.includes('resume'), 'and reopen it');
 });
+
+test('an operator places a provisioned store on the map rather than typing coordinates', () => {
+  const source = panel('onboarding-panel.tsx');
+  assert.ok(source.includes('<LocationPicker'), 'the store is placed on the map');
+  assert.ok(
+    source.includes("throw new Error('Place the store on the map first.')"),
+    'and cannot be created without a point',
+  );
+  assert.ok(
+    !/vLat|vLng|26\.8505|75\.7628/.test(source),
+    'no typed coordinates and no default point remain',
+  );
+});

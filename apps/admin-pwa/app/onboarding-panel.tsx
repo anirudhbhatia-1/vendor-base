@@ -1,7 +1,9 @@
 'use client';
 
 import { useRef, useState, type FormEvent } from 'react';
+import { LocationPicker, type GeoPoint } from '@neighbourhood-store/ui';
 import { adminApiClient } from './authenticated-api';
+import { useMapsConfig } from './maps-config';
 
 type VendorResult = {
   user_id: string;
@@ -26,8 +28,10 @@ export function OnboardingPanel() {
   const [vEmail, setVEmail] = useState('');
   const [vBusiness, setVBusiness] = useState('');
   const [vLocation, setVLocation] = useState('');
-  const [vLat, setVLat] = useState('26.8505');
-  const [vLng, setVLng] = useState('75.7628');
+  // The store's exact spot, placed on the map rather than typed as two numbers
+  // that defaulted to one point in Jaipur for every shop (D-17).
+  const [vPoint, setVPoint] = useState<GeoPoint | null>(null);
+  const maps = useMapsConfig();
   const [vCategory, setVCategory] = useState('FRUIT_VEGETABLE');
   const [vPassword, setVPassword] = useState('');
   const [vBusy, setVBusy] = useState(false);
@@ -49,12 +53,13 @@ export function OnboardingPanel() {
     setVResult(null);
     try {
       const client = await adminApiClient();
+      if (!vPoint) throw new Error('Place the store on the map first.');
       const body = {
         email: vEmail.trim(),
         business_name: `SYNTH ${vBusiness.trim().replace(/^SYNTH\s+/i, '')}`,
         location_name: `SYNTH ${vLocation.trim().replace(/^SYNTH\s+/i, '')}`,
-        latitude: Number(vLat),
-        longitude: Number(vLng),
+        latitude: vPoint.latitude,
+        longitude: vPoint.longitude,
         category: vCategory,
         password: vPassword,
       };
@@ -135,16 +140,20 @@ export function OnboardingPanel() {
           Location name
           <input value={vLocation} onChange={(e) => setVLocation(e.target.value)} required />
         </label>
-        <div className="onboarding-coords">
-          <label>
-            Latitude
-            <input value={vLat} onChange={(e) => setVLat(e.target.value)} required />
-          </label>
-          <label>
-            Longitude
-            <input value={vLng} onChange={(e) => setVLng(e.target.value)} required />
-          </label>
-        </div>
+        <LocationPicker
+          accessToken={maps?.access_token ?? null}
+          copy={{
+            searchLabel: 'Search for the store or its street',
+            searchPlaceholder: 'Shop name, street or landmark',
+            chosenLabel: 'Store location',
+            mapHint: 'Tap the map or drag the pin to the shop door.',
+          }}
+          hint="Discovery, delivery fees and rider offers all work from this exact point."
+          initialCentre={maps?.default_centre}
+          label="Where is the store?"
+          onChange={(next) => setVPoint(next)}
+          value={vPoint}
+        />
         <label>
           Category
           <input value={vCategory} onChange={(e) => setVCategory(e.target.value)} />

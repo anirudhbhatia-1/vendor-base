@@ -35,10 +35,21 @@ test('recent searches are listed and can be forgotten', () => {
   assert.ok(source.includes('deleteRecentSearch'), 'a term can be removed');
 });
 
-test('an address is saved at the resolved location, not a fixed point', () => {
-  const source = panel('address-setup.tsx');
-  assert.ok(source.includes('deviceCoordinates'));
-  assert.ok(source.includes('latitude: located.latitude'));
+test('an address is placed on a map, and saved at the point the customer chose', () => {
+  const source = code('address-setup.tsx');
+  assert.ok(source.includes('<LocationPicker'), 'the delivery point is chosen on the map');
+  assert.ok(
+    source.includes('accessToken={maps?.access_token ?? null}'),
+    'with the token the API hands out',
+  );
+  assert.ok(source.includes('latitude: point.latitude'), 'and saved exactly where the pin is');
+  assert.ok(
+    source.includes("source === 'DEVICE' ? ('DEVICE_LOCATION' as const) : ('MANUAL_PIN' as const)"),
+    'a device fix and a placed pin are told apart on the record',
+  );
+  // No typed coordinates, and no guessed centroid when permission is refused.
+  assert.ok(!/label=["']Delivery latitude["']/.test(source), 'no latitude field');
+  assert.ok(!/26\.85|75\.76/.test(source), 'no hard-coded neighbourhood point');
 });
 
 test('each store keeps its own catalogue, and one failure does not hide the rest', () => {

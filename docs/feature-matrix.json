@@ -497,7 +497,7 @@
       "name": "Optional device location",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Addresses are saved at the device location with a manual-pin fallback",
+      "notes": "Addresses are saved at the device location with a manual-pin fallback. D-17 maps: the device fix places the pin on the map, and the pin can then be moved.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -568,23 +568,25 @@
     {
       "id": "CUS-11",
       "name": "Map-pin adjustment",
-      "status": "not_started",
+      "status": "complete_local_synthetic",
       "target_stage": "4",
-      "notes": "No map component or pin-drag UI",
+      "notes": "D-17 maps: the address is placed on a Mapbox map -- search a place, tap, drag the pin, or use the device -- with hand-entered coordinates behind a disclosure; editing a saved address reopens the map on its pin. Verified in the browser against the synthetic project on 20 September 2026.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
-        "domain": false,
-        "api": false,
+        "domain": true,
+        "api": true,
         "worker": false,
-        "pwa": false,
+        "pwa": true,
         "android": false,
-        "tests": false
+        "tests": true
       },
       "phase_steps": ["6.1"],
       "verified_by": [
         "apps/api/src/customer-addresses.controller.spec.ts",
-        "database/scripts/verify-customer-addresses.ts"
+        "database/scripts/verify-customer-addresses.ts",
+        "apps/customer-pwa/app/customer-panels.spec.ts",
+        "packages/ui/src/location-picker-support.spec.ts"
       ]
     },
     {
@@ -2141,7 +2143,7 @@
       "name": "Service zones",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Delivery zones are edited as polygon vertices and stored as WKT",
+      "notes": "Delivery zones are drawn on the map as a centre and a radius (D-17) and stored as WKT; corner vertices remain behind a disclosure.",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -8308,11 +8310,11 @@
     "launch_features": 309,
     "by_status": {
       "backend_only": 14,
-      "complete_local_synthetic": 265,
+      "complete_local_synthetic": 266,
       "excluded": 15,
       "gated": 7,
       "later": 23,
-      "not_started": 11,
+      "not_started": 10,
       "partial_workflow": 17,
       "ui_only": 2
     },
@@ -8324,8 +8326,8 @@
     },
     "launch_by_status": {
       "backend_only": 14,
-      "complete_local_synthetic": 265,
-      "not_started": 11,
+      "complete_local_synthetic": 266,
+      "not_started": 10,
       "partial_workflow": 17,
       "ui_only": 2
     }

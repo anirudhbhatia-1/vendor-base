@@ -1408,6 +1408,8 @@ Not an audit step. Runs 41 and 43 recorded two scope notes for an owner — the 
 
 Runs 41 and 43's scope notes on route and promise are closed by this; the tax-basis note stands.
 
+The same day, the owner asked that nobody type a coordinate: `LocationPicker` in `packages/ui` (map, place search, tap, drag, device, hand entry behind a disclosure) replaced the customer's two number fields, the vendor application's device-or-hard-coded point, the admin's defaulted fields, the rider's hard-coded fallback and the zone's typed corners. The public token reaches a page through `GET catalogue/maps/config`, which hands out a `pk.` token only. Verified in the browser against the synthetic project: search, fly-to, pin, tap, save, edit, and a home feed at real road distance and time. CUS-11 (map-pin adjustment) moves from `not_started` to complete. The seven migrations 0079–0085 were applied to the synthetic Supabase project, which the running API already required. See [road-routing.md](road-routing.md).
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

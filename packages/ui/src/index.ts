@@ -70,3 +70,22 @@ export {
   type TopBarProps,
 } from './shell.js';
 export { Icon, type IconName } from './icons.js';
+export {
+  DEFAULT_MAP_CENTRE,
+  LocationPicker,
+  type LocationPickerCopy,
+  type LocationPickerProps,
+  type LocationSource,
+} from './location-picker.js';
+export {
+  circleRing,
+  circleWkt,
+  formatPoint,
+  forwardGeocodeUrl,
+  isFinitePoint,
+  parseGeocodeCandidates,
+  parseReverseLabel,
+  reverseGeocodeUrl,
+  type GeoPoint,
+  type GeocodeCandidate,
+} from './location-picker-support.js';

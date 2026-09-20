@@ -1,39 +1,18 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { Button, Field, Notice, Panel } from '@neighbourhood-store/ui';
+import {
+  Button,
+  Field,
+  LocationPicker,
+  Notice,
+  Panel,
+  type GeoPoint,
+  type LocationSource,
+} from '@neighbourhood-store/ui';
 import { customerApiClient } from './customer-session';
 import { useLocale } from './locale';
-
-/**
- * Reads the device location when the customer allows it (CUS-08).
- *
- * Permission is optional. A declined request requires an explicit manual pin;
- * never substitute a guessed neighbourhood centroid for the delivery point.
- */
-export async function deviceCoordinates(): Promise<{
-  latitude: number;
-  longitude: number;
-  coordinate_source: 'DEVICE_LOCATION' | 'MANUAL_PIN';
-}> {
-  if (typeof navigator === 'undefined' || !navigator.geolocation)
-    throw new Error('Location is unavailable. Enter your delivery coordinates manually.');
-  return new Promise((resolve, reject) => {
-    navigator.geolocation.getCurrentPosition(
-      (position) =>
-        resolve({
-          coordinate_source: 'DEVICE_LOCATION',
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-        }),
-      () =>
-        reject(
-          new Error('Location permission was declined. Enter your delivery coordinates manually.'),
-        ),
-      { maximumAge: 60_000, timeout: 5_000 },
-    );
-  });
-}
+import { useMapsConfig } from './maps-config';
 
 /**
  * First-run address capture.
@@ -42,11 +21,12 @@ export async function deviceCoordinates(): Promise<{
  * all computed for a selected address (MKT-03, CUS-13).
  */
 export function AddressSetup({ onSaved }: { readonly onSaved: () => void }) {
-  const [latitude, setLatitude] = useState('');
-  const [longitude, setLongitude] = useState('');
+  const [point, setPoint] = useState<GeoPoint | null>(null);
+  const [source, setSource] = useState<LocationSource>('MAP');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { t } = useLocale();
+  const maps = useMapsConfig();
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -55,12 +35,14 @@ export function AddressSetup({ onSaved }: { readonly onSaved: () => void }) {
     const data = new FormData(event.currentTarget);
     try {
       const client = await customerApiClient();
-      if (!latitude.trim() || !longitude.trim())
-        throw new Error('Choose your delivery location first.');
+      if (!point) throw new Error('Choose your delivery location on the map first.');
+      // The address record distinguishes a device fix from a pin a person placed;
+      // a searched place and a typed coordinate are both placed by a person.
       const located = {
-        latitude: Number(latitude),
-        longitude: Number(longitude),
-        coordinate_source: 'MANUAL_PIN' as const,
+        latitude: point.latitude,
+        longitude: point.longitude,
+        coordinate_source:
+          source === 'DEVICE' ? ('DEVICE_LOCATION' as const) : ('MANUAL_PIN' as const),
       };
       const created = await client.addresses.create({
         address_reference: `ADDRESS-${crypto.randomUUID().toUpperCase()}`,
@@ -94,44 +76,35 @@ export function AddressSetup({ onSaved }: { readonly onSaved: () => void }) {
       title={t('customer.address.setup.title', 'Add a delivery address')}
     >
       <form className="ns-stack" onSubmit={save}>
-        <Button
-          type="button"
-          variant="secondary"
-          onClick={() => {
-            void deviceCoordinates()
-              .then((point) => {
-                setLatitude(String(point.latitude));
-                setLongitude(String(point.longitude));
-                setError(null);
-              })
-              .catch((cause: unknown) =>
-                setError(cause instanceof Error ? cause.message : 'Location unavailable.'),
-              );
+        <LocationPicker
+          accessToken={maps?.access_token ?? null}
+          copy={{
+            searchLabel: t(
+              'customer.address.map.search',
+              'Search for your street, building or landmark',
+            ),
+            searchPlaceholder: t('customer.address.map.placeholder', 'e.g. Vaishali Nagar, Jaipur'),
+            deviceLabel: t('customer.address.map.device', 'Use my current location'),
+            mapHint: t('customer.address.map.hint', 'Tap the map or drag the pin to your door.'),
+            chosenLabel: t('customer.address.map.chosen', 'Delivery point'),
+            manualSummary: t('customer.address.map.manual', 'Enter coordinates by hand'),
+            unavailable: t(
+              'customer.address.map.unavailable',
+              'Maps are not available here. Enter the coordinates by hand.',
+            ),
           }}
-        >
-          Use current location
-        </Button>
-        <Field
-          label="Delivery latitude"
-          name="latitude"
-          type="number"
-          step="any"
-          min={-90}
-          max={90}
-          value={latitude}
-          onChange={(event) => setLatitude(event.target.value)}
-          required
-        />
-        <Field
-          label="Delivery longitude"
-          name="longitude"
-          type="number"
-          step="any"
-          min={-180}
-          max={180}
-          value={longitude}
-          onChange={(event) => setLongitude(event.target.value)}
-          required
+          hint={t(
+            'customer.address.map.description',
+            'Delivery fees and arrival times are worked out from this exact point.',
+          )}
+          initialCentre={maps?.default_centre}
+          label={t('customer.address.map.label', 'Where should we deliver?')}
+          onChange={(next, how) => {
+            setPoint(next);
+            setSource(how);
+            setError(null);
+          }}
+          value={point}
         />
         <Field
           defaultValue="Home"

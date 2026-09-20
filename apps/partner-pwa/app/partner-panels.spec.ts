@@ -304,3 +304,17 @@ test('a partner can see the rating that is kept about them', () => {
     'as an aggregate, never a list a single customer could be identified from',
   );
 });
+
+test('a rider whose phone will not share a position places themselves on the map, never at a hard-coded point', () => {
+  const source = panel('partner-workspace.tsx');
+  assert.ok(source.includes('<LocationPicker'), 'the map picker is offered');
+  assert.ok(
+    source.includes('setPositionNeeded(true)'),
+    'going online without a position asks for one',
+  );
+  assert.ok(!/26\.8505|75\.7628/.test(source), 'no invented Jaipur point remains');
+  assert.ok(
+    source.includes('(await devicePosition()) ??') && source.includes('manualPosition'),
+    'the device is tried first and the map point is the fallback',
+  );
+});

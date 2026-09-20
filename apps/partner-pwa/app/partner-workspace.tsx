@@ -8,6 +8,8 @@ import {
   AppShell,
   Button,
   Card,
+  LocationPicker,
+  type GeoPoint,
   EmptyState,
   Field,
   Icon,
@@ -23,6 +25,7 @@ import {
   formatMoneyMinor,
 } from '@neighbourhood-store/ui';
 import Link from 'next/link';
+import { useMapsConfig } from './maps-config';
 import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiUrl, partnerRequest } from './authenticated-api';
@@ -469,6 +472,12 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Where the rider says they are when the device will not say (D-17). It used
+  // to be a hard-coded point in Jaipur, so a rider whose phone refused
+  // location went online somewhere they were not and was offered jobs there.
+  const [positionNeeded, setPositionNeeded] = useState(false);
+  const [manualPosition, setManualPosition] = useState<GeoPoint | null>(null);
+  const maps = useMapsConfig();
   const [proofQueue, setProofQueue] = useState<ProofQueueState>({ status: 'unknown' });
   const proofReadSequence = useRef(0);
   const [now, setNow] = useState(() => Date.now());
@@ -679,23 +688,44 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     }
   }
 
+  async function devicePosition(): Promise<{
+    latitude: number;
+    longitude: number;
+    accuracy_meters: number;
+  } | null> {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return null;
+    return new Promise((resolve) =>
+      navigator.geolocation.getCurrentPosition(
+        (position) =>
+          resolve({
+            accuracy_meters: Math.max(1, Math.round(position.coords.accuracy)),
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          }),
+        () => resolve(null),
+        { timeout: 5_000, maximumAge: 60_000 },
+      ),
+    );
+  }
+
   async function setDispatch(state: 'ONLINE' | 'OFFLINE') {
     setBusy(true);
     try {
-      let coordinates = { latitude: 26.8505, longitude: 75.7628, accuracy_meters: 250 };
-      if (state === 'ONLINE' && navigator.geolocation) {
-        coordinates = await new Promise((resolve) =>
-          navigator.geolocation.getCurrentPosition(
-            (position) =>
-              resolve({
-                accuracy_meters: Math.max(1, Math.round(position.coords.accuracy)),
-                latitude: position.coords.latitude,
-                longitude: position.coords.longitude,
-              }),
-            () => resolve(coordinates),
-            { timeout: 5_000, maximumAge: 60_000 },
-          ),
-        );
+      let coordinates: { latitude: number; longitude: number; accuracy_meters: number } | null =
+        null;
+      if (state === 'ONLINE') {
+        coordinates =
+          (await devicePosition()) ??
+          (manualPosition ? { ...manualPosition, accuracy_meters: 250 } : null);
+        if (!coordinates) {
+          // No position is not a position. Ask for one rather than invent it.
+          setPositionNeeded(true);
+          setError(
+            'Your phone did not share its location. Place yourself on the map, then go online.',
+          );
+          return;
+        }
+        setPositionNeeded(false);
       }
       await partnerRequest('partner/availability', {
         method: 'POST',
@@ -807,6 +837,27 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     >
       {message ? <Notice tone="success">{message}</Notice> : null}
       {error ? <Notice tone="danger">{error}</Notice> : null}
+      {positionNeeded && !isOnline ? (
+        <Card tone="raised">
+          <LocationPicker
+            accessToken={maps?.access_token ?? null}
+            copy={{
+              searchLabel: 'Search for where you are',
+              searchPlaceholder: 'A landmark, street or area near you',
+              deviceLabel: 'Try my phone again',
+              chosenLabel: 'Your position',
+              mapHint: 'Tap the map where you are; offers are matched to this spot.',
+            }}
+            initialCentre={maps?.default_centre}
+            label="Where are you right now?"
+            onChange={(next) => {
+              setManualPosition(next);
+              setError(null);
+            }}
+            value={manualPosition}
+          />
+        </Card>
+      ) : null}
       {['profile', 'alerts', 'application'].includes(view) ? (
         <nav className="partner-task-nav" aria-label="Account tasks">
           <Link href="/profile" aria-current={view === 'profile' ? 'page' : undefined}>

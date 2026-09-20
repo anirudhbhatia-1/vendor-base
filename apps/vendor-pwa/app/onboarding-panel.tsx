@@ -1,7 +1,9 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
+import { LocationPicker, type GeoPoint } from '@neighbourhood-store/ui';
 import { vendorApiClient } from './authenticated-api';
+import { useMapsConfig } from './maps-config';
 
 type OnboardingStep = 'apply' | 'profile' | 'documents' | 'status';
 
@@ -25,6 +27,11 @@ export function VendorOnboardingPanel() {
   // delivery promises for a shop that was nowhere near there.
   const [businessName, setBusinessName] = useState('');
   const [locationName, setLocationName] = useState('');
+  // The shop's exact spot, chosen on the map. This used to be read from the
+  // device, or a hard-coded point in Jaipur when permission was refused --
+  // a shop "at" a place nobody chose.
+  const [storePoint, setStorePoint] = useState<GeoPoint | null>(null);
+  const maps = useMapsConfig();
   const [businessReference, setBusinessReference] = useState('');
   const [payoutReference, setPayoutReference] = useState('');
   const [minimumOrderRupees, setMinimumOrderRupees] = useState('100');
@@ -34,24 +41,6 @@ export function VendorOnboardingPanel() {
   const [documentKind, setDocumentKind] = useState<
     'BUSINESS_REGISTRATION' | 'FOOD_SAFETY_DECLARATION' | 'PAYOUT_ACCOUNT_PROOF'
   >('BUSINESS_REGISTRATION');
-
-  /**
-   * The store's own coordinates, from the device where possible. Declining
-   * permission falls back to the neighbourhood centroid, which the vendor can
-   * still correct with an admin afterwards.
-   */
-  async function storeCoordinates(): Promise<{ latitude: number; longitude: number }> {
-    const fallback = { latitude: 26.8505, longitude: 75.7628 };
-    if (typeof navigator === 'undefined' || !navigator.geolocation) return fallback;
-    return new Promise((resolve) => {
-      navigator.geolocation.getCurrentPosition(
-        (position) =>
-          resolve({ latitude: position.coords.latitude, longitude: position.coords.longitude }),
-        () => resolve(fallback),
-        { maximumAge: 60_000, timeout: 5_000 },
-      );
-    });
-  }
 
   async function createApplication() {
     setBusy(true);
@@ -91,7 +80,8 @@ export function VendorOnboardingPanel() {
     setBusy(true);
     try {
       const client = await vendorApiClient();
-      const located = await storeCoordinates();
+      if (!storePoint) throw new Error('Place your shop on the map first.');
+      const located = storePoint;
       const result = await client.vendor.onboarding.submitProfile(caseState.onboarding_case_id, {
         expected_version: caseState.version,
         business_name: businessName,
@@ -219,6 +209,21 @@ export function VendorOnboardingPanel() {
               required
             />
           </label>
+          <LocationPicker
+            accessToken={maps?.access_token ?? null}
+            copy={{
+              searchLabel: 'Search for your shop or its street',
+              searchPlaceholder: 'Shop name, street or landmark',
+              deviceLabel: 'I am at the shop now',
+              chosenLabel: 'Shop location',
+              mapHint: 'Tap the map or drag the pin to the shop door.',
+            }}
+            hint="Customers, delivery fees and riders all work from this exact point."
+            initialCentre={maps?.default_centre}
+            label="Where is the shop?"
+            onChange={(next) => setStorePoint(next)}
+            value={storePoint}
+          />
           <label>
             Business registration reference
             <input

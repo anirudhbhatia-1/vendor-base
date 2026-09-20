@@ -158,6 +158,7 @@ import {
 import {
   CustomerCatalogueImageController,
   CustomerCategoriesController,
+  MapsConfigController,
   PublicDiscoveryController,
 } from './customer-catalogue.controller.js';
 
@@ -216,6 +217,7 @@ import {
     CustomerCatalogueImageController,
     CustomerCategoriesController,
     PublicDiscoveryController,
+    MapsConfigController,
     VendorLocationSettingsController,
     AdminZonesController,
     GatedCapabilitiesController,

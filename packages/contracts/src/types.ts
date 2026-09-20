@@ -107,6 +107,15 @@ export type ShopRequestQueueEntry = {
   updated_at: string;
 };
 
+/** What a browser needs to draw a map and search for a place (D-17). */
+export type MapsConfig = {
+  provider: 'mapbox' | 'none';
+  /** A public (pk.) Mapbox token, scoped and made for browsers; null when maps are not configured. */
+  access_token: string | null;
+  country: string;
+  default_centre: { latitude: number; longitude: number };
+};
+
 /** Where a road distance came from: the maps provider, or a labelled estimate when none answered. */
 export type RouteSource = 'ESTIMATE' | 'MAPBOX';
 

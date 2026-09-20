@@ -16,6 +16,7 @@ import type {
   LocaleAudience,
   LocaleBundle,
   LocaleLanguage,
+  MapsConfig,
   NotificationPreference,
   PaymentMethod,
   PreferredStore,
@@ -273,6 +274,9 @@ export function createApiClient(options: ApiClientOptions) {
      * authenticated `discovery` calls below.
      */
     catalogue: {
+      /** The map provider and its public token, or none -- the picker falls back to hand entry. */
+      mapsConfig: () => r<MapsConfig>('/catalogue/maps/config'),
+
       stores: (params: {
         latitude: number;
         longitude: number;

@@ -34,6 +34,14 @@ async function signIn(page: Page, who: RoleCredentials): Promise<void> {
 
 test.describe('cross-role order journey', () => {
   test.skip(!live, 'Set LIVE_SUPABASE_ACCEPTANCE=true with a migrated database and role accounts.');
+  // A rider goes online from where their phone says they are (D-17). Without a
+  // granted position the workspace asks them to place themselves on the map
+  // rather than inventing a point, so the journey grants one near the fixture
+  // store.
+  test.use({
+    geolocation: { latitude: 26.9124, longitude: 75.7873 },
+    permissions: ['geolocation'],
+  });
 
   test('a vendor accepts, picks and hands over an order', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'vendor-pwa', 'Vendor PWA project only');

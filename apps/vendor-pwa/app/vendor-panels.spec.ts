@@ -127,11 +127,14 @@ test('an account with several locations can reach all of them', () => {
 test('onboarding no longer submits a fixed location and minimum order', () => {
   const source = panel('onboarding-panel.tsx');
   assert.ok(!source.includes('minimum_order_minor: 10000'), 'minimum order comes from the form');
-  // The centroid still appears, as the fallback when the vendor declines
-  // location permission. What matters is that the submission uses the resolved
-  // coordinates rather than the constant.
-  assert.ok(source.includes('latitude: located.latitude'), 'submitted coordinates are resolved');
-  assert.ok(source.includes('storeCoordinates'));
+  // The submission uses the point the vendor placed on the map (D-17); the
+  // device-or-centroid guess is gone.
+  assert.ok(
+    source.includes('latitude: located.latitude'),
+    'submitted coordinates are the chosen point',
+  );
+  assert.ok(source.includes('const located = storePoint;'));
+  assert.ok(!source.includes('storeCoordinates'), 'no silent device guess remains');
   for (const kind of ['FOOD_SAFETY_DECLARATION', 'PAYOUT_ACCOUNT_PROOF']) {
     assert.ok(source.includes(kind), `document kind ${kind}`);
   }
@@ -312,4 +315,21 @@ test('a self-delivered order is started at the shop and completed at the door (V
     ),
     'a self-delivery out on the road is still active work for the shop',
   );
+});
+
+test('a shop is placed on the map when applying, and a delivery area is drawn as a circle', () => {
+  const onboarding = panel('onboarding-panel.tsx');
+  assert.ok(onboarding.includes('<LocationPicker'), 'the application places the shop on the map');
+  assert.ok(
+    onboarding.includes("throw new Error('Place your shop on the map first.')"),
+    'and refuses to submit without it',
+  );
+  assert.ok(!/26\.8505|75\.7628/.test(onboarding), 'no invented Jaipur point remains');
+  const zones = panel('service-area-panel.tsx');
+  assert.ok(
+    zones.includes('circleWkt(zoneCentre, radius)'),
+    'the area is the circle the vendor drew',
+  );
+  assert.ok(zones.includes('radiusMetres={'), 'and the map shows it');
+  assert.ok(zones.includes('verticesToWkt(vertices)'), 'corners by hand remain as the fallback');
 });

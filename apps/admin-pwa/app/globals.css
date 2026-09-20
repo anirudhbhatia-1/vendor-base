@@ -284,11 +284,6 @@ a {
 }
 
 .onboarding-form,
-.onboarding-coords {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--space-sm);
-}
 .onboarding-error {
   color: var(--danger);
   font-weight: 650;

@@ -26,6 +26,8 @@ export type {
   LocaleAudience,
   LocaleBundle,
   LocaleLanguage,
+  MapsConfig,
+  RouteSource,
   NotificationPreference,
   OperatingHours,
   PaymentMethod,

@@ -8,12 +8,16 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  LocationPicker,
   Notice,
   Panel,
   StatusPill,
+  circleWkt,
   humaniseEnum,
+  type GeoPoint,
 } from '@neighbourhood-store/ui';
 import { vendorRequest } from './authenticated-api';
+import { useMapsConfig } from './maps-config';
 
 /**
  * Service zones, fulfilment modes and temporary closures (VEN-07, VEN-09, VEN-06).
@@ -22,10 +26,12 @@ import { vendorRequest } from './authenticated-api';
  * without letting anyone change them left the vendor unable to open, close or
  * change where they deliver.
  *
- * Zones are polygons. Rather than pull in a mapping library, the boundary is
- * edited as its vertices and converted to WKT here — the same value the API
- * stores. Coordinates are longitude/latitude in that order, which is what
- * PostGIS expects and the most common way to get a polygon silently wrong.
+ * Zones are polygons. A vendor draws one as a circle on the map -- the
+ * centre they place and a radius in metres -- which becomes the WKT the API
+ * stores (D-17). The corner editor remains behind a disclosure for anyone
+ * without a map; its coordinates are longitude/latitude in that order, which
+ * is what PostGIS expects and the most common way to get a polygon silently
+ * wrong.
  */
 /**
  * `GET settings/fulfilment-modes` returns a plain array of mode names — the
@@ -101,6 +107,10 @@ export function ServiceAreaPanel({ vendorLocationId }: { readonly vendorLocation
   const [closures, setClosures] = useState<readonly TemporaryClosure[]>([]);
   const [vertices, setVertices] = useState<Vertex[]>([...emptyVertices]);
   const [zoneName, setZoneName] = useState('Neighbourhood');
+  const [zoneCentre, setZoneCentre] = useState<GeoPoint | null>(null);
+  const [zoneRadiusMetres, setZoneRadiusMetres] = useState('2000');
+  const [cornersByHand, setCornersByHand] = useState(false);
+  const maps = useMapsConfig();
   const [editingBoundary, setEditingBoundary] = useState(false);
   const [closureStart, setClosureStart] = useState('');
   const [closureEnd, setClosureEnd] = useState('');
@@ -167,7 +177,17 @@ export function ServiceAreaPanel({ vendorLocationId }: { readonly vendorLocation
   async function addZone() {
     let boundary: string;
     try {
-      boundary = verticesToWkt(vertices);
+      if (cornersByHand) {
+        boundary = verticesToWkt(vertices);
+      } else {
+        if (!zoneCentre)
+          throw new Error('Place the centre of your delivery area on the map first.');
+        const radius = Number(zoneRadiusMetres);
+        if (!Number.isFinite(radius) || radius < 200 || radius > 25_000) {
+          throw new Error('The radius must be between 200 m and 25 km.');
+        }
+        boundary = circleWkt(zoneCentre, radius);
+      }
     } catch (error) {
       setNotice({
         tone: 'danger',
@@ -312,50 +332,80 @@ export function ServiceAreaPanel({ vendorLocationId }: { readonly vendorLocation
                   onChange={(event) => setZoneName(event.target.value)}
                   value={zoneName}
                 />
-                {/* No map library here yet, so the boundary is edited as the
-                    corner points it actually is. Longitude first, which is what
-                    PostGIS expects and the most common way to get this silently
-                    wrong (UX-12 keeps a text route to every map anyway). */}
-                <p className="zone-editor__hint">
-                  Each row is a corner of your delivery area, as it appears on a map.
-                </p>
-                {vertices.map((vertex, index) => (
-                  <div className="zone-editor__vertex" key={index}>
-                    <Field
-                      label={`Corner ${index + 1} — longitude`}
-                      onChange={(event) => updateVertex(index, 'longitude', event.target.value)}
-                      value={vertex.longitude}
-                    />
-                    <Field
-                      label={`Corner ${index + 1} — latitude`}
-                      onChange={(event) => updateVertex(index, 'latitude', event.target.value)}
-                      value={vertex.latitude}
-                    />
+                <LocationPicker
+                  accessToken={maps?.access_token ?? null}
+                  copy={{
+                    searchLabel: 'Search for the middle of your delivery area',
+                    searchPlaceholder: 'A landmark, street or colony',
+                    deviceLabel: 'Centre it on me',
+                    chosenLabel: 'Centre',
+                    mapHint: 'Tap the map to place the centre; the shaded circle is your area.',
+                  }}
+                  hint="Customers inside the circle can find you and order."
+                  initialCentre={maps?.default_centre}
+                  label="Where do you deliver?"
+                  onChange={(next) => setZoneCentre(next)}
+                  radiusMetres={
+                    cornersByHand ? undefined : Math.max(1, Number(zoneRadiusMetres) || 0)
+                  }
+                  value={zoneCentre}
+                />
+                <Field
+                  hint="How far from the centre you deliver. 2000 m is about a 10-minute ride."
+                  inputMode="numeric"
+                  label="Radius in metres"
+                  onChange={(event) => setZoneRadiusMetres(event.target.value)}
+                  value={zoneRadiusMetres}
+                />
+                <details onToggle={(event) => setCornersByHand(event.currentTarget.open)}>
+                  <summary>Set the corners by hand instead</summary>
+                  {/* The boundary as the corner points it actually is. Longitude
+                    first, which is what PostGIS expects and the most common
+                    way to get this silently wrong (UX-12 keeps a text route
+                    to every map anyway). */}
+                  <p className="zone-editor__hint">
+                    Each row is a corner of your delivery area, as it appears on a map.
+                  </p>
+                  {vertices.map((vertex, index) => (
+                    <div className="zone-editor__vertex" key={index}>
+                      <Field
+                        label={`Corner ${index + 1} — longitude`}
+                        onChange={(event) => updateVertex(index, 'longitude', event.target.value)}
+                        value={vertex.longitude}
+                      />
+                      <Field
+                        label={`Corner ${index + 1} — latitude`}
+                        onChange={(event) => updateVertex(index, 'latitude', event.target.value)}
+                        value={vertex.latitude}
+                      />
+                    </div>
+                  ))}
+                  <div className="zone-editor__actions">
+                    <Button
+                      onClick={() =>
+                        setVertices((current) => [
+                          ...current,
+                          { longitude: '75.76', latitude: '26.85' },
+                        ])
+                      }
+                      size="small"
+                      variant="secondary"
+                    >
+                      Add a corner
+                    </Button>
+                    <Button
+                      disabled={vertices.length <= 3}
+                      onClick={() =>
+                        setVertices((current) => current.slice(0, Math.max(3, current.length - 1)))
+                      }
+                      size="small"
+                      variant="secondary"
+                    >
+                      Remove a corner
+                    </Button>
                   </div>
-                ))}
+                </details>
                 <div className="zone-editor__actions">
-                  <Button
-                    onClick={() =>
-                      setVertices((current) => [
-                        ...current,
-                        { longitude: '75.76', latitude: '26.85' },
-                      ])
-                    }
-                    size="small"
-                    variant="secondary"
-                  >
-                    Add a corner
-                  </Button>
-                  <Button
-                    disabled={vertices.length <= 3}
-                    onClick={() =>
-                      setVertices((current) => current.slice(0, Math.max(3, current.length - 1)))
-                    }
-                    size="small"
-                    variant="secondary"
-                  >
-                    Remove a corner
-                  </Button>
                   <Button disabled={busy} onClick={() => void addZone()} variant="primary">
                     Save this area
                   </Button>
