@@ -9,6 +9,7 @@ import {
   CheckoutInputError,
   CheckoutNotFoundError,
   CheckoutPaymentDeclinedError,
+  CheckoutUnfulfillableError,
   GroupedCheckoutService,
   PAYMENT_UNKNOWN_DEADLINE_MS,
   PLACED_ORDER_HOLD_MS,
@@ -577,13 +578,8 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
 
     // 7.4: what happens to a placement the provider never answers. Every
     // walk below starts from its own unknown placement.
-    const unknownPlacement = async (
-      label: string,
-      placedAt: Date,
-      through: { service?: GroupedCheckoutService; scenario?: FakeProviderScenario } = {},
-    ) => {
-      const service = through.service ?? checkout;
-      const scenario = through.scenario ?? 'MALFORMED';
+    /** A fresh customer with a fresh shelf, quoted and not yet placed. */
+    const freshQuote = async (label: string, placedAt: Date) => {
       const userId = createUuidV7();
       await pool.query(
         "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
@@ -631,6 +627,16 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         now: placedAt,
       });
       const quote = await checkout.createQuote({ context, cart_id: cart.cart_id, now: placedAt });
+      return { context, product, quote, userId };
+    };
+    const unknownPlacement = async (
+      label: string,
+      placedAt: Date,
+      through: { service?: GroupedCheckoutService; scenario?: FakeProviderScenario } = {},
+    ) => {
+      const service = through.service ?? checkout;
+      const scenario = through.scenario ?? 'MALFORMED';
+      const { context, quote, userId } = await freshQuote(label, placedAt);
       const placed = await service.place({
         context,
         checkout_quote_id: quote.checkout_quote_id,
@@ -901,6 +907,287 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         { deliveries: deliveries.map((delivery) => delivery.replayed), raced },
       )})`,
     );
+
+    // 7.8: the invariants, one walk each. A ledger of what one placement
+    // writes, so a duplicate can be shown to add nothing to it.
+    const footprint = async (checkoutGroupId: string) => {
+      const found = await pool.query<{
+        payments: string;
+        groups: string;
+        orders: string;
+        allocations: string;
+        holds: string;
+        outbox: string[] | null;
+        checkout_events: string[] | null;
+        payment_events: string;
+      }>(
+        `SELECT
+           (SELECT count(*)::text FROM marketplace.payment_transactions p
+             WHERE p.source_checkout_reference=g.checkout_reference) AS payments,
+           (SELECT count(*)::text FROM marketplace.checkout_groups g2 WHERE g2.checkout_quote_id=g.checkout_quote_id) AS groups,
+           (SELECT count(*)::text FROM marketplace.vendor_orders o WHERE o.checkout_group_id=g.checkout_group_id) AS orders,
+           (SELECT count(*)::text FROM marketplace.payment_allocations a WHERE a.payment_transaction_id=g.payment_transaction_id) AS allocations,
+           (SELECT count(*)::text FROM marketplace.vendor_order_lines l JOIN marketplace.vendor_orders o USING (vendor_order_id)
+             JOIN marketplace.inventory_reservations r ON r.reservation_id=l.inventory_reservation_id
+             WHERE o.checkout_group_id=g.checkout_group_id AND r.reservation_state='PROVISIONAL') AS holds,
+           (SELECT array_agg(e.event_type ORDER BY e.created_at) FROM marketplace.outbox_events e
+             WHERE e.aggregate_id=g.checkout_group_id) AS outbox,
+           (SELECT array_agg(e.event_type ORDER BY e.occurred_at) FROM marketplace.checkout_events e
+             WHERE e.checkout_group_id=g.checkout_group_id) AS checkout_events,
+           (SELECT count(*)::text FROM marketplace.payment_events e WHERE e.payment_transaction_id=g.payment_transaction_id) AS payment_events
+         FROM marketplace.checkout_groups g WHERE g.checkout_group_id=$1`,
+        [checkoutGroupId],
+      );
+      return found.rows[0];
+    };
+
+    // Duplicate taps that overlap. A third connection holds the quote row
+    // while both taps are issued, so both have begun before either can read
+    // whether a submission exists. Both are answered with one checkout; the
+    // second used to die on the group's unique quote id.
+    {
+      const tapped = await freshQuote('TAPS', now);
+      const holder = await pool.connect();
+      await holder.query('BEGIN');
+      await holder.query(
+        `SELECT 1 FROM marketplace.checkout_quotes WHERE checkout_quote_id=$1 FOR UPDATE`,
+        [tapped.quote.checkout_quote_id],
+      );
+      const taps = Promise.all(
+        [0, 1].map(() =>
+          checkout.place({
+            context: tapped.context,
+            checkout_quote_id: tapped.quote.checkout_quote_id,
+            provider_scenario: 'SUCCESS',
+            idempotency_key: `phase7-TAPS-${tapped.userId}`,
+            now: new Date(now.getTime() + 1_000),
+          }),
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await holder.query('COMMIT');
+      holder.release();
+      const [first, second] = await taps;
+      check(first !== undefined && second !== undefined, 'Both taps must answer');
+      const tapFootprint = await footprint(first.checkout_group_id);
+      check(
+        first.checkout_group_id === second?.checkout_group_id &&
+          tapFootprint?.payments === '1' &&
+          tapFootprint.groups === '1' &&
+          tapFootprint.orders === '1' &&
+          tapFootprint.allocations === '1' &&
+          tapFootprint.holds === '1' &&
+          JSON.stringify(tapFootprint.outbox) === '["checkout.submitted","checkout.placed"]' &&
+          JSON.stringify(tapFootprint.checkout_events) ===
+            '["CHECKOUT_SUBMITTED","CHECKOUT_PLACED"]' &&
+          tapFootprint.payment_events === '2',
+        `Two overlapping taps did not resolve to one checkout with one footprint (${JSON.stringify({
+          same: first.checkout_group_id === second?.checkout_group_id,
+          footprint: tapFootprint,
+        })})`,
+      );
+      // And a third tap, later, adds nothing either.
+      const third = await checkout.place({
+        context: tapped.context,
+        checkout_quote_id: tapped.quote.checkout_quote_id,
+        provider_scenario: 'SUCCESS',
+        idempotency_key: `phase7-TAPS-${tapped.userId}`,
+        now: new Date(now.getTime() + 2_000),
+      });
+      check(
+        third.checkout_group_id === first.checkout_group_id &&
+          JSON.stringify(await footprint(first.checkout_group_id)) === JSON.stringify(tapFootprint),
+        'A later duplicate tap changed the footprint',
+      );
+    }
+
+    // A price that changed between the quote and the placement: refused as a
+    // changed quote, nothing placed, the holds still the quote's.
+    {
+      const repriced = await freshQuote('REPRICE', now);
+      await catalogue.setVariantPrice({
+        context: vendorContext(store0.ownerUserId),
+        vendor_location_id: store0.locationId,
+        catalogue_variant_id: repriced.product.catalogue_variant_id,
+        price_minor: 12_000,
+        reason_code: 'PRICE_REVISION',
+        now: new Date(now.getTime() + 500),
+      });
+      const refusal = await checkout
+        .place({
+          context: repriced.context,
+          checkout_quote_id: repriced.quote.checkout_quote_id,
+          provider_scenario: 'SUCCESS',
+          now: new Date(now.getTime() + 1_000),
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      const afterReprice = await pool.query<{ groups: string; holds: string }>(
+        `SELECT (SELECT count(*)::text FROM marketplace.checkout_groups WHERE checkout_quote_id=$1) AS groups,
+                (SELECT count(*)::text FROM marketplace.checkout_quote_lines l
+                   JOIN marketplace.checkout_quote_groups g USING (checkout_quote_group_id)
+                   JOIN marketplace.inventory_reservations r ON r.reservation_id=l.inventory_reservation_id
+                  WHERE g.checkout_quote_id=$1 AND r.reservation_state='SOFT_HELD') AS holds`,
+        [repriced.quote.checkout_quote_id],
+      );
+      check(
+        refusal instanceof CheckoutConflictError &&
+          refusal.code === 'QUOTE_CHANGED' &&
+          afterReprice.rows[0]?.groups === '0' &&
+          afterReprice.rows[0].holds === '1',
+        `A price changed after the quote was placed at the old price, or the refusal was unnamed (${JSON.stringify(
+          { refusal: String(refusal), after: afterReprice.rows[0] },
+        )})`,
+      );
+    }
+
+    // A store paused between the quote and the placement: refused the same
+    // way. Placement used to check the location's lifecycle and not its
+    // publication, so a paused shop received an order.
+    {
+      const paused = await freshQuote('PAUSED', now);
+      await pool.query(
+        `UPDATE marketplace.vendor_publication_cases SET lifecycle_state='PAUSED' WHERE vendor_location_id=$1`,
+        [store0.locationId],
+      );
+      const refusal = await checkout
+        .place({
+          context: paused.context,
+          checkout_quote_id: paused.quote.checkout_quote_id,
+          provider_scenario: 'SUCCESS',
+          now: new Date(now.getTime() + 1_000),
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      await pool.query(
+        `UPDATE marketplace.vendor_publication_cases SET lifecycle_state='PUBLISHED' WHERE vendor_location_id=$1`,
+        [store0.locationId],
+      );
+      check(
+        refusal instanceof CheckoutConflictError && refusal.code === 'QUOTE_CHANGED',
+        `A store paused after the quote still took the order (${String(refusal)})`,
+      );
+    }
+
+    // Allocation totals: what the bank is asked to hold is exactly what the
+    // orders add up to, and each order's allocation is that order's total.
+    {
+      const sums = await pool.query<{
+        payment: string;
+        allocated: string;
+        orders: string;
+        mismatched: string;
+      }>(
+        `SELECT p.amount_minor::text AS payment,
+                (SELECT sum(a.allocated_total_minor)::text FROM marketplace.payment_allocations a
+                  WHERE a.payment_transaction_id=p.payment_transaction_id) AS allocated,
+                (SELECT sum(o.total_minor)::text FROM marketplace.vendor_orders o
+                  WHERE o.checkout_group_id=g.checkout_group_id) AS orders,
+                (SELECT count(*)::text FROM marketplace.vendor_orders o
+                   JOIN marketplace.payment_allocations a
+                     ON a.payment_transaction_id=p.payment_transaction_id
+                    AND a.source_order_reference=o.order_reference
+                  WHERE o.checkout_group_id=g.checkout_group_id
+                    AND a.allocated_total_minor<>o.total_minor) AS mismatched
+           FROM marketplace.checkout_groups g
+           JOIN marketplace.payment_transactions p USING (payment_transaction_id)
+          WHERE g.checkout_group_id=$1`,
+        [placed.checkout_group_id],
+      );
+      const sum = sums.rows[0];
+      check(
+        sum !== undefined &&
+          sum.payment === sum.allocated &&
+          sum.allocated === sum.orders &&
+          sum.payment === String(quote.total_minor) &&
+          sum.mismatched === '0',
+        `The authorised amount, its allocations and the orders do not agree (${JSON.stringify(sum)})`,
+      );
+    }
+
+    // Rollback: a placement the provider authorised whose holds are gone by
+    // the time its answer is recorded. Nothing of the orders is kept, the
+    // money is given back through the provider, the customer is refused by
+    // name. The settlement used to throw the answer away and leave the group
+    // PROCESSING with the money authorised, for every sweep to fail on again.
+    {
+      const stranded = await freshQuote('STRANDED', now);
+      const takingStock = new (class extends LocalFakeMoneyProvider {
+        override async authorize(input: ProviderOperationInput): Promise<FakeProviderOutcome> {
+          // The submission's holds lapse while the provider is being asked.
+          await inventory.expireDue({
+            context: sweeper,
+            now: new Date(now.getTime() + PAYMENT_UNKNOWN_DEADLINE_MS + 60_000),
+          });
+          return super.authorize(input);
+        }
+      })({ webhook_key: webhookKey });
+      const strandedCheckout = new GroupedCheckoutService({
+        connection_string: connectionString,
+        provider: takingStock,
+      });
+      try {
+        const refusal = await strandedCheckout
+          .place({
+            context: stranded.context,
+            checkout_quote_id: stranded.quote.checkout_quote_id,
+            provider_scenario: 'SUCCESS',
+            idempotency_key: `phase7-STRANDED-${stranded.userId}`,
+            now: new Date(now.getTime() + 1_000),
+          })
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+        const after = await pool.query<{
+          checkout_state: string;
+          quote_state: string;
+          payment_state: string;
+          orders: string;
+          allocations: string;
+          events: string[] | null;
+          shelf: string;
+        }>(
+          `SELECT g.lifecycle_state AS checkout_state, q.lifecycle_state AS quote_state, p.payment_state,
+                  (SELECT count(*)::text FROM marketplace.vendor_orders o WHERE o.checkout_group_id=g.checkout_group_id) AS orders,
+                  (SELECT count(*)::text FROM marketplace.payment_allocations a WHERE a.payment_transaction_id=p.payment_transaction_id) AS allocations,
+                  (SELECT array_agg(e.event_type ORDER BY e.occurred_at) FROM marketplace.checkout_events e WHERE e.checkout_group_id=g.checkout_group_id) AS events,
+                  (SELECT i.exact_available_quantity::text FROM marketplace.inventory_items i
+                     JOIN marketplace.catalogue_products cp ON cp.product_reference=i.product_reference
+                     JOIN marketplace.catalogue_product_variants v ON v.catalogue_product_id=cp.catalogue_product_id
+                    WHERE i.vendor_location_id=$2 AND v.catalogue_variant_id=$3) AS shelf
+             FROM marketplace.checkout_groups g
+             JOIN marketplace.checkout_quotes q ON q.checkout_quote_id=g.checkout_quote_id
+             JOIN marketplace.payment_transactions p ON p.payment_transaction_id=g.payment_transaction_id
+            WHERE g.checkout_quote_id=$1`,
+          [
+            stranded.quote.checkout_quote_id,
+            store0.locationId,
+            stranded.product.catalogue_variant_id,
+          ],
+        );
+        const left = after.rows[0];
+        check(
+          refusal instanceof CheckoutUnfulfillableError &&
+            left?.checkout_state === 'CANCELLED' &&
+            left.quote_state === 'INVALID' &&
+            left.payment_state === 'VOIDED' &&
+            left.orders === '0' &&
+            left.allocations === '0' &&
+            left.shelf === '1' &&
+            JSON.stringify(left.events) === '["CHECKOUT_SUBMITTED","CHECKOUT_FAILED"]',
+          `A placement whose holds were gone was not ended with the money released (${JSON.stringify(
+            { refusal: String(refusal), left },
+          )})`,
+        );
+      } finally {
+        await strandedCheckout.close();
+      }
+    }
 
     // 7.5: the submission is recorded, and committed, before the provider is
     // asked. The provider here looks at the database from another

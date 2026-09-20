@@ -48,6 +48,18 @@ export class CheckoutConflictError extends Error {
     super(message);
   }
 }
+/**
+ * The provider authorised but the orders could not be made: the stock the
+ * quote held was gone by the time the answer arrived. The money is released
+ * and the customer can quote again. Its own class because it answers 422
+ * INVENTORY_UNAVAILABLE, not the 409 the other conflicts answer.
+ */
+export class CheckoutUnfulfillableError extends Error {
+  readonly code = 'INVENTORY_UNAVAILABLE';
+  constructor() {
+    super('The stock the quote held was no longer available');
+  }
+}
 export class CheckoutPaymentDeclinedError extends Error {
   readonly code = 'PAYMENT_DECLINED';
   constructor() {
@@ -207,6 +219,7 @@ type CheckoutQuoteRow = Record<string, unknown> & {
   readonly checkout_quote_id: UuidV7;
   readonly customer_user_id: UuidV7;
   readonly expires_at: Date;
+  readonly lifecycle_state: string;
   readonly policy_version_reference: string;
   readonly total_minor: string | number;
 };
@@ -633,6 +646,16 @@ export class GroupedCheckoutService {
     // the process dies after this, the sweep finds a PROCESSING group and
     // asks the provider what became of it; nothing is authorised in secret.
     const submitted = await tx(this.#pool, async (client) => {
+      // The quote row is the lock a submission is serialised on, whatever the
+      // quote's state, and the earlier submission is looked for under it. Two
+      // taps that overlapped used to both read "no group yet" before either
+      // had the row, and the second died on the group's unique quote id
+      // instead of being answered with the first tap's checkout.
+      const quote = await client.query<CheckoutQuoteRow>(
+        `SELECT * FROM marketplace.checkout_quotes WHERE checkout_quote_id=$1 AND customer_user_id=$2 FOR UPDATE`,
+        [input.checkout_quote_id, userId],
+      );
+      const q = quote.rows[0];
       const existing = await client.query<{
         checkout_group_id: UuidV7;
         checkout_quote_id: string;
@@ -655,12 +678,7 @@ export class GroupedCheckoutService {
           throw new CheckoutConflictError('Idempotency key was used for a different quote');
         return { checkout_id: found.checkout_group_id, replay: true as const };
       }
-      const quote = await client.query<CheckoutQuoteRow>(
-        `SELECT * FROM marketplace.checkout_quotes WHERE checkout_quote_id=$1 AND customer_user_id=$2 AND lifecycle_state='ACTIVE' FOR UPDATE`,
-        [input.checkout_quote_id, userId],
-      );
-      const q = quote.rows[0];
-      if (!q) throw new CheckoutNotFoundError();
+      if (!q || q.lifecycle_state !== 'ACTIVE') throw new CheckoutNotFoundError();
       if (q.expires_at <= now) {
         await this.#releaseQuote(
           client,
@@ -684,7 +702,11 @@ export class GroupedCheckoutService {
           JOIN marketplace.vendor_locations vl ON vl.vendor_location_id=qg.vendor_location_id
          WHERE qg.checkout_quote_id=$1 AND
           (p.version<>ql.product_version OR v.version<>ql.variant_version OR cp.price_minor<>ql.unit_price_minor
-           OR p.lifecycle_state<>'ACTIVE' OR v.lifecycle_state<>'ACTIVE' OR vl.lifecycle_state<>'ACTIVE') LIMIT 1`,
+           OR p.lifecycle_state<>'ACTIVE' OR v.lifecycle_state<>'ACTIVE' OR vl.lifecycle_state<>'ACTIVE'
+           -- A store paused since the quote is as gone as one closed: the quote
+           -- checked publication, and placement used to check only the location.
+           OR NOT EXISTS (SELECT 1 FROM marketplace.vendor_publication_cases pub
+                           WHERE pub.vendor_location_id=vl.vendor_location_id AND pub.lifecycle_state='PUBLISHED')) LIMIT 1`,
         [input.checkout_quote_id],
       );
       if (changed.rows[0])
@@ -828,6 +850,7 @@ export class GroupedCheckoutService {
       return this.#projectCheckout(client, row.checkout_group_id);
     });
     if ('payment_declined' in result) throw new CheckoutPaymentDeclinedError();
+    if ('unfulfillable' in result) throw new CheckoutUnfulfillableError();
     return result;
   }
 
@@ -980,6 +1003,32 @@ export class GroupedCheckoutService {
       );
       return this.#projectCheckout(client, row.checkout_group_id);
     }
+    // The orders are made inside a savepoint. A hold that is no longer there
+    // -- the stock lapsed while the answer was awaited, or was taken by the
+    // inventory sweep -- used to throw the whole settlement away: the group
+    // stayed PROCESSING with the customer's money authorised, and every sweep
+    // ran into the same missing hold. A placement that cannot be fulfilled is
+    // ended here instead, with the money released, and the customer told.
+    await client.query('SAVEPOINT finalize_orders');
+    try {
+      await this.#finalize(client, {
+        checkout_id: row.checkout_group_id,
+        context: input.context,
+        now,
+        payment_id: row.payment_transaction_id,
+        quote: {
+          cart_id: row.cart_id,
+          checkout_quote_id: row.checkout_quote_id,
+          customer_user_id: row.customer_user_id,
+          policy_version_reference: row.policy_version_reference,
+        },
+      });
+      await client.query('RELEASE SAVEPOINT finalize_orders');
+    } catch (error) {
+      if (!(error instanceof CheckoutConflictError)) throw error;
+      await client.query('ROLLBACK TO SAVEPOINT finalize_orders');
+      return this.#endUnfulfillable(client, input, row, version, now);
+    }
     await client.query(
       `UPDATE marketplace.checkout_groups SET lifecycle_state='ACTIVE',version=version+1,updated_at=$2 WHERE checkout_group_id=$1`,
       [row.checkout_group_id, now],
@@ -996,21 +1045,101 @@ export class GroupedCheckoutService {
       reason_code: 'PAYMENT_AUTHORIZED',
       state: 'ACTIVE',
     });
-    await this.#finalize(client, {
-      checkout_id: row.checkout_group_id,
-      context: input.context,
-      now,
-      payment_id: row.payment_transaction_id,
-      quote: {
-        cart_id: row.cart_id,
-        checkout_quote_id: row.checkout_quote_id,
-        customer_user_id: row.customer_user_id,
-        policy_version_reference: row.policy_version_reference,
-      },
-    });
     await checkoutEvent('CHECKOUT_PLACED');
     await this.#resolveException(client, row.provider_operation_reference, now);
     return this.#projectCheckout(client, row.checkout_group_id);
+  }
+
+  /**
+   * A placement the provider authorised that cannot be fulfilled: nothing of
+   * the orders is kept, the holds that remain are given back, the quote is
+   * retired, the group is cancelled, and the authorisation is voided through
+   * the provider -- or, if the provider does not answer the void, the payment
+   * stays AUTHORIZED with a finance exception asking for it. The customer is
+   * refused with INVENTORY_UNAVAILABLE and can quote again.
+   */
+  async #endUnfulfillable(
+    client: PoolClient,
+    input: { readonly context: RequestContext; readonly event_type: string },
+    row: WebhookPaymentRow,
+    authorizedVersion: number,
+    now: Date,
+  ) {
+    const contextIds = ids(input.context);
+    await this.#releaseQuote(
+      client,
+      input.context,
+      row.checkout_quote_id,
+      now,
+      'FULFILMENT_UNAVAILABLE',
+    );
+    await client.query(
+      `UPDATE marketplace.checkout_quotes SET lifecycle_state='INVALID',updated_at=$2 WHERE checkout_quote_id=$1`,
+      [row.checkout_quote_id, now],
+    );
+    await client.query(
+      `UPDATE marketplace.checkout_groups SET lifecycle_state='CANCELLED',version=version+1,updated_at=$2 WHERE checkout_group_id=$1`,
+      [row.checkout_group_id, now],
+    );
+    await this.#transitionAggregate(client, {
+      aggregate_id: row.checkout_group_id,
+      aggregate_type: 'checkout_group',
+      context: input.context,
+      event_type: 'checkout.payment_failed',
+      evidence: { source: input.event_type.toLowerCase(), reason: 'FULFILMENT_UNAVAILABLE' },
+      from_state: row.checkout_state,
+      now,
+      reason_code: 'FULFILMENT_UNAVAILABLE',
+      state: 'CANCELLED',
+    });
+    await client.query(
+      `INSERT INTO marketplace.checkout_events (checkout_event_id,checkout_group_id,checkout_quote_id,event_type,actor_id,request_id,correlation_id,occurred_at) VALUES ($1,$2,$3,'CHECKOUT_FAILED',$4,$5,$6,$7)`,
+      [
+        createUuidV7(),
+        row.checkout_group_id,
+        row.checkout_quote_id,
+        row.customer_user_id,
+        contextIds.request,
+        contextIds.correlation,
+        now,
+      ],
+    );
+    const voided = await providerOutcome(() =>
+      this.#provider.void({
+        amount_minor: Number(row.amount_minor),
+        operation_reference: row.provider_operation_reference,
+        scenario: row.provider_scenario,
+      }),
+    );
+    if (voided === 'SUCCEEDED') {
+      await client.query(
+        `UPDATE marketplace.payment_transactions
+            SET payment_state='VOIDED',voided_amount_minor=amount_minor,voided_at=$2,version=version+1,updated_at=$2
+          WHERE payment_transaction_id=$1`,
+        [row.payment_transaction_id, now],
+      );
+      await this.#paymentEvent(client, {
+        context: input.context,
+        event_type: 'PAYMENT_VOIDED',
+        now,
+        payment_id: row.payment_transaction_id,
+        payment_version: authorizedVersion + 1,
+        previous_state: 'AUTHORIZED',
+        provider_result: 'SUCCEEDED',
+        reason_code: 'FULFILMENT_UNAVAILABLE',
+        resulting_state: 'VOIDED',
+      });
+      await this.#resolveException(client, row.provider_operation_reference, now);
+    } else {
+      await client.query(
+        `INSERT INTO marketplace.finance_exceptions
+           (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+            next_action_code,created_at,updated_at)
+         VALUES ($1,'PAYMENT_UNKNOWN',$2,$3,'VOID_UNFULFILLED_AUTHORIZATION',$4,$4)`,
+        [createUuidV7(), row.provider_operation_reference, row.amount_minor, now],
+      );
+    }
+    return { unfulfillable: true as const };
   }
 
   async receiveWebhook(input: {

@@ -1587,6 +1587,45 @@ Three of the five requirements were met. The customer's group projection leaked 
 
 **Step 7.7: VERIFIED_LOCAL**, with the keyed-hash note carried for the OTP steps.
 
+## Run 48 (20 September 2026) — step 7.8, prove checkout invariants
+
+The step is the proof, so the audit is of the proofs: eleven named scenarios and three exit-gate invariants against what the verifiers actually establish. Seven stood; four were missing, and two of the four found defects when written. Migration 0093; seven connected assertions and one API unit test; four mutation probes, three caught.
+
+| Proof | Standing before run 48 | Now |
+|---|---|---|
+| Duplicate taps | Sequential replay: same group, order and allocation counts (run 43/45) | **Overlapping taps forced** with a third connection holding the quote row: one checkout, one footprint (payment, group, orders, allocations, holds, outbox, history, payment events); a later tap changes nothing — P48-01 |
+| Last-unit competition | Forced in run 42 | unchanged |
+| Three-store partial failure | The blocked sibling consumes no stock (run 43); a declined sibling leaves the other PLACED with holds (fulfilment verifier) | unchanged |
+| Expired quote | Refused at placement, holds released (runs 42, 43, 45) | unchanged |
+| Changed price | The price *withdrawn* at the quote (run 43) only | **Changed between quote and placement**: refused `QUOTE_CHANGED`, nothing placed, the quote's holds intact |
+| Closed store | The location's lifecycle at placement | **Paused publication at placement** refused too — P48-03 |
+| Provider timeout then webhook success | Run 44 | unchanged |
+| Webhook replay | Run 44, forced concurrent | unchanged |
+| Allocation totals | Item amounts and the policy stamp per allocation (run 41) | **The sums**: authorised amount = allocations = orders, each allocation = its order |
+| Rollback | Nothing | **A placement whose holds lapsed while the provider was asked**: nothing of the orders kept, money voided, shelf whole, customer refused by name — P48-02 |
+| Cross-customer access | `#projectOwned` concealment (run 43) | unchanged |
+
+**P48-01 — two taps that overlapped.** The submission looked for an earlier group *before* taking the quote row `FOR UPDATE`. Two taps that had both begun read "no group yet", the second waited on the row, and when the first committed its submission the second inserted a group for the same quote and died on `checkout_groups_checkout_quote_id_key` — a 500 for a tap the customer had already been answered for (the screen's "check what happened" would have recovered it, but the server should never have failed it). The quote row is now locked first, whatever the quote's state, and the earlier submission looked for under it. The proof holds the row from a third connection while both taps are issued, then compares their answers and the footprint.
+
+**P48-02 — the answer thrown away.** `#settleAuthorization` recorded the payment AUTHORIZED and then made the orders; a hold no longer there (`Inventory hold is unavailable`) threw out of the transaction, so the group stayed PROCESSING with an AUTHORIZING payment and the reconciliation sweep, asking the provider's status, walked into the same missing hold every tick — the customer's money held indefinitely, nothing to show for it. The orders are now made inside a savepoint; on a missing hold the placement is ended: remaining holds given back (`FULFILMENT_UNAVAILABLE`), quote INVALID, group CANCELLED with `CHECKOUT_FAILED` (0093), the authorisation voided through the provider (or, unanswered, left AUTHORIZED with an exception asking for the void), and the customer refused as `INVENTORY_UNAVAILABLE` at 422 (`CheckoutUnfulfillableError`), which their screen names and answers with a fresh quote. The proof's provider expires the submission's holds while being asked.
+
+**P48-03 — a paused store took the order.** Placement re-checked catalogue versions, prices and the location's lifecycle, not its publication; a store paused after the quote received the order. Publication is now part of the check, refused as `QUOTE_CHANGED` (the re-quote then blocks the store with `STORE_UNAVAILABLE` and says so).
+
+**Mutation results.** Four probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Earlier submission looked for before the row is taken (old) | pg `duplicate key value violates unique constraint` on the second tap |
+| Publication not checked at placement (old) | *A store paused after the quote still took the order (null)* |
+| No savepoint: a missing hold throws the answer away (old) | *A placement whose holds were gone was not ended with the money released ({… "checkout_state":"PROCESSING","payment_state":"AUTHORIZING" …})* |
+| Price dropped from placement's catalogue check | **passed** — the content digest (run 43) refuses the changed price on its own; the catalogue check is the second proof of one invariant, kept |
+
+**Exit gate.** One checkout, one group, one order per valid vendor: runs 43 and 45, and the footprint here. A duplicate creates no duplicate payment, order, allocation, hold, event or notification: the footprint here — notifications follow the outbox, and the outbox is proven single. An invalid or failed group releases only its own resources: the blocked sibling (43), the declined sibling (fulfilment), the declined and abandoned payments (42, 44), and the unfulfillable placement here.
+
+**Verification.** `pnpm db:verify` exit 0 — 93 migrations, full ladder; `grouped_checkout` 114 assertions (107 after run 47). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 560 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 7.8: VERIFIED_LOCAL. Phase 7 exit gate: met.**
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

@@ -1313,7 +1313,7 @@
       "name": "Idempotent order placement",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "idempotency_key sent on placement. Run 45: a key reused for a different quote is refused; a duplicate of a decline answers the decline; no second provider call",
+      "notes": "idempotency_key sent on placement. Run 45: a key reused for a different quote is refused; a duplicate of a decline answers the decline; no second provider call Run 48: two overlapping taps (forced) resolve to one checkout with one footprint; a later tap adds nothing",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1338,7 +1338,7 @@
       "name": "Payment-unknown recovery",
       "status": "complete_local_synthetic",
       "target_stage": "4",
-      "notes": "PWA has UNKNOWN scenario test. Android missing. Run 44: finance exception at placement, holds kept while the provider is awaited, abandonment after 15 minutes, late answers voided/closed/conflicted (worker sweep abandonUnknownPayments)",
+      "notes": "PWA has UNKNOWN scenario test. Android missing. Run 44: finance exception at placement, holds kept while the provider is awaited, abandonment after 15 minutes, late answers voided/closed/conflicted (worker sweep abandonUnknownPayments) Run 48: a placement whose holds lapsed while the provider was asked is ended with the money voided and the customer refused as INVENTORY_UNAVAILABLE",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {

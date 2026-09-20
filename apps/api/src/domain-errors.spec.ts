@@ -12,6 +12,7 @@ import {
   VendorPublicationIncompleteError,
   CheckoutConflictError,
   CheckoutPaymentDeclinedError,
+  CheckoutUnfulfillableError,
 } from '@neighbourhood-store/database';
 import { ERROR_DEFINITIONS } from '@neighbourhood-store/domain-types';
 import { DOMAIN_ERROR_TRANSLATIONS, translateDomainError } from './domain-errors.js';
@@ -76,6 +77,12 @@ test('a checkout answers a decline, a lapsed quote and a changed basket by name'
   });
   assert.deepEqual(answer(new CheckoutConflictError('Inventory hold is unavailable')).body, {
     error_code: 'ORDER_STATE_CONFLICT',
+  });
+  // The stock the quote held was gone when the provider answered: the money
+  // is released and the refusal names the stock, at the status that code has.
+  assert.deepEqual(answer(new CheckoutUnfulfillableError()), {
+    status: 422,
+    body: { error_code: 'INVENTORY_UNAVAILABLE' },
   });
 });
 
