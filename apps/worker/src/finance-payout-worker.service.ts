@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import {
   CompleteMoneyLifecycleService,
+  LocalFakeMoneyProvider,
   runDurableJobBatch,
   type DurableJob,
 } from '@neighbourhood-store/database';
@@ -44,7 +45,13 @@ export class FinancePayoutWorkerService implements OnApplicationBootstrap, OnApp
       connectionString: config.databaseUrl,
       max: 4,
     });
-    this.#money = new CompleteMoneyLifecycleService({ connection_string: config.databaseUrl });
+    this.#money = new CompleteMoneyLifecycleService({
+      connection_string: config.databaseUrl,
+      provider: new LocalFakeMoneyProvider({
+        clearing_account_reference: config.providerClearingAccountReference,
+        webhook_key: config.paymentWebhookKey,
+      }),
+    });
     const queueOptions = {
       connection: { url: config.valkeyUrl, maxRetriesPerRequest: null },
       prefix: config.queuePrefix,

@@ -16,6 +16,7 @@ import {
   LocalFakeMoneyProvider,
   type FakeProviderScenario,
   type MoneyProviderAdapter,
+  providerOutcome,
 } from './money-policy.js';
 import { transaction as tx } from './transaction.js';
 import { DEFAULT_ACCEPT_DEADLINE_SECONDS } from './vendor-fulfilment.js';
@@ -32,6 +33,15 @@ export class CheckoutInputError extends Error {}
 export class CheckoutNotFoundError extends Error {}
 export class CheckoutConflictError extends Error {}
 export class CheckoutPaymentDeclinedError extends Error {}
+
+/**
+ * How long a placement waits for a provider that gave no usable answer. The
+ * holds stand for the whole of it, because a late "succeeded" needs them;
+ * after it the group is abandoned and the money left to reconciliation.
+ * Three times the quote's own life: long enough for a provider's retry
+ * schedule, short enough that a shelf is not held for an evening.
+ */
+export const PAYMENT_UNKNOWN_DEADLINE_MS = 15 * 60_000;
 
 type QuoteLineRow = {
   cart_line_id: string;
@@ -146,6 +156,10 @@ type WebhookPaymentRow = CheckoutQuoteRow & {
   readonly checkout_group_id: UuidV7;
   readonly checkout_state: string;
   readonly payment_transaction_id: UuidV7;
+  readonly payment_state: string;
+  readonly provider_operation_reference: string;
+  readonly provider_scenario: FakeProviderScenario;
+  readonly amount_minor: string | number;
   readonly version: number;
 };
 type FinalizeGroupRow = Record<string, unknown> & {
@@ -608,16 +622,13 @@ export class GroupedCheckoutService {
       const paymentId = createUuidV7();
       const checkoutRef = reference('CHECKOUT', checkoutId);
       const operation = reference('PAY', paymentId);
-      let outcome: 'SUCCEEDED' | 'DECLINED' | 'UNKNOWN';
-      try {
-        outcome = this.#provider.authorize({
+      const outcome = await providerOutcome(() =>
+        this.#provider.authorize({
           amount_minor: Number(q.total_minor),
           operation_reference: operation,
           scenario: input.provider_scenario ?? 'SUCCESS',
-        });
-      } catch {
-        outcome = 'UNKNOWN';
-      }
+        }),
+      );
       const contextIds = ids(input.context);
       const paymentState =
         outcome === 'SUCCEEDED'
@@ -700,6 +711,16 @@ export class GroupedCheckoutService {
             now,
           ],
         );
+        // Finance sees the unknown money from the moment it is unknown, not
+        // only if the provider's webhook ever comes. The money service opened
+        // this exception for its own unknowns; the checkout never did.
+        await client.query(
+          `INSERT INTO marketplace.finance_exceptions
+             (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+              next_action_code,created_at,updated_at)
+           VALUES ($1,'PAYMENT_UNKNOWN',$2,$3,'AWAIT_PROVIDER_WEBHOOK',$4,$4)`,
+          [createUuidV7(), operation, q.total_minor, now],
+        );
         return this.#projectCheckout(client, checkoutId);
       }
       await this.#finalize(client, {
@@ -754,11 +775,6 @@ export class GroupedCheckoutService {
     if (!this.#provider.verifyWebhook({ payload: body, signature: input.signature }))
       throw new CheckoutInputError('Invalid webhook signature');
     return tx(this.#pool, async (client) => {
-      const duplicate = await client.query(
-        `SELECT provider_receipt_id FROM marketplace.provider_webhook_receipts WHERE provider_event_id=$1`,
-        [input.provider_event_id],
-      );
-      if (duplicate.rows[0]) return { replayed: true };
       const found = await client.query<WebhookPaymentRow>(
         `SELECT p.*,c.checkout_group_id,c.checkout_quote_id,c.customer_user_id,c.lifecycle_state AS checkout_state,
                 q.cart_id,q.policy_version_reference,q.total_minor AS quote_total
@@ -770,23 +786,35 @@ export class GroupedCheckoutService {
       );
       const row = found.rows[0];
       if (!row) throw new CheckoutNotFoundError();
-      await client.query(
+      // The receipt is the replay guard, and it is taken under the payment's
+      // lock: two deliveries of one event used to both pass a read-then-insert
+      // and the second died on the unique key. A reused event id carrying
+      // different content is not a replay and is refused.
+      const digest = createHash('sha256').update(body).digest('hex');
+      const receipt = await client.query(
         `INSERT INTO marketplace.provider_webhook_receipts
            (provider_receipt_id,provider_event_id,provider_operation_reference,payload_digest,received_at)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [
-          createUuidV7(),
-          input.provider_event_id,
-          input.provider_operation_reference,
-          createHash('sha256').update(body).digest('hex'),
-          now,
-        ],
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (provider_event_id) DO NOTHING
+         RETURNING provider_receipt_id`,
+        [createUuidV7(), input.provider_event_id, input.provider_operation_reference, digest, now],
       );
-      if (row.checkout_state !== 'PAYMENT_UNKNOWN')
+      if (!receipt.rows[0]) {
+        const earlier = await client.query<{ payload_digest: string }>(
+          `SELECT payload_digest FROM marketplace.provider_webhook_receipts WHERE provider_event_id=$1`,
+          [input.provider_event_id],
+        );
+        if (earlier.rows[0]?.payload_digest !== digest)
+          throw new CheckoutInputError('Provider event conflicts with its earlier delivery');
+        return { replayed: true };
+      }
+      if (row.checkout_state !== 'PAYMENT_UNKNOWN') {
+        await this.#lateWebhook(client, input, row, now);
         return {
           replayed: false,
           checkout: await this.#projectCheckout(client, row.checkout_group_id),
         };
+      }
       if (input.outcome === 'FAILED') {
         await this.#releaseQuote(
           client,
@@ -821,6 +849,7 @@ export class GroupedCheckoutService {
           now,
           state: 'CANCELLED',
         });
+        await this.#resolveException(client, row.provider_operation_reference, now);
       } else {
         await client.query(
           `UPDATE marketplace.payment_transactions SET payment_state='AUTHORIZED',version=version+1,updated_at=$2 WHERE payment_transaction_id=$1`,
@@ -860,6 +889,7 @@ export class GroupedCheckoutService {
           `UPDATE marketplace.checkout_groups SET lifecycle_state='ACTIVE',version=version+1,updated_at=$2 WHERE checkout_group_id=$1`,
           [row.checkout_group_id, now],
         );
+        await this.#resolveException(client, row.provider_operation_reference, now);
       }
       const eventIds = ids(input.context);
       await client.query(
@@ -890,10 +920,17 @@ export class GroupedCheckoutService {
   }) {
     const now = input.now ?? new Date();
     return tx(this.#pool, async (client) => {
+      // A quote whose placement is waiting on the provider keeps its holds:
+      // a late "succeeded" turns them into an order, and without them it
+      // could only be refused. Giving up on that wait is the abandonment
+      // sweep's decision, on its own deadline.
       const quotes = await client.query<{ checkout_quote_id: UuidV7 }>(
-        `SELECT checkout_quote_id FROM marketplace.checkout_quotes
+        `SELECT checkout_quote_id FROM marketplace.checkout_quotes quote
           WHERE lifecycle_state='ACTIVE' AND expires_at<=$1
             AND ($2::uuid IS NULL OR customer_user_id=$2)
+            AND NOT EXISTS (SELECT 1 FROM marketplace.checkout_groups grouping
+                             WHERE grouping.checkout_quote_id=quote.checkout_quote_id
+                               AND grouping.lifecycle_state='PAYMENT_UNKNOWN')
           FOR UPDATE SKIP LOCKED`,
         [now, input.customer_user_id ?? null],
       );
@@ -912,6 +949,214 @@ export class GroupedCheckoutService {
       }
       return quotes.rowCount ?? 0;
     });
+  }
+
+  /**
+   * Gives up on placements whose provider never answered. A group held as
+   * PAYMENT_UNKNOWN past the deadline has its stock given back, its quote
+   * retired and itself cancelled; the payment stays unknown, because it is,
+   * and its finance exception now asks for the authorisation to be found and
+   * released. A webhook that arrives after this is handled by `#lateWebhook`.
+   */
+  async abandonUnknownPayments(input: { readonly context: RequestContext; readonly now?: Date }) {
+    const now = input.now ?? new Date();
+    const contextIds = ids(input.context);
+    return tx(this.#pool, async (client) => {
+      const groups = await client.query<{
+        checkout_group_id: UuidV7;
+        checkout_quote_id: UuidV7;
+        customer_user_id: UuidV7;
+        provider_operation_reference: string;
+      }>(
+        `SELECT grouping.checkout_group_id, grouping.checkout_quote_id, grouping.customer_user_id,
+                payment.provider_operation_reference
+           FROM marketplace.checkout_groups grouping
+           JOIN marketplace.payment_transactions payment USING (payment_transaction_id)
+          WHERE grouping.lifecycle_state='PAYMENT_UNKNOWN' AND grouping.created_at<=$1
+          FOR UPDATE OF grouping, payment SKIP LOCKED`,
+        [new Date(now.getTime() - PAYMENT_UNKNOWN_DEADLINE_MS)],
+      );
+      for (const group of groups.rows) {
+        await this.#releaseQuote(
+          client,
+          input.context,
+          group.checkout_quote_id,
+          now,
+          'PAYMENT_ABANDONED',
+        );
+        await client.query(
+          `UPDATE marketplace.checkout_quotes SET lifecycle_state='EXPIRED',updated_at=$2 WHERE checkout_quote_id=$1`,
+          [group.checkout_quote_id, now],
+        );
+        await client.query(
+          `UPDATE marketplace.checkout_groups SET lifecycle_state='CANCELLED',version=version+1,updated_at=$2 WHERE checkout_group_id=$1`,
+          [group.checkout_group_id, now],
+        );
+        await this.#transitionAggregate(client, {
+          aggregate_id: group.checkout_group_id,
+          aggregate_type: 'checkout_group',
+          context: input.context,
+          event_type: 'checkout.payment_abandoned',
+          evidence: { source: 'abandonment_sweep', deadline_ms: PAYMENT_UNKNOWN_DEADLINE_MS },
+          from_state: 'PAYMENT_UNKNOWN',
+          now,
+          reason_code: 'PAYMENT_ABANDONED',
+          state: 'CANCELLED',
+        });
+        await client.query(
+          `INSERT INTO marketplace.checkout_events
+             (checkout_event_id,checkout_group_id,checkout_quote_id,event_type,actor_id,request_id,correlation_id,occurred_at)
+           VALUES ($1,$2,$3,'PAYMENT_ABANDONED',$4,$5,$6,$7)`,
+          [
+            createUuidV7(),
+            group.checkout_group_id,
+            group.checkout_quote_id,
+            group.customer_user_id,
+            contextIds.request,
+            contextIds.correlation,
+            now,
+          ],
+        );
+        await client.query(
+          `UPDATE marketplace.finance_exceptions
+              SET next_action_code='RECONCILE_ABANDONED_AUTHORIZATION',updated_at=$2
+            WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+          [group.provider_operation_reference, now],
+        );
+      }
+      return groups.rowCount ?? 0;
+    });
+  }
+
+  /**
+   * A provider's answer for a placement that is no longer waiting for one.
+   *
+   * After abandonment the payment is still unknown, so the answer is the
+   * first real word about the money: "succeeded" means the customer's bank
+   * holds an amount no order will use, and it is voided here, through the
+   * provider, before anyone has to notice; "failed" closes the exception.
+   * For a payment the checkout already settled one way, an answer that
+   * agrees is a receipt and an answer that disagrees is a conflict for a
+   * person -- the orders may be in flight, so nothing is moved on its own.
+   * Before this every late answer was recorded and ignored.
+   */
+  async #lateWebhook(
+    client: PoolClient,
+    input: {
+      readonly context: RequestContext;
+      readonly outcome: 'SUCCEEDED' | 'FAILED';
+    },
+    row: WebhookPaymentRow,
+    now: Date,
+  ) {
+    const contextIds = ids(input.context);
+    const paymentId = row.payment_transaction_id;
+    const version = Number(row.version);
+    const unresolved = row.payment_state === 'UNKNOWN_REQUIRES_RECONCILIATION';
+    if (unresolved && input.outcome === 'FAILED') {
+      await client.query(
+        `UPDATE marketplace.payment_transactions SET payment_state='FAILED',version=version+1,updated_at=$2 WHERE payment_transaction_id=$1`,
+        [paymentId, now],
+      );
+      await this.#paymentEvent(client, {
+        context: input.context,
+        event_type: 'WEBHOOK_RESULT',
+        now,
+        payment_id: paymentId,
+        payment_version: version + 1,
+        previous_state: row.payment_state,
+        provider_result: 'FAILED',
+        reason_code: 'LATE_PROVIDER_RESULT',
+        resulting_state: 'FAILED',
+      });
+      await this.#resolveException(client, row.provider_operation_reference, now);
+    } else if (unresolved) {
+      await client.query(
+        `UPDATE marketplace.payment_transactions SET payment_state='AUTHORIZED',version=version+1,updated_at=$2 WHERE payment_transaction_id=$1`,
+        [paymentId, now],
+      );
+      await this.#paymentEvent(client, {
+        context: input.context,
+        event_type: 'WEBHOOK_RESULT',
+        now,
+        payment_id: paymentId,
+        payment_version: version + 1,
+        previous_state: row.payment_state,
+        provider_result: 'SUCCEEDED',
+        reason_code: 'LATE_PROVIDER_RESULT',
+        resulting_state: 'AUTHORIZED',
+      });
+      const voided = await providerOutcome(() =>
+        this.#provider.void({
+          amount_minor: Number(row.amount_minor),
+          operation_reference: row.provider_operation_reference,
+          scenario: row.provider_scenario,
+        }),
+      );
+      if (voided === 'SUCCEEDED') {
+        await client.query(
+          `UPDATE marketplace.payment_transactions
+              SET payment_state='VOIDED',voided_amount_minor=amount_minor,voided_at=$2,version=version+1,updated_at=$2
+            WHERE payment_transaction_id=$1`,
+          [paymentId, now],
+        );
+        await this.#paymentEvent(client, {
+          context: input.context,
+          event_type: 'PAYMENT_VOIDED',
+          now,
+          payment_id: paymentId,
+          payment_version: version + 2,
+          previous_state: 'AUTHORIZED',
+          provider_result: 'SUCCEEDED',
+          reason_code: 'LATE_AUTHORIZATION_VOIDED',
+          resulting_state: 'VOIDED',
+        });
+        await this.#resolveException(client, row.provider_operation_reference, now);
+      } else {
+        await client.query(
+          `UPDATE marketplace.finance_exceptions
+              SET next_action_code='VOID_LATE_AUTHORIZATION',updated_at=$2
+            WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+          [row.provider_operation_reference, now],
+        );
+      }
+    } else {
+      const heldMoney = ['AUTHORIZED', 'CAPTURE_PENDING', 'CAPTURED', 'VOID_PENDING', 'VOIDED'];
+      const agrees =
+        input.outcome === 'SUCCEEDED'
+          ? heldMoney.includes(row.payment_state)
+          : row.payment_state === 'FAILED' || row.payment_state === 'CANCELLED';
+      if (!agrees)
+        await client.query(
+          `INSERT INTO marketplace.finance_exceptions
+             (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+              owner_reference,next_action_code,created_at,updated_at)
+           VALUES ($1,'STATUS_MISMATCH',$2,$3,'FINANCE_RECONCILIATION','REVIEW_PROVIDER_CONFLICT',$4,$4)`,
+          [createUuidV7(), row.provider_operation_reference, row.amount_minor, now],
+        );
+    }
+    await client.query(
+      `INSERT INTO marketplace.checkout_events
+         (checkout_event_id,checkout_group_id,checkout_quote_id,event_type,actor_id,request_id,correlation_id,occurred_at)
+       VALUES ($1,$2,$3,'WEBHOOK_ACCEPTED',$4,$5,$6,$7)`,
+      [
+        createUuidV7(),
+        row.checkout_group_id,
+        row.checkout_quote_id,
+        row.customer_user_id,
+        contextIds.request,
+        contextIds.correlation,
+        now,
+      ],
+    );
+  }
+
+  async #resolveException(client: PoolClient, operationReference: string, now: Date) {
+    await client.query(
+      `UPDATE marketplace.finance_exceptions SET exception_state='RESOLVED',updated_at=$2
+        WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+      [operationReference, now],
+    );
   }
 
   async #finalize(
@@ -1242,8 +1487,10 @@ export class GroupedCheckoutService {
       readonly aggregate_type: string;
       readonly context: RequestContext;
       readonly event_type: string;
+      readonly evidence?: Readonly<Record<string, unknown>>;
       readonly from_state: string;
       readonly now: Date;
+      readonly reason_code?: string;
       readonly state: string;
     },
   ) {
@@ -1258,7 +1505,7 @@ export class GroupedCheckoutService {
       `INSERT INTO marketplace.aggregate_transitions
          (transition_id,aggregate_type,aggregate_id,previous_version,resulting_version,from_state,to_state,
           actor_id,actor_kind,reason_code,evidence,request_id,correlation_id,causation_id,occurred_at)
-       VALUES ($1,$2,$3,1,2,$4,$5,$6,$7,'WEBHOOK_RESOLVED',$8,$9,$10,$11,$12)`,
+       VALUES ($1,$2,$3,1,2,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         createUuidV7(),
         input.aggregate_type,
@@ -1267,7 +1514,8 @@ export class GroupedCheckoutService {
         input.state,
         actor?.actor_id ?? createUuidV7(),
         actor?.actor_kind ?? 'system',
-        JSON.stringify({ source: 'verified_webhook' }),
+        input.reason_code ?? 'WEBHOOK_RESOLVED',
+        JSON.stringify(input.evidence ?? { source: 'verified_webhook' }),
         contextIds.request,
         contextIds.correlation,
         input.context.causation_id,
@@ -1343,7 +1591,9 @@ export class GroupedCheckoutService {
       readonly now: Date;
       readonly payment_id: string;
       readonly payment_version: number;
+      readonly previous_state?: string | null;
       readonly provider_result: string;
+      readonly reason_code?: string;
       readonly resulting_state: string;
     },
   ) {
@@ -1353,18 +1603,23 @@ export class GroupedCheckoutService {
       `INSERT INTO marketplace.payment_events
          (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,resulting_state,
           provider_result,command_reference,actor_id,actor_kind,reason_code,request_id,correlation_id,occurred_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CUSTOMER_CHECKOUT',$11,$12,$13)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [
         createUuidV7(),
         input.payment_id,
         input.payment_version,
         input.event_type,
-        input.payment_version === 1 ? null : 'UNKNOWN_REQUIRES_RECONCILIATION',
+        input.previous_state === undefined
+          ? input.payment_version === 1
+            ? null
+            : 'UNKNOWN_REQUIRES_RECONCILIATION'
+          : input.previous_state,
         input.resulting_state,
         input.provider_result,
         reference('CMD', createUuidV7()),
         actor?.actor_id ?? createUuidV7(),
         actor?.actor_kind ?? 'system',
+        input.reason_code ?? 'CUSTOMER_CHECKOUT',
         contextIds.request,
         contextIds.correlation,
         input.now,

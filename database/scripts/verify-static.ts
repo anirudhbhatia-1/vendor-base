@@ -158,6 +158,7 @@ assert(
       '0083_cart_recovery',
       '0084_quote_content_binding',
       '0085_road_routing',
+      '0086_payment_intake_outcomes',
     ]),
   'Unexpected reviewed migrations',
 );

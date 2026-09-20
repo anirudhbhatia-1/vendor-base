@@ -106,20 +106,25 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#inventory = new InventoryReservationService({ connection_string: databaseUrl });
     this.#adminControl = new AdminControlPlaneService({ connection_string: databaseUrl });
     this.#assignments = new AssignmentCustodyService({ connection_string: databaseUrl });
-    this.#checkout = new GroupedCheckoutService({
-      connection_string: databaseUrl,
-      provider: new LocalFakeMoneyProvider({
-        clearing_account_reference: config.providerClearingAccountReference,
-        webhook_key: config.paymentWebhookKey,
-      }),
+    // One provider for every service that moves money here: the checkout
+    // that authorises, the money service that captures, the complete
+    // lifecycle that voids. Each used to build its own, and only the
+    // checkout's carried the configured clearing account and webhook key.
+    const provider = new LocalFakeMoneyProvider({
+      clearing_account_reference: config.providerClearingAccountReference,
+      webhook_key: config.paymentWebhookKey,
     });
+    this.#checkout = new GroupedCheckoutService({ connection_string: databaseUrl, provider });
     this.#partnerField = new PartnerFieldOpsService({ connection_string: databaseUrl });
     this.#partnerWait = new PartnerWaitPolicyService({ connection_string: databaseUrl });
     this.#notifications = new LocalNotificationService({ connection_string: databaseUrl });
     this.#configuration = new ConfigurationAdminService({ connection_string: databaseUrl });
     this.#availability = new PartnerAvailabilityService({ connection_string: databaseUrl });
-    this.#money = new MoneyLifecycleService({ connection_string: databaseUrl });
-    this.#completeMoney = new CompleteMoneyLifecycleService({ connection_string: databaseUrl });
+    this.#money = new MoneyLifecycleService({ connection_string: databaseUrl, provider });
+    this.#completeMoney = new CompleteMoneyLifecycleService({
+      connection_string: databaseUrl,
+      provider,
+    });
     this.#orderMoney = new OrderMoneyOrchestrator({
       complete_money: this.#completeMoney,
       connection_string: databaseUrl,
@@ -327,6 +332,11 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#checkout.expireQuotes({ context, now }),
         0,
       );
+      const abandoned = await pass(
+        'checkout.abandonUnknownPayments',
+        () => this.#checkout.abandonUnknownPayments({ context, now }),
+        0,
+      );
       const accepts = await pass(
         'fulfilment.timeoutOverdueAccepts',
         () => this.#fulfilment.timeoutOverdueAccepts({ context, now }),
@@ -438,6 +448,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       const changed =
         reservations.length +
         quotes +
+        abandoned +
         accepts.length +
         decisions.length +
         offers +
@@ -470,6 +481,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           offers,
           outbox: outbox.published,
           quotes,
+          abandoned_payments: abandoned,
           reservations: reservations.length,
         });
       }

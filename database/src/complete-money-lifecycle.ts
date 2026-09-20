@@ -15,6 +15,11 @@ import {
   MoneyNotFoundError,
   MoneyStateError,
 } from './money-lifecycle.js';
+import {
+  LocalFakeMoneyProvider,
+  providerOutcome,
+  type MoneyProviderAdapter,
+} from './money-policy.js';
 import { transaction } from './transaction.js';
 
 type StatementKind = 'PAYMENT' | 'PAYOUT' | 'REFUND';
@@ -60,12 +65,17 @@ function marked(value: string, pattern: RegExp, label: string) {
 }
 export class CompleteMoneyLifecycleService {
   readonly #pool: Pool;
-  constructor(input: { readonly connection_string: string }) {
+  readonly #provider: MoneyProviderAdapter;
+  constructor(input: {
+    readonly connection_string: string;
+    readonly provider?: MoneyProviderAdapter;
+  }) {
     this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-complete-money',
       max: 12,
     });
+    this.#provider = input.provider ?? new LocalFakeMoneyProvider();
   }
   async close() {
     await this.#pool.end();
@@ -100,23 +110,38 @@ export class CompleteMoneyLifecycleService {
       if (!payment) throw new MoneyNotFoundError('Payment not found');
       if (payment.payment_state !== 'AUTHORIZED' || payment.version !== input.expected_version)
         throw new MoneyStateError('Only the current authorized amount can be voided');
+      // The release has to reach the provider: until it does, the customer's
+      // bank still holds the money. This used to record VOIDED with a
+      // provider result of SUCCEEDED that no provider had given.
+      const outcome = await providerOutcome(() =>
+        this.#provider.void({
+          amount_minor: Number(payment.amount_minor),
+          operation_reference: payment.provider_operation_reference,
+          scenario: payment.provider_scenario,
+        }),
+      );
+      const next = outcome === 'SUCCEEDED' ? 'VOIDED' : 'UNKNOWN_REQUIRES_RECONCILIATION';
       const updated = await client.query(
         `UPDATE marketplace.payment_transactions
-            SET payment_state='VOIDED',voided_amount_minor=amount_minor,voided_at=$2,
+            SET payment_state=$3,
+                voided_amount_minor=CASE WHEN $3='VOIDED' THEN amount_minor ELSE voided_amount_minor END,
+                voided_at=CASE WHEN $3='VOIDED' THEN $2::timestamptz ELSE voided_at END,
                 version=version+1,updated_at=$2 WHERE payment_transaction_id=$1 RETURNING *`,
-        [input.payment_transaction_id, now],
+        [input.payment_transaction_id, now, next],
       );
       await client.query(
         `INSERT INTO marketplace.payment_events
           (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,
            resulting_state,provider_result,command_reference,actor_id,actor_kind,reason_code,
            request_id,correlation_id,occurred_at)
-         VALUES ($1,$2,$3,'PAYMENT_VOIDED','AUTHORIZED','VOIDED','SUCCEEDED',$4,$5,$6,
-           'UNUSED_AUTHORIZATION_VOIDED',$7,$8,$9)`,
+         VALUES ($1,$2,$3,'PAYMENT_VOIDED','AUTHORIZED',$4,$5,$6,$7,$8,
+           'UNUSED_AUTHORIZATION_VOIDED',$9,$10,$11)`,
         [
           createUuidV7(),
           input.payment_transaction_id,
           input.expected_version + 1,
+          next,
+          outcome,
           input.command_reference,
           who,
           actorKind,
@@ -125,6 +150,18 @@ export class CompleteMoneyLifecycleService {
           now,
         ],
       );
+      // A void the provider declined or did not answer leaves money held
+      // that the order will never use; it is an exception until a statement
+      // or a status query says which. A declined void is not a decline of
+      // the payment, so it is never recorded as FAILED.
+      if (outcome !== 'SUCCEEDED')
+        await client.query(
+          `INSERT INTO marketplace.finance_exceptions
+            (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+             next_action_code,created_at,updated_at)
+           VALUES ($1,'PAYMENT_UNKNOWN',$2,$3,'RECONCILE_VOID_SAME_OPERATION',$4,$4)`,
+          [createUuidV7(), payment.provider_operation_reference, payment.amount_minor, now],
+        );
       return updated.rows[0];
     });
   }

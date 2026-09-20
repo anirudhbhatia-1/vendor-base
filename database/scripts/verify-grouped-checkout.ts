@@ -6,12 +6,18 @@ import { CustomerCartService } from '../src/customer-cart.js';
 import { resolveFinancialPolicy } from '../src/financial-policy.js';
 import {
   CheckoutConflictError,
+  CheckoutInputError,
   CheckoutNotFoundError,
   CheckoutPaymentDeclinedError,
   GroupedCheckoutService,
+  PAYMENT_UNKNOWN_DEADLINE_MS,
 } from '../src/grouped-checkout.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
-import { calculateDistanceAmount } from '../src/money-policy.js';
+import {
+  LocalFakeMoneyProvider,
+  calculateDistanceAmount,
+  type FakeProviderOutcome,
+} from '../src/money-policy.js';
 import { ESTIMATE_ROAD_FACTOR, RoutingService, type RoutingProvider } from '../src/routing.js';
 import {
   activateConfigurationVersion,
@@ -21,7 +27,7 @@ import {
   validateConfigurationVersion,
 } from '../src/versioned-configuration.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
-import { check, customerContext, rejects, vendorContext } from './verify-support.js';
+import { check, customerContext, rejects, systemContext, vendorContext } from './verify-support.js';
 
 async function rejectsNotFound(work: () => Promise<unknown>) {
   try {
@@ -351,6 +357,334 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       now: new Date(now.getTime() + 2_000),
     });
     check(webhookReplay.replayed === true, 'Webhook replay was not suppressed');
+    // 7.4: finance saw the unknown money from the moment of placement, and
+    // the verified webhook closed what it opened.
+    const unknownException = await pool.query<{ states: string[] }>(
+      `SELECT array_agg(exception_state ORDER BY created_at) AS states
+         FROM marketplace.finance_exceptions
+        WHERE operation_reference=$1 AND exception_kind='PAYMENT_UNKNOWN'`,
+      [paymentRow.provider_operation_reference],
+    );
+    check(
+      JSON.stringify(unknownException.rows[0]?.states) === '["RESOLVED"]',
+      `An unknown authorisation did not open one finance exception that the webhook resolved (${JSON.stringify(unknownException.rows[0])})`,
+    );
+
+    // The same event, redelivered with different content, is not a replay.
+    await rejects(
+      () =>
+        checkout.receiveWebhook({
+          context: customerContext(unknownCustomer),
+          ...payload,
+          outcome: 'FAILED',
+          signature: createHmac('sha256', webhookKey)
+            .update(JSON.stringify({ ...payload, outcome: 'FAILED' }))
+            .digest('hex'),
+          now: new Date(now.getTime() + 2_000),
+        }),
+      CheckoutInputError,
+      'A reused event id carrying a different payload was accepted as a replay',
+    );
+
+    // 7.4: what happens to a placement the provider never answers. Every
+    // walk below starts from its own unknown placement.
+    const unknownPlacement = async (label: string, placedAt: Date) => {
+      const userId = createUuidV7();
+      await pool.query(
+        "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+        [userId],
+      );
+      const addressId = createUuidV7();
+      await pool.query(
+        `INSERT INTO marketplace.customer_addresses
+          (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
+         VALUES ($1,$2,'SYNTH-ADDRESS-' || $4,'SYNTH ' || $4,'302020',ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
+        [
+          addressId,
+          userId,
+          createUuidV7(),
+          `${label}-${userId.replaceAll('-', '').slice(-8).toUpperCase()}`,
+        ],
+      );
+      const context = customerContext(userId);
+      const cart = await carts.currentCart({ context, now: placedAt });
+      await carts.setCartAddress({ context, customer_address_id: addressId, now: placedAt });
+      await carts.addLine({
+        context,
+        vendor_location_id: store0.locationId,
+        catalogue_variant_id: product0.catalogue_variant_id,
+        quantity: 1,
+        now: placedAt,
+      });
+      const quote = await checkout.createQuote({ context, cart_id: cart.cart_id, now: placedAt });
+      const placed = await checkout.place({
+        context,
+        checkout_quote_id: quote.checkout_quote_id,
+        provider_scenario: 'MALFORMED',
+        now: placedAt,
+      });
+      check(
+        placed.lifecycle_state === 'PAYMENT_UNKNOWN',
+        `${label}: placement was not held unknown`,
+      );
+      const operation = await pool.query<{ provider_operation_reference: string }>(
+        `SELECT provider_operation_reference FROM marketplace.payment_transactions WHERE payment_transaction_id=$1`,
+        [placed.payment_transaction_id],
+      );
+      const evidence = async () => {
+        const found = await pool.query<{
+          checkout_state: string;
+          quote_state: string;
+          payment_state: string;
+          holds: string;
+          orders: string;
+          next_action: string | null;
+          exception_state: string | null;
+          conflicts: string;
+          events: string[] | null;
+        }>(
+          `SELECT g.lifecycle_state AS checkout_state, q.lifecycle_state AS quote_state,
+                  p.payment_state,
+                  (SELECT count(*)::text FROM marketplace.checkout_quote_lines ql
+                     JOIN marketplace.inventory_reservations r ON r.reservation_id=ql.inventory_reservation_id
+                     JOIN marketplace.checkout_quote_groups qg ON qg.checkout_quote_group_id=ql.checkout_quote_group_id
+                    WHERE qg.checkout_quote_id=q.checkout_quote_id AND r.reservation_state='SOFT_HELD') AS holds,
+                  (SELECT count(*)::text FROM marketplace.vendor_orders o WHERE o.checkout_group_id=g.checkout_group_id) AS orders,
+                  x.next_action_code AS next_action, x.exception_state,
+                  (SELECT count(*)::text FROM marketplace.finance_exceptions c
+                    WHERE c.operation_reference=p.provider_operation_reference AND c.exception_kind='STATUS_MISMATCH') AS conflicts,
+                  (SELECT array_agg(e.event_type || ':' || e.resulting_state ORDER BY e.payment_version)
+                     FROM marketplace.payment_events e WHERE e.payment_transaction_id=p.payment_transaction_id) AS events
+             FROM marketplace.checkout_groups g
+             JOIN marketplace.checkout_quotes q ON q.checkout_quote_id=g.checkout_quote_id
+             JOIN marketplace.payment_transactions p ON p.payment_transaction_id=g.payment_transaction_id
+             LEFT JOIN marketplace.finance_exceptions x
+               ON x.operation_reference=p.provider_operation_reference AND x.exception_kind='PAYMENT_UNKNOWN'
+            WHERE g.checkout_group_id=$1`,
+          [placed.checkout_group_id],
+        );
+        const row = found.rows[0];
+        check(row !== undefined, `${label}: placement vanished`);
+        return row;
+      };
+      const webhook = (outcome: 'SUCCEEDED' | 'FAILED', at: Date, service = checkout) => {
+        const body = {
+          provider_event_id: `SYNTH-EVENT-${label}-${outcome}`,
+          provider_operation_reference: operation.rows[0]?.provider_operation_reference ?? '',
+          outcome,
+          occurred_at: at.toISOString(),
+        };
+        return service.receiveWebhook({
+          context,
+          ...body,
+          signature: createHmac('sha256', webhookKey).update(JSON.stringify(body)).digest('hex'),
+          now: at,
+        });
+      };
+      return { context, evidence, placed, userId, webhook };
+    };
+    const sweeper = systemContext(createUuidV7());
+    const sixMinutes = new Date(now.getTime() + 6 * 60_000);
+    const beforeDeadline = new Date(now.getTime() + PAYMENT_UNKNOWN_DEADLINE_MS - 1_000);
+    const afterDeadline = new Date(now.getTime() + PAYMENT_UNKNOWN_DEADLINE_MS + 1_000);
+
+    // Placement: opened for finance at once, holds kept past the quote's own
+    // life, and not abandoned before the deadline.
+    const waiting = await unknownPlacement('WAIT', now);
+    const opened = await waiting.evidence();
+    check(
+      opened.next_action === 'AWAIT_PROVIDER_WEBHOOK' && opened.exception_state === 'OPEN',
+      `An unknown placement did not open a finance exception (${JSON.stringify(opened)})`,
+    );
+    await checkout.expireQuotes({ context: sweeper, now: sixMinutes });
+    const early = await checkout.abandonUnknownPayments({ context: sweeper, now: beforeDeadline });
+    const kept = await waiting.evidence();
+    check(
+      early === 0 &&
+        kept.checkout_state === 'PAYMENT_UNKNOWN' &&
+        kept.quote_state === 'ACTIVE' &&
+        kept.holds === '1',
+      `The holds of a placement awaiting the provider were not kept past the quote's life (${JSON.stringify(
+        { early, kept },
+      )})`,
+    );
+
+    // Abandonment: stock back, quote retired, group cancelled, the money
+    // still unknown and the exception now asking for it to be found.
+    const abandonedCount = await checkout.abandonUnknownPayments({
+      context: sweeper,
+      now: afterDeadline,
+    });
+    const abandoned = await waiting.evidence();
+    const abandonedTrail = await pool.query<{ events: string; outbox: string }>(
+      `SELECT (SELECT count(*)::text FROM marketplace.checkout_events
+                WHERE checkout_group_id=$1 AND event_type='PAYMENT_ABANDONED') AS events,
+              (SELECT count(*)::text FROM marketplace.outbox_events
+                WHERE aggregate_id=$1 AND event_type='checkout.payment_abandoned') AS outbox`,
+      [waiting.placed.checkout_group_id],
+    );
+    check(
+      abandonedCount === 1 &&
+        abandoned.checkout_state === 'CANCELLED' &&
+        abandoned.quote_state === 'EXPIRED' &&
+        abandoned.holds === '0' &&
+        abandoned.payment_state === 'UNKNOWN_REQUIRES_RECONCILIATION' &&
+        abandoned.next_action === 'RECONCILE_ABANDONED_AUTHORIZATION' &&
+        abandoned.exception_state === 'OPEN' &&
+        abandonedTrail.rows[0]?.events === '1' &&
+        abandonedTrail.rows[0].outbox === '1',
+      `A placement past the deadline was not abandoned with its stock given back (${JSON.stringify({
+        abandonedCount,
+        abandoned,
+        trail: abandonedTrail.rows[0],
+      })})`,
+    );
+
+    // Late success after abandonment, provider void answered: the money is
+    // released through the provider and the exception closed. No order.
+    const releasing = new GroupedCheckoutService({
+      connection_string: connectionString,
+      provider: new (class extends LocalFakeMoneyProvider {
+        override async void(): Promise<FakeProviderOutcome> {
+          return 'SUCCEEDED';
+        }
+      })({ webhook_key: webhookKey }),
+    });
+    try {
+      const lateVoided = await waiting.webhook('SUCCEEDED', afterDeadline, releasing);
+      const voided = await waiting.evidence();
+      check(
+        'checkout' in lateVoided &&
+          lateVoided.checkout.lifecycle_state === 'CANCELLED' &&
+          voided.orders === '0' &&
+          voided.payment_state === 'VOIDED' &&
+          voided.exception_state === 'RESOLVED' &&
+          JSON.stringify(voided.events) ===
+            '["AUTHORIZATION_RESULT:UNKNOWN_REQUIRES_RECONCILIATION","WEBHOOK_RESULT:AUTHORIZED","PAYMENT_VOIDED:VOIDED"]',
+        `A late success after abandonment was not voided through the provider (${JSON.stringify(voided)})`,
+      );
+    } finally {
+      await releasing.close();
+    }
+
+    // Late success, provider void unanswered: the money is known to be held
+    // and the exception says so; nothing is invented.
+    const unreleased = await unknownPlacement('HELD', now);
+    await checkout.abandonUnknownPayments({ context: sweeper, now: afterDeadline });
+    await unreleased.webhook('SUCCEEDED', afterDeadline);
+    const held = await unreleased.evidence();
+    check(
+      held.checkout_state === 'CANCELLED' &&
+        held.payment_state === 'AUTHORIZED' &&
+        held.next_action === 'VOID_LATE_AUTHORIZATION' &&
+        held.exception_state === 'OPEN' &&
+        held.orders === '0',
+      `A late success whose void went unanswered was not left authorised with an exception (${JSON.stringify(held)})`,
+    );
+
+    // Late failure after abandonment closes the question.
+    const failing = await unknownPlacement('FAIL', now);
+    await checkout.abandonUnknownPayments({ context: sweeper, now: afterDeadline });
+    await failing.webhook('FAILED', afterDeadline);
+    const failed = await failing.evidence();
+    check(
+      failed.payment_state === 'FAILED' && failed.exception_state === 'RESOLVED',
+      `A late failure after abandonment did not close the payment (${JSON.stringify(failed)})`,
+    );
+
+    // A provider answer that contradicts a settled payment is a conflict for
+    // a person, not a change made on its own: the placed order stands.
+    const settledPayment = await pool.query<{ provider_operation_reference: string }>(
+      `SELECT provider_operation_reference FROM marketplace.payment_transactions WHERE payment_transaction_id=$1`,
+      [placed.payment_transaction_id],
+    );
+    const contradiction = {
+      provider_event_id: 'SYNTH-EVENT-PHASE7-CONTRADICTION',
+      provider_operation_reference: settledPayment.rows[0]?.provider_operation_reference ?? '',
+      outcome: 'FAILED' as const,
+      occurred_at: new Date(now.getTime() + 3_000).toISOString(),
+    };
+    const contradicted = await checkout.receiveWebhook({
+      context: customerContext(customerId),
+      ...contradiction,
+      signature: createHmac('sha256', webhookKey)
+        .update(JSON.stringify(contradiction))
+        .digest('hex'),
+      now: new Date(now.getTime() + 3_000),
+    });
+    const conflict = await pool.query<{
+      checkout_state: string;
+      payment_state: string;
+      conflicts: string;
+    }>(
+      `SELECT g.lifecycle_state AS checkout_state, p.payment_state,
+              (SELECT count(*)::text FROM marketplace.finance_exceptions x
+                WHERE x.operation_reference=p.provider_operation_reference
+                  AND x.exception_kind='STATUS_MISMATCH' AND x.exception_state='OPEN') AS conflicts
+         FROM marketplace.checkout_groups g
+         JOIN marketplace.payment_transactions p USING (payment_transaction_id)
+        WHERE g.checkout_group_id=$1`,
+      [placed.checkout_group_id],
+    );
+    check(
+      'checkout' in contradicted &&
+        conflict.rows[0]?.checkout_state === 'ACTIVE' &&
+        conflict.rows[0].payment_state === 'AUTHORIZED' &&
+        conflict.rows[0].conflicts === '1',
+      `A provider answer contradicting a settled payment did not open a conflict for review (${JSON.stringify(conflict.rows[0])})`,
+    );
+
+    // Two deliveries of one event at once: one is received, one is a replay,
+    // neither is an error.
+    const redelivered = await unknownPlacement('RACE', now);
+    const raceBody = {
+      provider_event_id: 'SYNTH-EVENT-PHASE7-RACE',
+      provider_operation_reference:
+        (
+          await pool.query<{ provider_operation_reference: string }>(
+            `SELECT provider_operation_reference FROM marketplace.payment_transactions WHERE payment_transaction_id=$1`,
+            [redelivered.placed.payment_transaction_id],
+          )
+        ).rows[0]?.provider_operation_reference ?? '',
+      outcome: 'SUCCEEDED' as const,
+      occurred_at: new Date(now.getTime() + 2_000).toISOString(),
+    };
+    const raceSignature = createHmac('sha256', webhookKey)
+      .update(JSON.stringify(raceBody))
+      .digest('hex');
+    // Forced to interleave: a third connection holds the payment row while
+    // both deliveries are issued, so each has begun before either can take
+    // the lock. Left to chance, the first delivery usually finishes before
+    // the second starts, and a guard that reads before locking looks sound.
+    const holder = await pool.connect();
+    await holder.query('BEGIN');
+    await holder.query(
+      `SELECT 1 FROM marketplace.payment_transactions WHERE payment_transaction_id=$1 FOR UPDATE`,
+      [redelivered.placed.payment_transaction_id],
+    );
+    const inFlight = Promise.all(
+      [0, 1].map(() =>
+        checkout.receiveWebhook({
+          context: redelivered.context,
+          ...raceBody,
+          signature: raceSignature,
+          now: new Date(now.getTime() + 2_000),
+        }),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await holder.query('COMMIT');
+    holder.release();
+    const deliveries = await inFlight;
+    const raced = await redelivered.evidence();
+    check(
+      deliveries.filter((delivery) => delivery.replayed).length === 1 &&
+        raced.checkout_state === 'ACTIVE' &&
+        raced.orders === '1',
+      `Concurrent deliveries of one event were not received once and replayed once (${JSON.stringify(
+        { deliveries: deliveries.map((delivery) => delivery.replayed), raced },
+      )})`,
+    );
 
     // CUS-33 at the quote. A collected group carries no delivery fee, and a
     // group whose store no longer offers its method is blocked with a stable

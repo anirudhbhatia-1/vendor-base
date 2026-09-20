@@ -1335,7 +1335,7 @@
       "name": "Payment-unknown recovery",
       "status": "complete_local_synthetic",
       "target_stage": "4",
-      "notes": "PWA has UNKNOWN scenario test. Android missing",
+      "notes": "PWA has UNKNOWN scenario test. Android missing. Run 44: finance exception at placement, holds kept while the provider is awaited, abandonment after 15 minutes, late answers voided/closed/conflicted (worker sweep abandonUnknownPayments)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1350,6 +1350,8 @@
       "verified_by": [
         "apps/customer-pwa/app/customer-panels.spec.ts",
         "database/scripts/verify-grouped-checkout.ts",
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/src/money-policy.spec.ts",
         "database/src/provider-ports.spec.ts"
       ]
     },
@@ -2655,7 +2657,7 @@
       "name": "Server-driven timeout",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Acceptance countdown is driven by the order’s own accept_by, which checkout writes at placement (Phase D, 16 Sep 2026: before that nothing in production set it)",
+      "notes": "Acceptance countdown is driven by the order\u2019s own accept_by, which checkout writes at placement (Phase D, 16 Sep 2026: before that nothing in production set it)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2725,7 +2727,7 @@
       "name": "Substitution proposal",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Substitutions are proposed from the store’s own published catalogue and answered by the customer",
+      "notes": "Substitutions are proposed from the store\u2019s own published catalogue and answered by the customer",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2866,7 +2868,7 @@
       "name": "Vendor self-delivery",
       "status": "complete_local_synthetic",
       "target_stage": "5",
-      "notes": "Start at the shop (READY → PICKED_UP with the carrying staff member recorded), customer delivery code on the order, complete at the door (→ DELIVERED, settles with no partner earning); vendor console controls; Android shell unchanged (batch 10)",
+      "notes": "Start at the shop (READY \u2192 PICKED_UP with the carrying staff member recorded), customer delivery code on the order, complete at the door (\u2192 DELIVERED, settles with no partner earning); vendor console controls; Android shell unchanged (batch 10)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3050,7 +3052,7 @@
       "name": "Sales dashboard",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Orders, completed sales, acceptance, cancellations, timeouts and typical preparation, counted from the store’s own orders",
+      "notes": "Orders, completed sales, acceptance, cancellations, timeouts and typical preparation, counted from the store\u2019s own orders",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6232,7 +6234,7 @@
       "name": "Idempotent provider webhooks",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "HMAC validation + provider_webhook_receipts dedup",
+      "notes": "HMAC validation + provider_webhook_receipts dedup; run 44: receipt taken under the payment lock (concurrent deliveries), reused event id with different content refused, unknown outcome refused at the API",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6246,6 +6248,7 @@
       "client_applicability": "no_client",
       "phase_steps": ["3.3", "7.4"],
       "verified_by": [
+        "apps/api/src/grouped-checkout.controller.spec.ts",
         "database/scripts/verify-grouped-checkout.ts",
         "database/scripts/verify-reference-module.ts",
         "database/src/idempotency.spec.ts",
@@ -7476,7 +7479,7 @@
       "name": "Payment provider",
       "status": "complete_local_synthetic",
       "target_stage": "10",
-      "notes": "Auth/capture/refund/void/reconciliation. Synthetic scenarios",
+      "notes": "Auth/capture/refund/void/reconciliation. Synthetic scenarios. Run 44: asynchronous port with void, void reaches the provider, thrown provider errors contained as UNKNOWN",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -7490,6 +7493,8 @@
       "phase_steps": ["0.4", "7.4"],
       "verified_by": [
         "database/scripts/verify-grouped-checkout.ts",
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/src/money-policy.spec.ts",
         "database/src/provider-ports.spec.ts",
         "database/src/runtime-config.spec.ts",
         "database/src/supabase-protected-object-storage.spec.ts"

@@ -14,6 +14,7 @@ import {
   type FakeProviderScenario,
   type FinancialPolicy,
   type MoneyProviderAdapter,
+  providerOutcome,
 } from './money-policy.js';
 import { transaction as tx } from './transaction.js';
 
@@ -571,11 +572,13 @@ export class MoneyLifecycleService {
         return Object.freeze(current);
       if (current.payout_state !== 'SCHEDULED' || current.version !== input.expected_version)
         throw new MoneyStateError('Payout state or version does not permit submission');
-      const outcome = this.#provider.submitPayout({
-        amount_minor: Number(current.amount_minor),
-        operation_reference: current.provider_operation_reference,
-        scenario: current.provider_scenario,
-      });
+      const outcome = await providerOutcome(() =>
+        this.#provider.submitPayout({
+          amount_minor: Number(current.amount_minor),
+          operation_reference: current.provider_operation_reference,
+          scenario: current.provider_scenario,
+        }),
+      );
       const next =
         outcome === 'SUCCEEDED' ? 'PAID' : outcome === 'DECLINED' ? 'FAILED_REVIEW' : 'SUBMITTED';
       const updated = await client.query(
@@ -793,11 +796,13 @@ export class MoneyLifecycleService {
       ) {
         throw new MoneyStateError('Refund approval is stale, expired, or self-approved');
       }
-      const outcome = this.#provider.refund({
-        amount_minor: Number(refund.refund_total_minor),
-        operation_reference: refund.provider_operation_reference,
-        scenario: refund.provider_scenario,
-      });
+      const outcome = await providerOutcome(() =>
+        this.#provider.refund({
+          amount_minor: Number(refund.refund_total_minor),
+          operation_reference: refund.provider_operation_reference,
+          scenario: refund.provider_scenario,
+        }),
+      );
       const next =
         outcome === 'SUCCEEDED'
           ? 'SUCCEEDED'
@@ -923,18 +928,20 @@ export class MoneyLifecycleService {
           now,
         ],
       );
-      const outcome =
+      // A provider that throws -- malformed answer, timeout, dropped
+      // connection -- used to escape here, rolling back the in-flight record
+      // and telling the caller nothing, though the money may have moved. It
+      // is UNKNOWN, with the exception below, like every other no-answer.
+      const instruction = {
+        amount_minor: Number(payment.amount_minor),
+        operation_reference: payment.provider_operation_reference,
+        scenario: payment.provider_scenario,
+      };
+      const outcome = await providerOutcome(() =>
         expected === 'CREATED'
-          ? this.#provider.authorize({
-              amount_minor: Number(payment.amount_minor),
-              operation_reference: payment.provider_operation_reference,
-              scenario: payment.provider_scenario,
-            })
-          : this.#provider.capture({
-              amount_minor: Number(payment.amount_minor),
-              operation_reference: payment.provider_operation_reference,
-              scenario: payment.provider_scenario,
-            });
+          ? this.#provider.authorize(instruction)
+          : this.#provider.capture(instruction),
+      );
       const successState = expected === 'CREATED' ? 'AUTHORIZED' : 'CAPTURED';
       const next =
         outcome === 'SUCCEEDED'

@@ -153,30 +153,53 @@ export function allocateMinorUnits(
 export type FakeProviderScenario = 'DECLINE' | 'MALFORMED' | 'SUCCESS' | 'UNKNOWN';
 export type FakeProviderOutcome = 'DECLINED' | 'SUCCEEDED' | 'UNKNOWN';
 
+/** One instruction to the provider: how much, under which reference. */
+export interface ProviderOperationInput {
+  readonly amount_minor: number;
+  readonly operation_reference: string;
+  /**
+   * The synthetic steering recorded on the transaction. A real adapter
+   * ignores it; the fake answers from it. It travels on the port so the
+   * answer is decided by the record, not by the caller's mood.
+   */
+  readonly scenario: FakeProviderScenario;
+}
+
+/**
+ * The provider-neutral money port (7.4). Every operation is asynchronous
+ * because a real provider is a network away; every answer is one of three
+ * words, because that is all the ledger can act on: the provider said yes,
+ * the provider said no, or the provider did not say. A malformed response,
+ * a timeout or a dropped connection is a thrown error, and `providerOutcome`
+ * turns it into UNKNOWN for the caller -- money may have moved, and the only
+ * honest state is "ask again", never "declined".
+ */
 export interface MoneyProviderAdapter {
-  authorize(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome;
-  capture(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome;
-  refund(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome;
-  submitPayout(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome;
+  authorize(input: ProviderOperationInput): Promise<FakeProviderOutcome>;
+  capture(input: ProviderOperationInput): Promise<FakeProviderOutcome>;
+  /** Releases an authorisation that will not be captured. */
+  void(input: ProviderOperationInput): Promise<FakeProviderOutcome>;
+  refund(input: ProviderOperationInput): Promise<FakeProviderOutcome>;
+  submitPayout(input: ProviderOperationInput): Promise<FakeProviderOutcome>;
   clearingAccountReference(): string;
   verifyWebhook(input: { readonly payload: string; readonly signature: string }): boolean;
-  status(operation_reference: string): FakeProviderOutcome | undefined;
+  status(operation_reference: string): Promise<FakeProviderOutcome | undefined>;
+}
+
+/**
+ * Asks the provider and answers UNKNOWN when it did not answer. Used at every
+ * call site so that a thrown error -- the fake's MALFORMED, a real adapter's
+ * timeout or parse failure -- is never mistaken for a decline and never
+ * escapes the transaction with the in-flight record rolled back.
+ */
+export async function providerOutcome(
+  ask: () => Promise<FakeProviderOutcome>,
+): Promise<FakeProviderOutcome> {
+  try {
+    return await ask();
+  } catch {
+    return 'UNKNOWN';
+  }
 }
 
 const OPERATION_PATTERN = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
@@ -208,11 +231,7 @@ export class LocalFakeMoneyProvider implements MoneyProviderAdapter {
     }
   }
 
-  execute(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome {
+  execute(input: ProviderOperationInput): FakeProviderOutcome {
     safeInteger(input.amount_minor, 'provider amount', 1);
     if (!OPERATION_PATTERN.test(input.operation_reference)) {
       throw new TypeError('Provider operation reference is invalid');
@@ -230,11 +249,7 @@ export class LocalFakeMoneyProvider implements MoneyProviderAdapter {
     return outcome;
   }
 
-  authorize(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome {
+  async authorize(input: ProviderOperationInput): Promise<FakeProviderOutcome> {
     return this.execute(input);
   }
 
@@ -247,27 +262,19 @@ export class LocalFakeMoneyProvider implements MoneyProviderAdapter {
    * two empty maps — so a capture could never succeed outside a single process,
    * and every captured payment landed in UNKNOWN_REQUIRES_RECONCILIATION.
    */
-  capture(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome {
+  async capture(input: ProviderOperationInput): Promise<FakeProviderOutcome> {
     return this.execute(input);
   }
 
-  refund(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome {
+  async void(input: ProviderOperationInput): Promise<FakeProviderOutcome> {
     return this.execute(input);
   }
 
-  submitPayout(input: {
-    readonly amount_minor: number;
-    readonly operation_reference: string;
-    readonly scenario: FakeProviderScenario;
-  }): FakeProviderOutcome {
+  async refund(input: ProviderOperationInput): Promise<FakeProviderOutcome> {
+    return this.execute(input);
+  }
+
+  async submitPayout(input: ProviderOperationInput): Promise<FakeProviderOutcome> {
     return this.execute(input);
   }
 
@@ -282,7 +289,7 @@ export class LocalFakeMoneyProvider implements MoneyProviderAdapter {
     return supplied.length === expected.length && timingSafeEqual(supplied, expected);
   }
 
-  status(operation_reference: string): FakeProviderOutcome | undefined {
+  async status(operation_reference: string): Promise<FakeProviderOutcome | undefined> {
     return this.#results.get(operation_reference);
   }
 }

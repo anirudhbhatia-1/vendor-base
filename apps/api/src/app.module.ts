@@ -462,7 +462,13 @@ import {
       provide: COMPLETE_MONEY_LIFECYCLE,
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new CompleteMoneyLifecycleService({ connection_string: config.databaseUrl }),
+        new CompleteMoneyLifecycleService({
+          connection_string: config.databaseUrl,
+          provider: new LocalFakeMoneyProvider({
+            clearing_account_reference: config.providerClearingAccountReference,
+            webhook_key: config.paymentWebhookKey,
+          }),
+        }),
     },
     {
       provide: ADMIN_CONTROL_PLANE,

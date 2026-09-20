@@ -7,6 +7,7 @@ import {
   calculateWaitingAmount,
   LocalFakeMoneyProvider,
   roundHalfUp,
+  providerOutcome,
 } from './money-policy.js';
 
 describe('rounding to whole minor units', () => {
@@ -67,6 +68,38 @@ describe('financial policy', () => {
         operation_reference: 'invalid payment reference',
         scenario: 'SUCCESS',
       }),
+    );
+  });
+
+  it('answers UNKNOWN, never a decline, when the provider does not answer', async () => {
+    const provider = new LocalFakeMoneyProvider();
+    const garbled = {
+      amount_minor: 100,
+      operation_reference: 'SYNTH-PAY-UNIT-0002',
+      scenario: 'MALFORMED' as const,
+    };
+    await assert.rejects(() => provider.authorize(garbled));
+    assert.equal(await providerOutcome(() => provider.authorize(garbled)), 'UNKNOWN');
+    assert.equal(await providerOutcome(() => provider.void(garbled)), 'UNKNOWN');
+    assert.equal(
+      await providerOutcome(() =>
+        provider.void({
+          ...garbled,
+          operation_reference: 'SYNTH-PAY-UNIT-0003',
+          scenario: 'DECLINE',
+        }),
+      ),
+      'DECLINED',
+    );
+    assert.equal(
+      await providerOutcome(() =>
+        provider.capture({
+          ...garbled,
+          operation_reference: 'SYNTH-PAY-UNIT-0004',
+          scenario: 'SUCCESS',
+        }),
+      ),
+      'SUCCEEDED',
     );
   });
 

@@ -79,6 +79,7 @@ export const ACKNOWLEDGED_WITHOUT_REACTION: ReadonlySet<string> = new Set([
   // nothing, so it is inert in every environment rather than test-only code
   // living in a production branch.
   'ops.queue_canary',
+  'checkout.payment_abandoned',
   'checkout.payment_unknown',
   'checkout.placed',
   'checkout.webhook_authorized',

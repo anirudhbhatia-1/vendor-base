@@ -94,12 +94,17 @@ export class GroupedCheckoutController {
   @Post('provider-webhook')
   async webhook(@Body() raw: unknown, @Headers('x-provider-signature') signature: string) {
     const value = object(raw);
+    // An outcome this boundary does not know is not a failure. It used to be
+    // read as one, and a failure cancels the placement and gives its stock
+    // back; a word the provider never sent must not do that.
+    if (value.outcome !== 'SUCCEEDED' && value.outcome !== 'FAILED')
+      throw new BadRequestException();
     try {
       return await this.service.receiveWebhook({
         context: currentRequestContext(),
         provider_event_id: String(value.provider_event_id),
         provider_operation_reference: String(value.provider_operation_reference),
-        outcome: value.outcome === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED',
+        outcome: value.outcome,
         occurred_at: String(value.occurred_at),
         signature: signature ?? '',
       });

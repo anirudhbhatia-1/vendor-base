@@ -5,7 +5,11 @@ import {
   parseUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
-import { SYNTHETIC_FINANCIAL_POLICY } from '../src/money-policy.js';
+import {
+  LocalFakeMoneyProvider,
+  SYNTHETIC_FINANCIAL_POLICY,
+  type MoneyProviderAdapter,
+} from '../src/money-policy.js';
 import { MoneyLifecycleService } from '../src/money-lifecycle.js';
 import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
 import { check } from './verify-support.js';
@@ -304,6 +308,127 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       'Unused authorization was not voided exactly once',
     );
 
+    // 7.4: the void reaches the provider. A void the provider does not answer
+    // leaves the money held, so the payment is unknown with an exception --
+    // never VOIDED on the strength of a result nobody gave.
+    const silentVoid: MoneyProviderAdapter = new (class extends LocalFakeMoneyProvider {
+      override async void(): Promise<never> {
+        throw new Error('Synthetic provider connection dropped');
+      }
+    })();
+    const unansweredComplete = new CompleteMoneyLifecycleService({
+      connection_string: connectionString,
+      provider: silentVoid,
+    });
+    try {
+      const heldPayment = await service.createPayment({
+        allocations: [
+          {
+            delivery_minor: 0,
+            discount_minor: 0,
+            item_minor: 2_500,
+            policy_version_reference: 'SYNTH-POLICY-D05-V1',
+            source_order_reference: 'SYNTH-ORDER-MONEY-VOID-0004',
+            tax_minor: 0,
+            tip_minor: 0,
+            vendor_location_id: location,
+          },
+        ],
+        amount_minor: 2_500,
+        command_reference: 'SYNTH-CMD-PAYMENT-CREATE-VOID-0004',
+        context: context(),
+        provider_operation_reference: 'SYNTH-PAY-VOID-0004',
+        provider_scenario: 'SUCCESS',
+        source_checkout_reference: 'SYNTH-CHECKOUT-MONEY-VOID-0004',
+        now,
+      });
+      const heldAuthorized = await service.authorize({
+        command_reference: 'SYNTH-CMD-PAYMENT-AUTH-VOID-0004',
+        context: context(),
+        expected_version: 1,
+        payment_transaction_id: heldPayment.payment_transaction_id,
+        now: new Date(now.getTime() + 7_000),
+      });
+      const unansweredVoid = await unansweredComplete.voidAuthorization({
+        command_reference: 'SYNTH-CMD-PAYMENT-VOID-0004',
+        context: context(),
+        expected_version: heldAuthorized.version,
+        payment_transaction_id: heldPayment.payment_transaction_id,
+        now: new Date(now.getTime() + 8_000),
+      });
+      const voidEvidence = await pool.query<{ provider_result: string | null; exceptions: string }>(
+        `SELECT e.provider_result,
+                (SELECT count(*)::text FROM marketplace.finance_exceptions x
+                  WHERE x.operation_reference='SYNTH-PAY-VOID-0004'
+                    AND x.exception_kind='PAYMENT_UNKNOWN'
+                    AND x.next_action_code='RECONCILE_VOID_SAME_OPERATION'
+                    AND x.exception_state='OPEN') AS exceptions
+           FROM marketplace.payment_events e
+          WHERE e.command_reference='SYNTH-CMD-PAYMENT-VOID-0004'`,
+      );
+      check(
+        unansweredVoid.payment_state === 'UNKNOWN_REQUIRES_RECONCILIATION' &&
+          unansweredVoid.voided_at === null &&
+          voidEvidence.rows[0]?.provider_result === 'UNKNOWN' &&
+          voidEvidence.rows[0].exceptions === '1',
+        `A void the provider did not answer was not held as unknown with an exception (${JSON.stringify(
+          { state: unansweredVoid.payment_state, evidence: voidEvidence.rows[0] },
+        )})`,
+      );
+    } finally {
+      await unansweredComplete.close();
+    }
+
+    // A provider that answers with garbage -- or not at all -- at authorise
+    // or capture used to escape the transaction: the in-flight record rolled
+    // back, the caller got an error, and nobody was told money may have
+    // moved. It is the same unknown as a provider that says "unknown".
+    const garbled = await service.createPayment({
+      allocations: [
+        {
+          delivery_minor: 0,
+          discount_minor: 0,
+          item_minor: 1_500,
+          policy_version_reference: 'SYNTH-POLICY-D05-V1',
+          source_order_reference: 'SYNTH-ORDER-MONEY-GARBLED-0005',
+          tax_minor: 0,
+          tip_minor: 0,
+          vendor_location_id: location,
+        },
+      ],
+      amount_minor: 1_500,
+      command_reference: 'SYNTH-CMD-PAYMENT-CREATE-GARBLED-0005',
+      context: context(),
+      provider_operation_reference: 'SYNTH-PAY-GARBLED-0005',
+      provider_scenario: 'MALFORMED',
+      source_checkout_reference: 'SYNTH-CHECKOUT-MONEY-GARBLED-0005',
+      now,
+    });
+    const garbledResult = await service.authorize({
+      command_reference: 'SYNTH-CMD-PAYMENT-AUTH-GARBLED-0005',
+      context: context(),
+      expected_version: 1,
+      payment_transaction_id: garbled.payment_transaction_id,
+      now: new Date(now.getTime() + 9_000),
+    });
+    const garbledEvidence = await pool.query<{ events: string; exceptions: string }>(
+      `SELECT (SELECT count(*)::text FROM marketplace.payment_events
+                WHERE payment_transaction_id=$1) AS events,
+              (SELECT count(*)::text FROM marketplace.finance_exceptions
+                WHERE operation_reference='SYNTH-PAY-GARBLED-0005'
+                  AND exception_kind='PAYMENT_UNKNOWN') AS exceptions`,
+      [garbled.payment_transaction_id],
+    );
+    check(
+      garbledResult.payment_state === 'UNKNOWN_REQUIRES_RECONCILIATION' &&
+        garbledEvidence.rows[0]?.events === '3' &&
+        garbledEvidence.rows[0].exceptions === '1',
+      `A malformed provider response at authorise was not contained as unknown (${JSON.stringify({
+        state: garbledResult.payment_state,
+        evidence: garbledEvidence.rows[0],
+      })})`,
+    );
+
     const payoutJob = await complete.scheduleDailyPayoutJob({ context: context(), now });
     const payoutJobReplay = await complete.scheduleDailyPayoutJob({ context: context(), now });
     check(
@@ -444,9 +569,11 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
         (SELECT count(*)::text FROM marketplace.finance_exceptions WHERE exception_kind='PAYMENT_UNKNOWN') AS exceptions,
         (SELECT (sum(debit_minor)-sum(credit_minor))::text FROM marketplace.ledger_entries) AS imbalance`,
     );
+    // Three unknowns, each opened by the walk that made it: the provider's
+    // UNKNOWN at authorise, the void it did not answer, the garbled authorise.
     check(
-      evidence.rows[0]?.exceptions === '1' && evidence.rows[0].imbalance === '0',
-      'Unknown-result evidence or ledger balance is incomplete',
+      evidence.rows[0]?.exceptions === '3' && evidence.rows[0].imbalance === '0',
+      `Unknown-result evidence or ledger balance is incomplete (${JSON.stringify(evidence.rows[0])})`,
     );
     let protectedHistory = false;
     try {
