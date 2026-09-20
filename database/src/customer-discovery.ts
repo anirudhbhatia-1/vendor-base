@@ -433,10 +433,17 @@ export class CustomerDiscoveryService {
                    AND $3::timestamptz::time BETWEEN h.opens_at AND h.closes_at
               ) AS is_open_now
          FROM origin a
-         JOIN marketplace.vendor_service_zones z
-           ON z.lifecycle_state = 'ACTIVE' AND ST_Covers(z.boundary, a.coordinates)
          JOIN marketplace.vendor_locations l
-           ON l.vendor_location_id = z.vendor_location_id AND l.lifecycle_state = 'ACTIVE'
+           ON l.lifecycle_state = 'ACTIVE'
+          -- A store reaches the address if any of its zones covers it. Joining
+          -- the zones themselves listed a store once per covering zone, so a
+          -- shop with two zones over one street appeared twice on the home
+          -- screen (React: "two children with the same key").
+          AND EXISTS (
+            SELECT 1 FROM marketplace.vendor_service_zones z
+             WHERE z.vendor_location_id = l.vendor_location_id
+               AND z.lifecycle_state = 'ACTIVE' AND ST_Covers(z.boundary, a.coordinates)
+          )
          JOIN marketplace.vendor_publication_cases p
            ON p.vendor_location_id = l.vendor_location_id AND p.lifecycle_state = 'PUBLISHED'
         ORDER BY distance_meters ASC, l.vendor_location_id ASC
@@ -573,10 +580,13 @@ export class CustomerDiscoveryService {
               COALESCE(item.availability_state IN ('AVAILABLE','LOW_STOCK','VENDOR_CONFIRMS'), false)
                 AS is_available
          FROM origin a
-         JOIN marketplace.vendor_service_zones z
-           ON z.lifecycle_state = 'ACTIVE' AND ST_Covers(z.boundary, a.coordinates)
          JOIN marketplace.vendor_locations l
-           ON l.vendor_location_id = z.vendor_location_id AND l.lifecycle_state = 'ACTIVE'
+           ON l.lifecycle_state = 'ACTIVE'
+          AND EXISTS (
+            SELECT 1 FROM marketplace.vendor_service_zones z
+             WHERE z.vendor_location_id = l.vendor_location_id
+               AND z.lifecycle_state = 'ACTIVE' AND ST_Covers(z.boundary, a.coordinates)
+          )
          JOIN marketplace.vendor_publication_cases pub
            ON pub.vendor_location_id = l.vendor_location_id AND pub.lifecycle_state = 'PUBLISHED'
          JOIN marketplace.catalogue_products p

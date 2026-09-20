@@ -87,6 +87,19 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
     const addressId = address.rows[0]?.customer_address_id;
     check(typeof addressId === 'string', 'Fixture address was not created');
 
+    // A second zone over the same street: the nearest store now reaches the
+    // address twice over, and must still be listed once. Joining the zones
+    // themselves listed it once per covering zone.
+    await pool.query(
+      `INSERT INTO marketplace.vendor_service_zones
+         (service_zone_id,vendor_location_id,zone_name,operating_timezone,boundary,
+          lifecycle_state,request_id,correlation_id)
+       SELECT $1, vendor_location_id, 'SYNTH Second Zone', operating_timezone, boundary,
+              'ACTIVE', request_id, correlation_id
+         FROM marketplace.vendor_service_zones WHERE vendor_location_id=$2 LIMIT 1`,
+      [createUuidV7(), near.locationId],
+    );
+
     // 1. Discovery returns only the eligible, published, in-zone store, nearest first.
     const stores = await discovery.discoverStores({
       context: context(customerId),
@@ -97,7 +110,9 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
       stores.length === 2 &&
         stores[0]?.vendor_location_id === near.locationId &&
         stores[1]?.vendor_location_id === midtown.locationId,
-      'Discovery did not resolve exactly the in-zone published stores, nearest first',
+      `Discovery did not resolve exactly the in-zone published stores once each, nearest first (${JSON.stringify(
+        stores.map((store) => store.vendor_location_id),
+      )})`,
     );
     // D-17: the distance a store is listed at is the road, and it says where
     // it came from. No maps provider is configured here, so the road is the
@@ -418,7 +433,7 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
     });
     check(
       results.length === 1 && results[0]?.is_available === true,
-      'Search did not resolve the available product for the eligible store',
+      `Search did not resolve the available product for the eligible store once (${results.length})`,
     );
 
     // The same ranked search, before sign-in, from the same point.
