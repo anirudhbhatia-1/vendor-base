@@ -337,12 +337,24 @@ export type VendorOrderSummary = {
   location_name: string;
   order_reference: string;
   lifecycle_state: string;
+  fulfilment_method: FulfilmentMethod | null;
   total_minor: number;
+  version: number;
 };
 
 export type CheckoutGroup = {
   checkout_group_id: string;
+  checkout_reference: string;
+  created_at: string;
+  /**
+   * The summary across the group's orders (PROCESSING, PARTIALLY_ACCEPTED,
+   * ACTIVE, PARTIALLY_COMPLETED, COMPLETED, PARTIALLY_CANCELLED, CANCELLED)
+   * or, until the payment has authorised, the payment's own state
+   * (PROCESSING, PAYMENT_UNKNOWN, CANCELLED). Derived on every read.
+   */
   lifecycle_state: string;
+  /** The group's own, stored, payment-level state. */
+  payment_lifecycle_state: string;
   total_minor: number;
   orders: readonly VendorOrderSummary[];
 };
@@ -365,6 +377,8 @@ export type CustomerOrderGroup = {
   created_at: string;
   /** The projection across children — never a state a child can be set from. */
   lifecycle_state: string;
+  /** The group's own, stored, payment-level state. */
+  payment_lifecycle_state: string;
   total_minor: number;
   vendor_orders: readonly CustomerOrderEntry[];
 };

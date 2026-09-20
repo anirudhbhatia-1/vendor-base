@@ -11,6 +11,7 @@ import { Pool, type PoolClient } from 'pg';
 import { calculateCheckoutPricing } from './checkout-pricing.js';
 import { resolveFinancialPolicy } from './financial-policy.js';
 import { releaseReservationsLocked } from './inventory-reservations.js';
+import { deriveCheckoutGroupState } from './checkout-group-state.js';
 import { promiseWindow, RoutingService, type RouteLeg } from './routing.js';
 import type { SubstitutionPreference } from './customer-cart.js';
 import {
@@ -288,17 +289,20 @@ type BlockedGroupProjection = {
   readonly reason_code: string;
   readonly vendor_location_id: string;
 };
-type CheckoutGroupProjection = Record<string, unknown> & {
+type CheckoutGroupProjection = {
   readonly checkout_group_id: string;
+  readonly checkout_reference: string;
   readonly checkout_quote_id: string;
+  readonly created_at: Date;
   readonly lifecycle_state: string;
   readonly payment_transaction_id: string;
   readonly total_minor: string | number;
   readonly version: number;
 };
-type VendorOrderProjection = Record<string, unknown> & {
+type VendorOrderProjection = {
   readonly accept_by: Date | null;
   readonly checkout_group_id: string;
+  readonly fulfilment_method: string | null;
   readonly lifecycle_state: string;
   readonly location_name: string;
   readonly order_reference: string;
@@ -1637,42 +1641,69 @@ export class GroupedCheckoutService {
       blocked_groups: blocked.rows,
     };
   }
+  /**
+   * The group as its customer sees it: what it is (derived from its orders,
+   * see `deriveCheckoutGroupState`), what it cost, and each shop's order by
+   * name, reference and state. Every field is named. This used to spread the
+   * whole group row and every column of every order row -- the idempotency
+   * key, request ids, the shop's decline note, the staff member who delivered,
+   * and the pickup and delivery code hashes, which are plain sha256 of six
+   * digits and so are the codes themselves.
+   */
   async #projectCheckout(client: Pick<PoolClient, 'query'>, id: string) {
     const c = await client.query<CheckoutGroupProjection>(
-      `SELECT * FROM marketplace.checkout_groups WHERE checkout_group_id=$1`,
+      `SELECT checkout_group_id, checkout_reference, checkout_quote_id, created_at,
+              lifecycle_state, payment_transaction_id, total_minor, version
+         FROM marketplace.checkout_groups WHERE checkout_group_id=$1`,
       [id],
     );
     const orders = await client.query<VendorOrderProjection>(
-      `SELECT vendor_order.*, location.location_name
+      `SELECT vendor_order.vendor_order_id, vendor_order.checkout_group_id,
+              vendor_order.vendor_location_id, vendor_order.order_reference,
+              vendor_order.lifecycle_state, vendor_order.total_minor, vendor_order.accept_by,
+              vendor_order.version, location.location_name, cart_group.fulfilment_method
          FROM marketplace.vendor_orders vendor_order
          JOIN marketplace.vendor_locations location
            ON location.vendor_location_id = vendor_order.vendor_location_id
+         JOIN marketplace.checkout_groups grouping
+           ON grouping.checkout_group_id = vendor_order.checkout_group_id
+         LEFT JOIN marketplace.checkout_quote_groups quote_group
+           ON quote_group.checkout_quote_id = grouping.checkout_quote_id
+          AND quote_group.vendor_location_id = vendor_order.vendor_location_id
+         LEFT JOIN marketplace.cart_vendor_groups cart_group
+           ON cart_group.cart_vendor_group_id = quote_group.cart_vendor_group_id
         WHERE vendor_order.checkout_group_id=$1
         ORDER BY location.location_name, vendor_order.vendor_location_id`,
       [id],
     );
     const checkout = c.rows[0];
     if (!checkout) throw new CheckoutNotFoundError();
-    const states = orders.rows.map((order) => order.lifecycle_state);
-    const derivedState =
-      states.length > 0 && states.every((state: string) => state === 'CANCELLED')
-        ? 'CANCELLED'
-        : states.some((state: string) => state === 'CANCELLED')
-          ? 'PARTIALLY_CANCELLED'
-          : checkout.lifecycle_state;
+    const derivedState = deriveCheckoutGroupState({
+      payment_state: checkout.lifecycle_state,
+      orders: orders.rows,
+    });
     return {
-      ...checkout,
       checkout_group_id: parseUuidV7(checkout.checkout_group_id),
+      checkout_reference: checkout.checkout_reference,
       checkout_quote_id: parseUuidV7(checkout.checkout_quote_id),
+      created_at: checkout.created_at,
+      lifecycle_state: derivedState,
+      payment_lifecycle_state: checkout.lifecycle_state,
       derived_lifecycle_state: derivedState,
       payment_transaction_id: parseUuidV7(checkout.payment_transaction_id),
       total_minor: Number(checkout.total_minor),
+      version: checkout.version,
       orders: orders.rows.map((order) => ({
-        ...order,
-        checkout_group_id: parseUuidV7(order.checkout_group_id),
-        total_minor: Number(order.total_minor),
-        vendor_location_id: parseUuidV7(order.vendor_location_id),
         vendor_order_id: parseUuidV7(order.vendor_order_id),
+        checkout_group_id: parseUuidV7(order.checkout_group_id),
+        vendor_location_id: parseUuidV7(order.vendor_location_id),
+        location_name: order.location_name,
+        order_reference: order.order_reference,
+        lifecycle_state: order.lifecycle_state,
+        fulfilment_method: order.fulfilment_method,
+        total_minor: Number(order.total_minor),
+        accept_by: order.accept_by,
+        version: order.version,
       })),
     };
   }

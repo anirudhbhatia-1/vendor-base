@@ -1556,6 +1556,37 @@ Two things the walk needed that the repository does not provide: an admin accoun
 
 **Verification.** `pnpm db:verify` exit 0 — 91 migrations; `vendor_fulfilment` 176 assertions (175); `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 556 pass / 0 fail; `pnpm test:integration` exit 0; the API walk 163/163 and `pnpm test:e2e` 23 passed with `LIVE_SUPABASE_ACCEPTANCE=true ACCEPTANCE_SEED_FIXTURES=true` against the running stack.
 
+## Run 47 (20 September 2026) — step 7.7, group and child-order projections
+
+Three of the five requirements were met. The customer's group projection leaked what it should never have carried, and the group's summary state — the one thing the projection is for — was never derived. Migration 0092; three connected assertions and four unit tests; four mutation probes, all caught.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Return overall group summary | Returned. **Not a summary**: `lifecycle_state` was the stored payment state; `derived_lifecycle_state` counted CANCELLED children alone and nothing read it — P47-02. |
+| 2 | Actor-specific child-order views | Met: the vendor's `VendorOrderSummary` and the partner's `DeliveryAssignmentRecord` are named projections (the partner's drop address only while in custody); the customer has tracking and receipt per order; the admin has the monitor. |
+| 3 | Prevent sibling product, support, or financial leakage | Sibling isolation held (the vendor list is scoped by location, the pick list by order and location). **The customer's own projection leaked internals**: `SELECT *` of the group and of every order — P47-01. |
+| 4 | Derive group status from children without owning their transitions | **Not derived** where it was read: the order history and the admin monitor showed the stored payment state, so a group of delivered orders read "In progress" for good — P47-02. |
+| 5 | Cursor-based history and request references | Met: `history()` pages by event id with a next cursor and carries request and correlation ids. |
+
+**P47-01 — the projection that carried everything.** `#projectCheckout` spread the whole `checkout_groups` row (idempotency key, request and correlation ids) and, for each order, `vendor_order.*`: `pickup_otp_hash`, `delivery_otp_hash`, `pickup_otp_issued_by`, `vendor_delivery_by_user_id`, `decline_note`, `package_condition_note` and every timestamp — to the customer, on placement and on every `GET`. The hashes are plain SHA-256 of a six-digit code: a million hashes take milliseconds, so the customer held the partner's pickup code. The projection now names its fields: group id, reference, quote id, created time, summary state, payment state, total, version; per order id, store, reference, state, method, total, accept-by, version. The verifier pins the two field lists.
+
+**P47-02 — the summary nobody derived.** A group owns nothing but its payment; what it *is* after that is what its orders are. The PRD names seven summaries and 0049 had copy for six of them, but nothing computed them: the customer's order history and the admin monitor showed `checkout_groups.lifecycle_state` — `ACTIVE` from authorisation to the end of time — and the one derivation, in the placement projection, counted CANCELLED children only (an EXPIRED order, the shop never answering, left its group "In progress") and was returned as a field nothing read. `deriveCheckoutGroupState` (`checkout-group-state.ts`, four unit tests) is the one derivation: the payment's own state until it authorises; then all ended → `CANCELLED`, any ended → `PARTIALLY_CANCELLED` (what the customer needs to know first), all complete → `COMPLETED`, any complete → `PARTIALLY_COMPLETED`, all `PLACED` → `PROCESSING`, any `PLACED` → `PARTIALLY_ACCEPTED`, else `ACTIVE` — where a collected order is complete at `PICKED_UP` and a delivered one at `DELIVERED` (the same state is the partner holding a delivery), and `EXPIRED` and `RETURNED` are endings. It serves the placement projection, the order history and the admin monitor; the payment state travels beside it. 0092 adds the seventh label.
+
+**Mutation results.** Four probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Every order column spread again (old) | *The customer's group projection carries fields it should not ({… "delivery_otp_hash","pickup_otp_hash","decline_note","vendor_delivery_by_user_id" …})* |
+| The stored payment state as the history's summary (old) | *Customer history does not summarise each group from its orders ({"two_store":"ACTIVE","collection":"ACTIVE","self_delivered":"ACTIVE" …})* |
+| A collected order's PICKED_UP read as a delivery in custody | same, `"collection":"ACTIVE"` |
+| EXPIRED not an ending (the old derivation) | the unit spec: *expected PARTIALLY_CANCELLED, actual ACTIVE* |
+
+**Forward finding (the OTP steps, 8.x and 9.x).** The pickup and delivery codes are stored as plain SHA-256 of six digits (`createHash('sha256').update(otp)`); a keyed hash (HMAC with a server secret) would make any leaked hash worthless. The projection no longer leaks them; the hashing is the OTP steps' to harden.
+
+**Verification.** `pnpm db:verify` exit 0 — 92 migrations, full ladder; `grouped_checkout` 107 assertions (105 after run 46), `vendor_fulfilment` 177 (176); launch readiness 78 with the new label en and hi. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 560 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 7.7: VERIFIED_LOCAL**, with the keyed-hash note carried for the OTP steps.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

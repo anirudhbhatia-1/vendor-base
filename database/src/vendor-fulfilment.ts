@@ -1,3 +1,4 @@
+import { deriveCheckoutGroupState } from './checkout-group-state.js';
 import { createDatabasePool } from './database-pool.js';
 import { createHash, randomInt } from 'node:crypto';
 import {
@@ -2210,6 +2211,7 @@ export class VendorFulfilmentService {
       readonly checkout_reference: string;
       readonly created_at: Date;
       readonly lifecycle_state: string;
+      readonly payment_lifecycle_state: string;
       readonly total_minor: number;
       readonly vendor_orders: readonly CustomerOrderEntry[];
     }[]
@@ -2301,9 +2303,20 @@ export class VendorFulfilmentService {
         }),
       );
     }
+    // The group's state is a summary of its orders (7.7), never the stored
+    // payment state on its own: read as that, a group of delivered orders
+    // stayed "In progress" for good.
     return Object.freeze(
       [...byGroup.values()].map((group) =>
-        Object.freeze({ ...group, vendor_orders: Object.freeze(group.vendor_orders) }),
+        Object.freeze({
+          ...group,
+          payment_lifecycle_state: group.lifecycle_state,
+          lifecycle_state: deriveCheckoutGroupState({
+            payment_state: group.lifecycle_state,
+            orders: group.vendor_orders,
+          }),
+          vendor_orders: Object.freeze(group.vendor_orders),
+        }),
       ),
     );
   }

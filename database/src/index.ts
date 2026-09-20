@@ -22,6 +22,7 @@ export * from './customer-discovery.js';
 export * from './customer-cart.js';
 export * from './checkout-pricing.js';
 export * from './grouped-checkout.js';
+export * from './checkout-group-state.js';
 export * from './vendor-staff.js';
 export * from './vendor-fulfilment.js';
 export * from './partner-lifecycle.js';

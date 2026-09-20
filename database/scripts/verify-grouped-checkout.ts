@@ -379,6 +379,48 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       now: new Date(now.getTime() + 2_000),
     });
     check(placed.orders.length === 2, 'Checkout did not create exactly one order per valid store');
+    // 7.7: the group as the customer sees it names every field. It used to
+    // spread the group row and every order column -- the idempotency key,
+    // request ids, the shop's decline note, and the pickup and delivery code
+    // hashes (plain sha256 of six digits, so the codes themselves).
+    const groupFields = Object.keys(placed).sort();
+    const orderFields = Object.keys(placed.orders[0] ?? {}).sort();
+    check(
+      JSON.stringify(groupFields) ===
+        JSON.stringify([
+          'checkout_group_id',
+          'checkout_quote_id',
+          'checkout_reference',
+          'created_at',
+          'derived_lifecycle_state',
+          'lifecycle_state',
+          'orders',
+          'payment_lifecycle_state',
+          'payment_transaction_id',
+          'total_minor',
+          'version',
+        ]) &&
+        JSON.stringify(orderFields) ===
+          JSON.stringify([
+            'accept_by',
+            'checkout_group_id',
+            'fulfilment_method',
+            'lifecycle_state',
+            'location_name',
+            'order_reference',
+            'total_minor',
+            'vendor_location_id',
+            'vendor_order_id',
+            'version',
+          ]),
+      `The customer's group projection carries fields it should not (${JSON.stringify({ groupFields, orderFields })})`,
+    );
+    // Nobody has accepted yet: the group is being processed, whatever the
+    // payment says.
+    check(
+      placed.lifecycle_state === 'PROCESSING' && placed.payment_lifecycle_state === 'ACTIVE',
+      `A freshly placed group is not summarised from its orders (${placed.lifecycle_state} / ${placed.payment_lifecycle_state})`,
+    );
     const replay = await checkout.place({
       context: customerContext(customerId),
       checkout_quote_id: quote.checkout_quote_id,
@@ -907,7 +949,7 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
           seen.submitted === '1' &&
           new Date(String(seen.hold_expires_at)) >= placedHoldFloor &&
           seen.row_locks === '0' &&
-          recorded.placed.lifecycle_state === 'ACTIVE' &&
+          recorded.placed.payment_lifecycle_state === 'ACTIVE' &&
           recorded.placed.orders.length === 1,
         `The submission was not committed before the provider was asked, or a row was held while asking (${JSON.stringify(seen)})`,
       );
@@ -1057,7 +1099,7 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       );
       check(
         earlySweep === 0 &&
-          recovered.placed.lifecycle_state === 'ACTIVE' &&
+          recovered.placed.payment_lifecycle_state === 'ACTIVE' &&
           recovered.placed.orders.length === 1 &&
           recoveredEvidence.payment_state === 'AUTHORIZED' &&
           recoveredEvidence.conflicts === '1' &&
@@ -1105,7 +1147,7 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         [lateCall.placed.checkout_group_id, lateCall.placed.payment_transaction_id],
       );
       check(
-        lateCall.placed.lifecycle_state === 'ACTIVE' &&
+        lateCall.placed.payment_lifecycle_state === 'ACTIVE' &&
           lateCall.placed.orders.length === 1 &&
           JSON.stringify(lateCallTrail.rows[0]?.events) ===
             '["AUTHORIZATION_STARTED:AUTHORIZING","RECONCILIATION_RESULT:UNKNOWN_REQUIRES_RECONCILIATION","AUTHORIZATION_RESULT:AUTHORIZED"]' &&

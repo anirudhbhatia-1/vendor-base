@@ -164,6 +164,7 @@ assert(
       '0089_platform_system_user',
       '0090_configuration_read',
       '0091_vendor_onboarding_read',
+      '0092_group_summary_state',
     ]),
   'Unexpected reviewed migrations',
 );

@@ -26,6 +26,12 @@ const STATE_PRESENTATION: Readonly<
 > = {
   // Checkout group
   PROCESSING: { tone: 'progress', glyph: '◐', label: 'Processing', key: 'state.processing' },
+  PARTIALLY_ACCEPTED: {
+    tone: 'progress',
+    glyph: '◔',
+    label: 'Some stores confirmed',
+    key: 'state.partially_accepted',
+  },
   ACTIVE: { tone: 'progress', glyph: '◐', label: 'In progress', key: 'state.active' },
   PARTIALLY_COMPLETED: {
     tone: 'progress',

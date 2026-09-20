@@ -163,7 +163,7 @@
       "name": "Vendor-order isolation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Every domain service operates on individual vendor_order_id",
+      "notes": "Every domain service operates on individual vendor_order_id. Run 47: the customer's group projection names its fields (it used to spread every order column, code hashes included)",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -177,6 +177,7 @@
       "phase_steps": ["7.7"],
       "verified_by": [
         "apps/api/src/customer-order-controls.spec.ts",
+        "database/scripts/verify-grouped-checkout.ts",
         "e2e/cross-role-journey.spec.ts"
       ]
     },
@@ -1387,7 +1388,7 @@
       "name": "Group order overview",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Groups with vendor_orders rendered",
+      "notes": "Groups with vendor_orders rendered. Run 47: the group's state is derived from its orders on every read (deriveCheckoutGroupState: the PRD's seven summaries) in the placement projection, the order history and the admin monitor; the payment state travels beside it",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1401,7 +1402,10 @@
       "phase_steps": ["7.7"],
       "verified_by": [
         "apps/api/src/customer-order-controls.spec.ts",
-        "apps/customer-pwa/app/customer-panels.spec.ts"
+        "apps/customer-pwa/app/customer-panels.spec.ts",
+        "database/scripts/verify-grouped-checkout.ts",
+        "database/scripts/verify-vendor-fulfilment.ts",
+        "database/src/checkout-group-state.spec.ts"
       ]
     },
     {

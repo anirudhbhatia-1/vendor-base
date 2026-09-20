@@ -1,3 +1,4 @@
+import { deriveCheckoutGroupState } from './checkout-group-state.js';
 import { createDatabasePool } from './database-pool.js';
 import { createHash } from 'node:crypto';
 import {
@@ -80,11 +81,34 @@ export class AdminControlPlaneService {
   }) {
     admin(input.context);
     if (input.stalled_only) return this.#stalledOrders(input.now ?? new Date());
-    const r = await this.#pool.query(
-      `SELECT cg.*,COALESCE(json_agg(json_build_object('vendor_order_id',o.vendor_order_id,'reference',o.order_reference,'state',o.lifecycle_state,'vendor_location_id',o.vendor_location_id) ORDER BY o.order_reference) FILTER(WHERE o.vendor_order_id IS NOT NULL),'[]') orders FROM marketplace.checkout_groups cg LEFT JOIN marketplace.vendor_orders o USING(checkout_group_id) WHERE ($1::uuid IS NULL OR cg.checkout_group_id=$1) GROUP BY cg.checkout_group_id ORDER BY cg.updated_at DESC LIMIT 100`,
+    const r = await this.#pool.query<{
+      lifecycle_state: string;
+      orders: readonly { state: string; fulfilment_method: string | null }[];
+    }>(
+      `SELECT cg.*,COALESCE(json_agg(json_build_object('vendor_order_id',o.vendor_order_id,'reference',o.order_reference,'state',o.lifecycle_state,'vendor_location_id',o.vendor_location_id,'fulfilment_method',cvg.fulfilment_method) ORDER BY o.order_reference) FILTER(WHERE o.vendor_order_id IS NOT NULL),'[]') orders
+         FROM marketplace.checkout_groups cg
+         LEFT JOIN marketplace.vendor_orders o USING(checkout_group_id)
+         LEFT JOIN marketplace.checkout_quote_groups cqg
+           ON cqg.checkout_quote_id=cg.checkout_quote_id AND cqg.vendor_location_id=o.vendor_location_id
+         LEFT JOIN marketplace.cart_vendor_groups cvg USING(cart_vendor_group_id)
+        WHERE ($1::uuid IS NULL OR cg.checkout_group_id=$1)
+        GROUP BY cg.checkout_group_id ORDER BY cg.updated_at DESC LIMIT 100`,
       [input.checkout_group_id ?? null],
     );
-    return { checkout_groups: r.rows };
+    // The monitor shows what a group is, derived from its orders (7.7), next
+    // to the stored payment state it used to show alone.
+    return {
+      checkout_groups: r.rows.map((row) => ({
+        ...row,
+        derived_lifecycle_state: deriveCheckoutGroupState({
+          payment_state: row.lifecycle_state,
+          orders: row.orders.map((order) => ({
+            lifecycle_state: order.state,
+            fulfilment_method: order.fulfilment_method,
+          })),
+        }),
+      })),
+    };
   }
   /**
    * Domain events that exhausted every retry and stopped.

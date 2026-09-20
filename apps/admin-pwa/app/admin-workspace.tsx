@@ -698,7 +698,18 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
             {ordersMonitor.map((entry, idx) => (
               <article key={idx}>
                 <span>
-                  {String(entry['lifecycle_state'] ?? entry['assignment_state'] ?? 'PENDING')}
+                  {/* A group is what its orders are (7.7); the payment's own
+                      state follows in brackets when the two differ. */}
+                  {String(
+                    entry['derived_lifecycle_state'] ??
+                      entry['lifecycle_state'] ??
+                      entry['assignment_state'] ??
+                      'PENDING',
+                  )}
+                  {typeof entry['derived_lifecycle_state'] === 'string' &&
+                  entry['derived_lifecycle_state'] !== entry['lifecycle_state']
+                    ? ` (payment ${String(entry['lifecycle_state'])})`
+                    : ''}
                 </span>
                 <strong>
                   {String(

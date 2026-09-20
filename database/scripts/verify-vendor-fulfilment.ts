@@ -1308,6 +1308,28 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         ),
       'Customer history did not say which orders are collected and which delivered',
     );
+    // 7.7: each group's state is read off its orders, never the stored
+    // payment state alone -- which is ACTIVE for all three and used to be
+    // what the history said. One shop declined and the other delivered;
+    // the collected order was handed over; the self-delivered one arrived.
+    const selfGroupHistory = history.find(
+      (group) => group.checkout_group_id === selfPlaced.checkout_group_id,
+    );
+    const summaries = {
+      two_store: twoStoreGroup.lifecycle_state,
+      collection: collectionGroupHistory.lifecycle_state,
+      self_delivered: selfGroupHistory?.lifecycle_state,
+      payment: [twoStoreGroup, collectionGroupHistory, selfGroupHistory].map(
+        (group) => group?.payment_lifecycle_state,
+      ),
+    };
+    check(
+      summaries.two_store === 'PARTIALLY_CANCELLED' &&
+        summaries.collection === 'COMPLETED' &&
+        summaries.self_delivered === 'COMPLETED' &&
+        summaries.payment.every((state) => state === 'ACTIVE'),
+      `Customer history does not summarise each group from its orders (${JSON.stringify(summaries)})`,
+    );
     const receipt = await fulfilment.getReceipt({
       context: customerContext(customerId),
       vendor_order_id: orderA.vendor_order_id,
