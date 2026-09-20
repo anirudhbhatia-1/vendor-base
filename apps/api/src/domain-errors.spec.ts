@@ -10,6 +10,8 @@ import {
   OtpRateLimitedError,
   PickupOtpMissingError,
   VendorPublicationIncompleteError,
+  CheckoutConflictError,
+  CheckoutPaymentDeclinedError,
 } from '@neighbourhood-store/database';
 import { ERROR_DEFINITIONS } from '@neighbourhood-store/domain-types';
 import { DOMAIN_ERROR_TRANSLATIONS, translateDomainError } from './domain-errors.js';
@@ -59,6 +61,22 @@ test('a coded domain error answers with the code it carries', () => {
     body: { error_code: 'ORDER_STATE_CONFLICT' },
   });
   assert.equal(answer(new AssignmentVersionError('moved on')).status, 409);
+});
+
+test('a checkout answers a decline, a lapsed quote and a changed basket by name', () => {
+  assert.deepEqual(answer(new CheckoutPaymentDeclinedError()), {
+    status: 409,
+    body: { error_code: 'PAYMENT_DECLINED' },
+  });
+  assert.deepEqual(answer(new CheckoutConflictError('Quote expired', 'QUOTE_EXPIRED')).body, {
+    error_code: 'QUOTE_EXPIRED',
+  });
+  assert.deepEqual(answer(new CheckoutConflictError('changed', 'QUOTE_CHANGED')).body, {
+    error_code: 'QUOTE_CHANGED',
+  });
+  assert.deepEqual(answer(new CheckoutConflictError('Inventory hold is unavailable')).body, {
+    error_code: 'ORDER_STATE_CONFLICT',
+  });
 });
 
 test('distinct outcomes keep distinct codes across status classes', () => {

@@ -137,6 +137,149 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       now,
     });
     check(quote.groups.length === 2, 'The two valid store groups were not quoted');
+    // 7.6: the rule each group's order proceeds under is stated by the quote,
+    // is part of what was quoted, and reaches the shop's order line. Its own
+    // customer and its own shelves, so the main walk's quote is untouched.
+    check(
+      quote.groups.every((group) => group.decision_rule === 'ASK_CUSTOMER'),
+      `A quote does not state the substitution rule per group (${JSON.stringify(
+        quote.groups.map((group) => group.decision_rule),
+      )})`,
+    );
+    {
+      const deciderId = createUuidV7();
+      await pool.query(
+        "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
+        [deciderId],
+      );
+      const deciderAddress = createUuidV7();
+      await pool.query(
+        `INSERT INTO marketplace.customer_addresses
+          (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
+         VALUES ($1,$2,'SYNTH-ADDRESS-DECIDER-' || $4,'SYNTH Decider Home','302020',ST_SetSRID(ST_MakePoint(75.81,26.91),4326)::geography,$3,$3)`,
+        [
+          deciderAddress,
+          deciderId,
+          createUuidV7(),
+          deciderId.replaceAll('-', '').slice(-8).toUpperCase(),
+        ],
+      );
+      const decider = customerContext(deciderId);
+      const shelves = [];
+      for (const [index, store] of [stores[0], stores[1]].entries()) {
+        check(store !== undefined, 'Decision fixture store missing');
+        shelves.push(
+          await catalogue.createProduct({
+            context: vendorContext(store.ownerUserId),
+            vendor_location_id: store.locationId,
+            product_reference: `SYNTH-PROD-DECIDE${index}-${deciderId.slice(-6).toUpperCase()}`,
+            title: `SYNTH Decision Product ${index}`,
+            category: 'FRUIT_VEGETABLE',
+            unit_label: 'EACH',
+            tax_basis: 'EXEMPT',
+            variable_weight: false,
+            sku: `SYNTH-SKU-DECIDE${index}-${deciderId.slice(-6).toUpperCase()}`,
+            variant_title: `SYNTH Decision Variant ${index}`,
+            price_minor: 10_000,
+            initial_stock_quantity: 2,
+            low_stock_threshold: 0,
+            now,
+          }),
+        );
+      }
+      const deciderCart = await carts.currentCart({ context: decider, now });
+      await carts.setCartAddress({ context: decider, customer_address_id: deciderAddress, now });
+      for (const [index, store] of [stores[0], stores[1]].entries()) {
+        const shelf = shelves[index];
+        check(store !== undefined && shelf !== undefined, 'Decision fixture missing');
+        await carts.addLine({
+          context: decider,
+          vendor_location_id: store.locationId,
+          catalogue_variant_id: shelf.catalogue_variant_id,
+          quantity: 1,
+          // Store A's line is set at the basket; store B's is left to default.
+          ...(index === 0 ? { substitution_preference: 'NO_SUBSTITUTION' as const } : {}),
+          now,
+        });
+      }
+      const first = await checkout.createQuote({
+        context: decider,
+        cart_id: deciderCart.cart_id,
+        now,
+      });
+      const ruleOf = (q: typeof first, store: (typeof stores)[number] | undefined) =>
+        q.groups.find((group) => group.vendor_location_id === store?.locationId)?.decision_rule;
+      check(
+        ruleOf(first, stores[0]) === 'NO_SUBSTITUTION' &&
+          ruleOf(first, stores[1]) === 'ASK_CUSTOMER',
+        `The quote does not state each group's rule (${JSON.stringify(first.groups.map((g) => g.decision_rule))})`,
+      );
+      // Changing a rule is changing what was quoted: the quote is replaced,
+      // and the new one states and snapshots the new rule.
+      const lineB = (await carts.currentCart({ context: decider, now })).groups.find(
+        (group) => group.vendor_location_id === stores[1]?.locationId,
+      )?.lines[0];
+      check(lineB !== undefined, 'Store B has no cart line');
+      await carts.setLineQuantity({
+        context: decider,
+        cart_line_id: lineB.cart_line_id,
+        expected_version: lineB.version,
+        quantity: 1,
+        substitution_preference: 'ALLOW_SAME_STORE',
+        now: new Date(now.getTime() + 500),
+      });
+      const second = await checkout.createQuote({
+        context: decider,
+        cart_id: deciderCart.cart_id,
+        now: new Date(now.getTime() + 500),
+      });
+      const snapshot = await pool.query<{ rules: string[] }>(
+        `SELECT array_agg(l.substitution_preference ORDER BY g.vendor_location_id) AS rules
+           FROM marketplace.checkout_quote_lines l
+           JOIN marketplace.checkout_quote_groups g USING (checkout_quote_group_id)
+          WHERE g.checkout_quote_id=$1`,
+        [second.checkout_quote_id],
+      );
+      const expectedRules = [stores[0], stores[1]]
+        .map((store, index) => ({
+          id: store?.locationId ?? '',
+          rule: index === 0 ? 'NO_SUBSTITUTION' : 'ALLOW_SAME_STORE',
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((entry) => entry.rule);
+      check(
+        second.checkout_quote_id !== first.checkout_quote_id &&
+          ruleOf(second, stores[1]) === 'ALLOW_SAME_STORE' &&
+          JSON.stringify(snapshot.rows[0]?.rules) === JSON.stringify(expectedRules),
+        `Changing a line's rule did not re-quote with the rule stated and snapshotted (${JSON.stringify(
+          {
+            replaced: second.checkout_quote_id !== first.checkout_quote_id,
+            rules: second.groups.map((g) => g.decision_rule),
+            snapshot: snapshot.rows[0],
+          },
+        )})`,
+      );
+      // The shop's order line carries the rule the customer set.
+      const decided = await checkout.place({
+        context: decider,
+        checkout_quote_id: second.checkout_quote_id,
+        provider_scenario: 'SUCCESS',
+        idempotency_key: `phase7-decide-${deciderId}`,
+        now: new Date(now.getTime() + 1_000),
+      });
+      const orderRules = await pool.query<{ rules: string[] }>(
+        `SELECT array_agg(l.substitution_preference ORDER BY o.vendor_location_id) AS rules
+           FROM marketplace.vendor_order_lines l
+           JOIN marketplace.vendor_orders o USING (vendor_order_id)
+          WHERE o.checkout_group_id=$1`,
+        [decided.checkout_group_id],
+      );
+      check(
+        decided.orders.length === 2 &&
+          JSON.stringify(orderRules.rows[0]?.rules) === JSON.stringify(expectedRules),
+        `The order lines do not carry the customer's substitution rule (${JSON.stringify(orderRules.rows[0])})`,
+      );
+    }
     // 7.1 at the connected layer: the amounts the quote stores are the pricing
     // module's, fed the store's real route distance and the active policy, and
     // the policy version that priced it is stamped on the quote. Every line is

@@ -31,6 +31,12 @@ import {
   quoteBlockedSentence,
   quotePromiseSentence,
 } from './basket-copy';
+import {
+  bufferSentence,
+  classifyPlacementFailure,
+  decisionRuleSentence,
+  fulfilmentSentence,
+} from './checkout-outcome';
 import { useCart } from './cart-store';
 import { customerApiClient } from './customer-session';
 import { displayLabel, shortReference } from './display';
@@ -287,6 +293,11 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
   const [placed, setPlaced] = useState<CheckoutGroup | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('UPI');
   const [busy, setBusy] = useState(false);
+  // The placement in flight, the one whose answer never came, and the one
+  // the bank declined: three things the screen has to say differently.
+  const [placing, setPlacing] = useState(false);
+  const [interrupted, setInterrupted] = useState(false);
+  const [declined, setDeclined] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -339,7 +350,10 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
   async function place() {
     if (!quote) return;
     setBusy(true);
+    setPlacing(true);
     setFailure(null);
+    setInterrupted(false);
+    setDeclined(false);
     try {
       const client = await customerApiClient();
       const result = await client.checkout.place({
@@ -353,9 +367,39 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
       setQuote(null);
       await refresh();
     } catch (cause) {
-      setFailure(cause instanceof Error ? cause.message : 'The order could not be placed.');
+      const outcome = classifyPlacementFailure(cause);
+      switch (outcome.kind) {
+        case 'declined':
+          // The quote is retired by the decline; a fresh one is fetched under
+          // the notice so the customer can pay another way at once.
+          setDeclined(true);
+          void createQuote();
+          break;
+        case 'quote_expired':
+          void createQuote();
+          break;
+        case 'quote_changed':
+          setNotice(
+            t(
+              'customer.checkout.changed.body',
+              'Your basket changed since that quote, so here is a fresh one.',
+            ),
+          );
+          await refresh();
+          void createQuote();
+          break;
+        case 'interrupted':
+          // The quote stays: asking again with the same key is answered with
+          // whatever happened, and never with a second order.
+          setInterrupted(true);
+          break;
+        case 'refused':
+          setFailure(outcome.message);
+          break;
+      }
     } finally {
       setBusy(false);
+      setPlacing(false);
     }
   }
 
@@ -449,6 +493,35 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
 
       {cartError ? <Notice tone="danger">{cartError}</Notice> : null}
       {notice ? <Notice tone="information">{notice}</Notice> : null}
+      {declined ? (
+        <Notice live="assertive" tone="danger">
+          <strong>{t('customer.checkout.declined.title', 'Your bank declined the payment')}</strong>{' '}
+          {t(
+            'customer.checkout.declined.body',
+            'Nothing was charged and your basket is unchanged. Choose another way to pay and try again with the fresh quote below.',
+          )}
+        </Notice>
+      ) : null}
+      {interrupted ? (
+        <Notice live="assertive" tone="warning">
+          <strong>{t('customer.checkout.interrupted.title', 'We did not hear back')}</strong>{' '}
+          {t(
+            'customer.checkout.interrupted.body',
+            'The connection dropped before we could tell you what happened. Checking does not place the order or charge you twice.',
+          )}{' '}
+          <Button busy={busy} onClick={() => void place()} size="small" variant="secondary">
+            {t('customer.checkout.interrupted.check', 'Check what happened')}
+          </Button>
+        </Notice>
+      ) : null}
+      {placing ? (
+        <Notice live="polite" tone="information">
+          {t(
+            'customer.checkout.processing',
+            'Placing your orders and asking your bank… keep this page open.',
+          )}
+        </Notice>
+      ) : null}
 
       {groups.map((group) => (
         <GroupCard group={group} key={group.cart_vendor_group_id} />
@@ -506,7 +579,7 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
       {failure ? (
         <ErrorState
           onRetry={() => void createQuote()}
-          retryLabel={t('customer.retry', 'Try again')}
+          retryLabel={t('customer.quote.refresh', 'Get a fresh quote')}
           title={failure}
         />
       ) : null}
@@ -540,6 +613,12 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
                   : ''}
               </p>
               <p className="quote-promise">{quotePromiseSentence(group, t)}</p>
+              <p className="quote-breakdown">
+                {t('customer.quote.method', 'How you get it')}:{' '}
+                {fulfilmentSentence(group.fulfilment_method, t)} ·{' '}
+                {t('customer.quote.decision', 'If something is out of stock')}:{' '}
+                {decisionRuleSentence(group.decision_rule, t)}
+              </p>
             </Card>
           ))}
 
@@ -596,19 +675,10 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
               <strong>{t('customer.quote.authorize', 'You authorise')}</strong>
               <strong className="quote-total">{formatMoneyMinor(quote.total_minor)}</strong>
             </div>
-            {quote.authorization_buffer_minor > 0 ? (
-              <p className="ns-field__hint">
-                {t('customer.quote.buffer', 'Includes a buffer of')}{' '}
-                {formatMoneyMinor(quote.authorization_buffer_minor)}{' '}
-                {t(
-                  'customer.quote.buffer.detail',
-                  'for loose items weighed at the shop. Anything unused is released.',
-                )}
-              </p>
-            ) : null}
+            <p className="ns-field__hint">{bufferSentence(quote, formatMoneyMinor, t)}</p>
           </Card>
 
-          {quoteExpired ? (
+          {interrupted ? null : quoteExpired ? (
             <Button block busy={busy} onClick={() => void createQuote()} size="large">
               {t('customer.quote.refresh', 'Get a fresh quote')}
             </Button>

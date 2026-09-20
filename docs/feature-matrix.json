@@ -1219,7 +1219,7 @@
       "name": "Combined checkout summary",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "All groups, blocked groups, total, buffer shown",
+      "notes": "All groups, blocked groups, total, buffer shown. Run 46: each group's method and substitution rule (decision_rule, snapshotted on quote and order lines) stated; buffer said either way; decline named (PAYMENT_DECLINED) with a fresh quote under it; a lost answer re-asks with the same key",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1233,7 +1233,9 @@
       "phase_steps": ["7.6"],
       "verified_by": [
         "apps/api/src/grouped-checkout.controller.spec.ts",
-        "apps/customer-pwa/app/customer-panels.spec.ts"
+        "apps/customer-pwa/app/checkout-outcome.spec.ts",
+        "apps/customer-pwa/app/customer-panels.spec.ts",
+        "database/scripts/verify-grouped-checkout.ts"
       ]
     },
     {
@@ -1348,6 +1350,7 @@
       },
       "phase_steps": ["7.4", "7.8"],
       "verified_by": [
+        "apps/customer-pwa/app/checkout-outcome.spec.ts",
         "apps/customer-pwa/app/customer-panels.spec.ts",
         "database/scripts/verify-grouped-checkout.ts",
         "database/scripts/verify-money-lifecycle.ts",

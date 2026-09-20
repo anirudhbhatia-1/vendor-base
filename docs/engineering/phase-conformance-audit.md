@@ -1496,6 +1496,44 @@ Two of the five requirements were met. The provider was asked inside the transac
 
 **Step 7.5: VERIFIED_LOCAL**, with the status-call and hosted-checkout notes carried for the real-adapter step.
 
+## Run 46 (20 September 2026) — step 7.6, customer checkout UI
+
+Two of the five requirements were met. The quote card showed neither the method nor the decision rule, and the decision rule was not a thing the quote knew; the buffer was explained only when there was one; a declined payment reached the customer in a shop's words with a "Try again" that fetched a fresh basket — and so did an answer that never arrived, which is how a lost confirmation becomes a second order. Migration 0088; nine connected assertions, five unit tests (four on the screen's logic, one on the API's codes) and two panel assertions; three mutation probes, all caught; the placement verified live in the browser against the synthetic project.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Show every store group, amount, method, promise, decision rule, blocked issue | Group, amounts, promise (D-17) and blocked issue (run 43) shown. **Method and decision rule not shown**, and **`decision_rule` was a fixed sentence** ("Quoted only when store, minimum, service area, price and stock validate"): the customer's substitution rule, chosen per basket line, was not on the quote, not in the content digest and not on the shop's order line — P46-03. |
+| 2 | Combined authorization and buffer explanation | Total shown. **Buffer explained only when non-zero**; the local buffer is always zero, so "You authorise ₹297" stood alone — P46-03. |
+| 3 | UPI, card, wallet through the approved provider | Met: the three choices, the chosen one sent as `payment_method`. |
+| 4 | Disable COD | Met: absent from the choices, refused by the server, said on the screen. |
+| 5 | Handle processing, provider handoff, pending/unknown, decline, expiry, partial blockage, success, reconnect | Unknown, expiry (countdown), partial blockage and success held. **Processing was a busy button and nothing said**; **decline read "That step is not available yet…"** — P46-01; **a lost answer was followed by a fresh quote** — P46-02. Provider handoff: not modelled by the synthetic provider — scope note. |
+
+**P46-01 — the decline in a shop's words.** `CheckoutPaymentDeclinedError` translated to 409 `ORDER_STATE_CONFLICT`, whose sentence is written for a vendor's console; so did `Quote expired` and `Quote contents changed`. The screen showed it in an `ErrorState` titled with that sentence, under a "Try again" that fetched a new quote. Three stable codes now — `PAYMENT_DECLINED`, `QUOTE_EXPIRED`, `QUOTE_CHANGED` (409, registered keys, en and hi) — carried by the domain errors and mapped through `coded`; the screen names the decline ("Your bank declined the payment. Nothing was charged and your basket is unchanged…"), fetches a fresh quote under the notice so the customer can pay another way at once, and re-quotes for a lapsed or changed quote with a sentence saying why.
+
+**P46-02 — the lost answer.** Every placement failure took the same branch: `setFailure(message)` and a retry that called `createQuote()`. A dropped connection, a gateway error or a rate limit after the request had been sent therefore ended in a *new quote* — for a cart the server may already have checked out — while the order that had been placed sat in Orders unseen; the customer, told "The order could not be placed", would try again with a second basket. `classifyPlacementFailure` tells the checkout's own answers (by code) from an answer that never arrived (no `ApiError`, a 5xx, 408, 429) and from a definitive refusal (any other 4xx). An interrupted placement keeps the quote and offers "Check what happened", which re-submits with the same idempotency key — the server replays the same result (run 45: the same checkout, or the same decline) and never places twice. Only a definitive refusal shows an error, and its action is "Get a fresh quote". The placement in flight is announced in a live region ("Placing your orders and asking your bank… keep this page open.").
+
+**P46-03 — what the quote did not say.** The quote card listed the store, the total, items/delivery/tip and the promise. It now states how the order arrives (the group's method) and the rule it proceeds under, and the buffer is said either way ("No buffer is added: this is exactly the amount your bank is asked to hold."). Saying the rule truthfully needed the quote to know it: `substitution_preference` is snapshotted on `checkout_quote_lines` and carried to `vendor_order_lines` (0088), it is part of `quoteContentDigest` — so changing a rule after quoting re-quotes, as changing a quantity does — and `decision_rule` is the one rule every line shares or `MIXED`.
+
+**Mutation results.** Three probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Rule left out of the digest (old) | *Changing a line's rule did not re-quote with the rule stated and snapshotted ({"replaced":false, …})* |
+| Order line keeps the default | *The order lines do not carry the customer's substitution rule ({"rules":["ASK_CUSTOMER","ASK_CUSTOMER"]})* |
+| Projection states a fixed rule (old) | *The quote does not state each group's rule (["ASK_CUSTOMER","ASK_CUSTOMER"])* |
+
+The screen's own logic is in `checkout-outcome.ts` with four unit tests (each code told apart; six ways of not hearing back all `interrupted`; a 4xx refusal never retried blindly; the rule and the buffer always said), and `customer-panels.spec.ts` holds the panel to it (the check re-submits with `place()`, the decline and the processing state are said, method/rule/buffer are rendered).
+
+**Live.** Against the synthetic project through the local stack: two stores in the basket, the quote stating for each "How you get it: Delivery partner brings it · If something is out of stock: it is refunded, never replaced" (the tiles had set `NO_SUBSTITUTION` for products the store does not substitute), "No buffer is added…" under ₹297.16, and the placement landing with `CHECKOUT_SUBMITTED` before `CHECKOUT_PLACED` (run 45), order lines carrying `NO_SUBSTITUTION`, holds `PROVISIONAL` for 24 hours.
+
+**Forward finding (Phase 8, not fixed here).** The fulfilment's substitution flow (`proposeSubstitution` → a customer decision with a deadline) asks the customer whatever the line's rule says: `ALLOW_SAME_STORE` should let the store substitute without asking and `NO_SUBSTITUTION` should refuse a proposal and refund. The rule now reaches the order line; honouring it is step 8.x's.
+
+**Scope note.** Provider handoff (a hosted checkout page) is not modelled by the synthetic provider; the interrupted-and-check shape is what a redirect return needs.
+
+**Verification.** `pnpm db:verify` exit 0 — 88 migrations, full ladder; `grouped_checkout` 105 assertions (96 after run 45); launch readiness 76 with the three error keys and the checkout copy registered en and hi. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 554 pass / 0 fail; `pnpm test:integration` exit 0 (a first run that overlapped the ladder's database rebuild was discarded).
+
+**Step 7.6: VERIFIED_LOCAL**, with the hosted-handoff note and the Phase 8 forward finding carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

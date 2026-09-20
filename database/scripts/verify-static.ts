@@ -160,6 +160,7 @@ assert(
       '0085_road_routing',
       '0086_payment_intake_outcomes',
       '0087_checkout_submission',
+      '0088_checkout_decisions_and_answers',
     ]),
   'Unexpected reviewed migrations',
 );

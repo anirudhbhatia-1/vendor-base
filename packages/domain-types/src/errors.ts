@@ -144,6 +144,18 @@ export const ERROR_DEFINITIONS = {
     message_key: 'common.business_rule_violation',
     retryable: false,
   },
+  /**
+   * The three answers a checkout gives that are not "placed". They reported
+   * ORDER_STATE_CONFLICT, whose sentence is written for a shop's console, so
+   * a customer whose bank had declined read "That step is not available yet".
+   */
+  PAYMENT_DECLINED: {
+    http_status: 409,
+    message_key: 'checkout.payment_declined',
+    retryable: false,
+  },
+  QUOTE_EXPIRED: { http_status: 409, message_key: 'checkout.quote_expired', retryable: false },
+  QUOTE_CHANGED: { http_status: 409, message_key: 'checkout.quote_changed', retryable: false },
   RATE_LIMITED: { http_status: 429, message_key: 'common.rate_limited', retryable: true },
   SERVICE_UNAVAILABLE: {
     http_status: 503,
@@ -197,6 +209,10 @@ export const ERROR_MESSAGES_EN: Readonly<Record<StableErrorCode, string>> = Obje
   FULFILMENT_METHOD_UNAVAILABLE:
     'This store does not offer that option. Choose one of the ways it can get the order to you.',
   BUSINESS_RULE_VIOLATION: 'That is not allowed in the current state.',
+  PAYMENT_DECLINED:
+    'Your bank declined the payment. Nothing was charged and your basket is unchanged.',
+  QUOTE_EXPIRED: 'This quote expired before the order was placed. Get a fresh one.',
+  QUOTE_CHANGED: 'Your basket changed since this quote. Get a fresh one before paying.',
   RATE_LIMITED: 'Too many attempts. Wait a moment and try again.',
   SERVICE_UNAVAILABLE: 'That service is briefly unavailable. Try again shortly.',
   INTERNAL_ERROR: 'Something went wrong at our end.',

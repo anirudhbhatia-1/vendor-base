@@ -312,8 +312,15 @@ export type CheckoutGroupQuote = {
   route_source: RouteSource | null;
   ready_after_seconds: number;
   arrives_after_seconds: number | null;
-  decision_rule: string;
+  /**
+   * The substitution rule the group's order proceeds under: the one rule
+   * every line shares, or MIXED when the customer set different rules per
+   * item. It used to be a fixed sentence about validation.
+   */
+  decision_rule: DecisionRule;
 };
+
+export type DecisionRule = SubstitutionPreference | 'MIXED';
 
 export type CheckoutQuote = {
   checkout_quote_id: string;

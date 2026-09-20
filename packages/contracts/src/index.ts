@@ -9,6 +9,7 @@ export type {
   CheckoutGroup,
   CheckoutGroupQuote,
   CheckoutQuote,
+  DecisionRule,
   CheckoutGroupReceipt,
   CustomerOrderEntry,
   CustomerRefundEntry,

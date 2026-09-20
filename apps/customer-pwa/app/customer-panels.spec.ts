@@ -137,6 +137,38 @@ test('the payment method the customer picks is the one that is sent', () => {
   assert.ok(!source.includes("'COD'"), 'cash on delivery is not offered (GAT-01)');
 });
 
+test('the quote states each store’s method, promise, decision rule and blocked issue', () => {
+  const source = code('checkout-panel.tsx');
+  assert.ok(source.includes('quotePromiseSentence(group, t)'), 'the promise');
+  assert.ok(source.includes('fulfilmentSentence(group.fulfilment_method, t)'), 'the method');
+  assert.ok(source.includes('decisionRuleSentence(group.decision_rule, t)'), 'the decision rule');
+  assert.ok(source.includes('quoteBlockedSentence(blocked.reason_code, t)'), 'the blocked issue');
+  assert.ok(
+    source.includes('bufferSentence(quote, formatMoneyMinor, t)'),
+    'the buffer, said either way',
+  );
+});
+
+test('a lost answer is checked with the same key, never followed by a fresh basket', () => {
+  const source = code('checkout-panel.tsx');
+  assert.ok(source.includes('classifyPlacementFailure(cause)'), 'failures are told apart');
+  assert.ok(source.includes("case 'interrupted':"), 'an answer that never arrived is its own case');
+  assert.ok(source.includes('setInterrupted(true)'), 'the quote is kept');
+  // The check re-submits the same placement; the only quote-fetching retry
+  // left is for a definitive refusal.
+  const interruptedNotice = source.slice(source.indexOf('{interrupted ? ('));
+  assert.ok(
+    interruptedNotice.includes('onClick={() => void place()}'),
+    'checking asks again with the same idempotency key',
+  );
+  assert.ok(source.includes("case 'declined':"), 'a decline is named');
+  assert.ok(source.includes('customer.checkout.declined.title'), 'and said to the customer');
+  assert.ok(
+    source.includes('customer.checkout.processing'),
+    'and the placement in flight is said too',
+  );
+});
+
 test('the quote countdown is driven by the server expiry', () => {
   const source = panel('checkout-panel.tsx');
   assert.ok(source.includes('formatCountdown(quote.expires_at'), 'the deadline is the quote’s');

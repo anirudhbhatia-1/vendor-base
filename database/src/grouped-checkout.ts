@@ -12,6 +12,7 @@ import { calculateCheckoutPricing } from './checkout-pricing.js';
 import { resolveFinancialPolicy } from './financial-policy.js';
 import { releaseReservationsLocked } from './inventory-reservations.js';
 import { promiseWindow, RoutingService, type RouteLeg } from './routing.js';
+import type { SubstitutionPreference } from './customer-cart.js';
 import {
   LocalFakeMoneyProvider,
   type FakeProviderOutcome,
@@ -32,8 +33,26 @@ export type PaymentMethod = 'UPI' | 'CARD' | 'WALLET';
 
 export class CheckoutInputError extends Error {}
 export class CheckoutNotFoundError extends Error {}
-export class CheckoutConflictError extends Error {}
-export class CheckoutPaymentDeclinedError extends Error {}
+/**
+ * A checkout refusal with the stable code the customer's screen answers to.
+ * A lapsed quote and a changed basket carry their own codes; every other
+ * conflict is the generic one.
+ */
+export class CheckoutConflictError extends Error {
+  constructor(
+    message: string,
+    readonly code:
+      'ORDER_STATE_CONFLICT' | 'QUOTE_CHANGED' | 'QUOTE_EXPIRED' = 'ORDER_STATE_CONFLICT',
+  ) {
+    super(message);
+  }
+}
+export class CheckoutPaymentDeclinedError extends Error {
+  readonly code = 'PAYMENT_DECLINED';
+  constructor() {
+    super('Payment declined');
+  }
+}
 
 /**
  * How long a placement waits for a provider that gave no usable answer. The
@@ -63,9 +82,13 @@ export const PROCESSING_DEADLINE_MS = 2 * 60_000;
  */
 export const PLACED_ORDER_HOLD_MS = 24 * 60 * 60_000;
 
+/** A group's rule as the quote states it: one rule for every line, or not. */
+export type DecisionRule = SubstitutionPreference | 'MIXED';
+
 type QuoteLineRow = {
   cart_line_id: string;
   catalogue_variant_id: string;
+  substitution_preference: SubstitutionPreference;
   /**
    * Whether the store can supply this line at all: an active variant of an
    * active product with a current price and a stock record. A line that
@@ -123,7 +146,7 @@ type SuppliedGroupRow = Omit<GroupRow, 'lines'> & { lines: SuppliedLineRow[] };
 /**
  * The identity of a quote: who is buying, from which cart, to which address,
  * and exactly what -- each group's method and tip, each line's variant,
- * quantity, price and catalogue versions. Not the stock on the shelf, which
+ * quantity, price, catalogue versions and substitution rule. Not the stock on the shelf, which
  * the quote's own hold changes, and not the policy, which the quote stamps.
  * A retry with the same content replays the live quote; any change to it
  * re-quotes; placing a quote whose content no longer matches the cart is
@@ -153,11 +176,25 @@ export function quoteContentDigest(input: {
             price: line.unit_price_minor,
             product_version: line.product_version,
             variant_version: line.variant_version,
+            // The rule the order proceeds under is part of what was quoted.
+            substitution: line.substitution_preference,
           })),
         })),
       }),
     )
     .digest('hex');
+}
+/**
+ * The rule a group's order proceeds under, as the quote states it. One rule
+ * shared by every line is that rule; lines with different rules are told
+ * apart per item at picking, and the quote says so rather than picking one.
+ */
+export function decisionRule(
+  preferences: readonly SubstitutionPreference[] | null | undefined,
+): DecisionRule {
+  const distinct = [...new Set(preferences ?? [])];
+  const [only] = distinct;
+  return distinct.length === 1 && only ? only : distinct.length === 0 ? 'ASK_CUSTOMER' : 'MIXED';
 }
 type InventoryItemRow = {
   readonly exact_available_quantity: string | number | null;
@@ -193,6 +230,7 @@ type FinalizeGroupRow = Record<string, unknown> & {
 };
 type FinalizeLineRow = Record<string, unknown> & {
   readonly catalogue_variant_id: string;
+  readonly substitution_preference: SubstitutionPreference;
   readonly exact_available_quantity: string | number | null;
   readonly inventory_item_id: string;
   readonly inventory_reservation_id: string;
@@ -224,6 +262,7 @@ type QuoteGroupProjection = Record<string, unknown> & {
   readonly route_source: 'ESTIMATE' | 'MAPBOX' | null;
   readonly ready_after_seconds: string | number;
   readonly arrives_after_seconds: string | number | null;
+  readonly substitution_preferences: readonly SubstitutionPreference[] | null;
 };
 
 /**
@@ -542,7 +581,7 @@ export class GroupedCheckoutService {
             resulting_state: 'SOFT_HELD',
           });
           await client.query(
-            `INSERT INTO marketplace.checkout_quote_lines (checkout_quote_line_id,checkout_quote_group_id,cart_line_id,catalogue_variant_id,inventory_reservation_id,product_title_snapshot,variant_title_snapshot,quantity,unit_price_minor,line_total_minor,product_version,variant_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+            `INSERT INTO marketplace.checkout_quote_lines (checkout_quote_line_id,checkout_quote_group_id,cart_line_id,catalogue_variant_id,inventory_reservation_id,product_title_snapshot,variant_title_snapshot,quantity,unit_price_minor,line_total_minor,product_version,variant_version,substitution_preference) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
             [
               createUuidV7(),
               quoteGroupId,
@@ -556,6 +595,7 @@ export class GroupedCheckoutService {
               Number(line.unit_price_minor) * line.quantity,
               line.product_version,
               line.variant_version,
+              line.substitution_preference,
             ],
           );
         }
@@ -629,7 +669,7 @@ export class GroupedCheckoutService {
           `UPDATE marketplace.checkout_quotes SET lifecycle_state='EXPIRED',updated_at=$2 WHERE checkout_quote_id=$1`,
           [input.checkout_quote_id, now],
         );
-        throw new CheckoutConflictError('Quote expired');
+        throw new CheckoutConflictError('Quote expired', 'QUOTE_EXPIRED');
       }
       const changed = await client.query(
         `SELECT 1 FROM marketplace.checkout_quote_lines ql
@@ -643,7 +683,8 @@ export class GroupedCheckoutService {
            OR p.lifecycle_state<>'ACTIVE' OR v.lifecycle_state<>'ACTIVE' OR vl.lifecycle_state<>'ACTIVE') LIMIT 1`,
         [input.checkout_quote_id],
       );
-      if (changed.rows[0]) throw new CheckoutConflictError('Quote contents changed');
+      if (changed.rows[0])
+        throw new CheckoutConflictError('Quote contents changed', 'QUOTE_CHANGED');
       // The cart itself may have moved on since the quote: a line added or
       // removed, a quantity, a method, the address. The quote is for what was
       // quoted, and an order for a cart that no longer matches it is refused.
@@ -657,7 +698,8 @@ export class GroupedCheckoutService {
         customer_address_id: currentAddress.rows[0]?.customer_address_id ?? '',
         groups: (await this.#loadCartGroups(client, userId, q.cart_id)).rows,
       });
-      if (cartDigest !== q.quote_digest) throw new CheckoutConflictError('Quote contents changed');
+      if (cartDigest !== q.quote_digest)
+        throw new CheckoutConflictError('Quote contents changed', 'QUOTE_CHANGED');
       const checkoutId = createUuidV7();
       const paymentId = createUuidV7();
       const checkoutRef = reference('CHECKOUT', checkoutId);
@@ -1462,7 +1504,7 @@ export class GroupedCheckoutService {
           resulting_state: 'PROVISIONAL',
         });
         await client.query(
-          `INSERT INTO marketplace.vendor_order_lines (vendor_order_line_id,vendor_order_id,catalogue_variant_id,inventory_reservation_id,product_title_snapshot,variant_title_snapshot,quantity,unit_price_minor,line_total_minor) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          `INSERT INTO marketplace.vendor_order_lines (vendor_order_line_id,vendor_order_id,catalogue_variant_id,inventory_reservation_id,product_title_snapshot,variant_title_snapshot,quantity,unit_price_minor,line_total_minor,substitution_preference) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
           [
             createUuidV7(),
             orderId,
@@ -1473,6 +1515,7 @@ export class GroupedCheckoutService {
             line.quantity,
             line.unit_price_minor,
             line.line_total_minor,
+            line.substitution_preference,
           ],
         );
       }
@@ -1543,7 +1586,10 @@ export class GroupedCheckoutService {
       [id],
     );
     const groups = await client.query<QuoteGroupProjection>(
-      `SELECT quote_group.*, cart_group.fulfilment_method, location.location_name
+      `SELECT quote_group.*, cart_group.fulfilment_method, location.location_name,
+              (SELECT array_agg(DISTINCT line.substitution_preference)
+                 FROM marketplace.checkout_quote_lines line
+                WHERE line.checkout_quote_group_id = quote_group.checkout_quote_group_id) AS substitution_preferences
          FROM marketplace.checkout_quote_groups quote_group
          JOIN marketplace.cart_vendor_groups cart_group USING (cart_vendor_group_id)
          JOIN marketplace.vendor_locations location
@@ -1586,7 +1632,7 @@ export class GroupedCheckoutService {
             g.arrives_after_seconds === null ? null : Number(g.arrives_after_seconds),
           route_source: g.route_source,
         }),
-        decision_rule: 'Quoted only when store, minimum, service area, price and stock validate',
+        decision_rule: decisionRule(g.substitution_preferences),
       })),
       blocked_groups: blocked.rows,
     };
@@ -1890,6 +1936,7 @@ export class GroupedCheckoutService {
                          AND m.fulfilment_mode=g.fulfilment_method
                          AND m.approval_state='APPROVED') method_offered,
               json_agg(json_build_object('cart_line_id',cl.cart_line_id,'catalogue_variant_id',cl.catalogue_variant_id,
+                'substitution_preference',cl.substitution_preference,
                 'supplied',(v.catalogue_variant_id IS NOT NULL AND p.catalogue_product_id IS NOT NULL
                             AND price.price_minor IS NOT NULL AND i.inventory_item_id IS NOT NULL),
                 'inventory_item_id',i.inventory_item_id,'product_title',p.title,'variant_title',v.variant_title,
