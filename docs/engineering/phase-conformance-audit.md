@@ -1456,6 +1456,46 @@ One of the five requirements was met. The port existed but no real provider coul
 
 **Step 7.4: VERIFIED_LOCAL**, with the raw-body signature, orphan receipts and fake-memo notes carried for the real-adapter step.
 
+## Run 45 (20 September 2026) — step 7.5, checkout transaction
+
+Two of the five requirements were met. The provider was asked inside the transaction that would record its answer, with nothing written until it came back; a placed order's stock holds kept the quote's five-minute expiry, so the inventory sweep gave the stock back while the order was being packed — and the same sweep defeated run 44's "holds kept while the provider is awaited"; a key reused for another quote returned the earlier checkout; a duplicate of a decline answered "quote invalid"; and aggregate transitions were written as 1 → 2 whatever the head said. Migration 0087; fifteen connected assertions; nine mutation probes, all caught, two by exception.
+
+| # | Requirement | Verdict |
+|---|---|---|
+| 1 | Validate owner, idempotency key, quote integrity, expiry, versions | Owner, integrity (content digest, run 43), expiry and catalogue versions held. **The key was not checked against the quote**: reused for another quote it returned the earlier checkout as if it were this one — P45-03. |
+| 2 | Atomically persist holds, group, drafts, snapshots, payment attempt, allocations, transitions, outbox *before provider calls* | **Not before.** The provider was called first, inside the transaction, and the group written only after its answer; a decline wrote no group at all — P45-01. **The holds were not persisted for the order's life**: the PROVISIONAL conversion kept the quote's five-minute expiry — P45-02. |
+| 3 | Provider order outside the transaction; webhook/reconciliation confirm; unknown/late success without reviving inventory | **Inside the transaction** — P45-01. Webhook confirmation held (run 44); nothing revived inventory (run 44). No reconciliation existed for a submission whose process died between recording and answer — P45-01. |
+| 4 | Same result for duplicate submission | Same checkout for a repeated quote or key. **A duplicate of a decline was "quote invalid"** (the quote had been retired) — P45-03. |
+| 5 | Never report failure while the outcome is unknown | Met: `PAYMENT_UNKNOWN` is a projection, not an error; a `PROCESSING` record is now what a crashed submission leaves. |
+
+**P45-01 — the provider inside the transaction.** `place()` opened a transaction, validated, called `authorize`, and only then inserted the payment and (on success or unknown) the group, transitions and outbox; a decline inserted the payment row and released the holds. Two consequences a fake provider hides: a network call ran while the quote row was locked `FOR UPDATE`, for as long as the provider took; and a process that died after the provider had authorised and before the commit left the customer's money held with no record anywhere — the one failure a payment system must not have. `place()` is now two transactions around the call. The first records the submission and commits it: payment `AUTHORIZING` with an `AUTHORIZATION_STARTED` event, the group in `PROCESSING` (a state the constraint had allowed since 0023 and nothing had used), the quote's soft holds carried to the submission's deadline, the aggregate head, its transition and the `checkout.submitted` outbox event, `CHECKOUT_SUBMITTED` in the history. The provider is asked with no transaction open. The second records the answer through `#settleAuthorization`, one routine that the webhook (which real providers send during the call as often as after it) and the sweep share, so the three cannot drift: `SUCCEEDED` finalizes, `DECLINED` releases and cancels, `UNKNOWN` holds with the exception. A group a webhook settled while the call was out stands; the call's own late answer is checked against it like any late answer. `reconcileProcessingPlacements` (worker) finds a `PROCESSING` group older than two minutes, asks the provider's `status` outside any transaction, and settles it with the answer — none being the unknown one. The verifier's provider looks at the database from another connection *while being asked*: it must see the group committed as `PROCESSING`, the payment `AUTHORIZING`, the outbox event, the history row, the holds carried, and no row lock on the table.
+
+**P45-02 — a placed order's stock came back to the shelf in five minutes.** `#finalize` turned the quote's `SOFT_HELD` reservations `PROVISIONAL` without touching `expires_at`, which was the quote's five minutes. The inventory sweep expires `SOFT_HELD` *and* `PROVISIONAL` reservations past their expiry, so five minutes after the quote every placed order's units went back on the shelf with reason `RESERVATION_EXPIRED` while the shop was packing them, and the pickup commit skipped the released reservation without a word (`if (state !== 'PROVISIONAL') continue`). The same sweep took the soft holds of a submission awaiting its provider, which run 44 had protected only from the *quote* sweep. The submission now carries its holds to the submission's deadline, and the placed order's to `PLACED_ORDER_HOLD_MS` (24 hours) — the safety net behind the fulfilment's own endings, which commit at pickup and release on every cancellation and timeout.
+
+**P45-03 — the same submission, and a different one.** `WHERE checkout_quote_id=$1 OR idempotency_key=$3` answered a key reused for a different quote with the earlier checkout. And a declined submission retried found its quote `INVALID` and answered `Quote contents changed` — a different answer from the first. A key on another quote is refused as a conflict; a decline is recorded as a cancelled group (it used to leave only a payment row) and replayed as the decline.
+
+**P45-04 — transitions at version 1 → 2, always.** `#transitionAggregate` wrote `previous_version 1, resulting_version 2` and updated the head `WHERE version=1`, true only while a group had exactly one transition in its life. It now reads the head under lock, requires the expected `from_state`, and writes the real versions; the second transition of a group used to die on `aggregate_transitions`' unique key.
+
+**Mutation results.** Nine probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Provider asked inside the recording transaction (old shape) | *The submission was not committed before the provider was asked, or a row was held while asking ({})* — the witness saw nothing |
+| Soft holds not carried to the submission's deadline | same assertion, on its hold-expiry clause (`hold_expires_at` five minutes out) |
+| Placed order's hold keeps the quote's expiry (old) | *A placed order's hold did not outlive the quote ({"states":["PROVISIONAL"],"expires":["false"]})* |
+| Key reused for another quote returns the earlier checkout (old) | *An idempotency key reused for a different quote returned the earlier checkout* |
+| Duplicate of a decline returns a projection | *A duplicate of a declined submission did not answer the same decline* |
+| Transition versions hard-coded 1 → 2 (old) | pg `duplicate key value violates unique constraint` on the group's second transition |
+| The call's answer settles whatever state it finds | `CheckoutPaymentDeclinedError` from the sweep-settled walk — a late decline cancelled a placed order; with the settlement's own guard, `Checkout is not awaiting a payment answer` |
+| The sweep never asks the provider | `CheckoutPaymentDeclinedError` — the call's answer then settled the unknown, so the walk's decline surfaced instead of the sweep's authorisation |
+| A definitive answer after the sweep held the group unknown is dropped | *A call's answer arriving after the sweep held the submission unknown did not settle it ({… "WEBHOOK_RESULT:AUTHORIZED","PAYMENT_VOIDED:VOIDED"…})* — the late-answer path voided the money instead |
+
+**Scope notes.** The fake provider's `status` answers from its own memory, so in a real deployment the sweep's question is only as good as the adapter's status call; the real adapter (PRV-02) must implement it against the provider's order/payment lookup. A hosted-checkout redirect (the customer completing payment on the provider's page) is not modelled: the synthetic provider answers the call; the two-transaction shape is what a hosted flow needs, with the redirect return in the webhook's place.
+
+**Verification.** `pnpm db:verify` exit 0 — 87 migrations, full ladder; `grouped_checkout` 96 assertions (81 after run 44), `money_lifecycle` 25. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 547 pass / 0 fail; `pnpm test:integration` exit 0 (the worker's sweep now runs `reconcileProcessingPlacements` before the abandonment sweep).
+
+**Step 7.5: VERIFIED_LOCAL**, with the status-call and hosted-checkout notes carried for the real-adapter step.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

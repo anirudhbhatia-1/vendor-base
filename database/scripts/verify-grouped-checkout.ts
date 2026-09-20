@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { createRequestId, createUuidV7 } from '@neighbourhood-store/domain-types';
+import { createRequestId, createUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import { CatalogueProductService } from '../src/catalogue-products.js';
 import { CustomerCartService } from '../src/customer-cart.js';
@@ -11,12 +11,16 @@ import {
   CheckoutPaymentDeclinedError,
   GroupedCheckoutService,
   PAYMENT_UNKNOWN_DEADLINE_MS,
+  PLACED_ORDER_HOLD_MS,
+  PROCESSING_DEADLINE_MS,
 } from '../src/grouped-checkout.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
 import {
   LocalFakeMoneyProvider,
   calculateDistanceAmount,
   type FakeProviderOutcome,
+  type FakeProviderScenario,
+  type ProviderOperationInput,
 } from '../src/money-policy.js';
 import { ESTIMATE_ROAD_FACTOR, RoutingService, type RoutingProvider } from '../src/routing.js';
 import {
@@ -388,7 +392,13 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
 
     // 7.4: what happens to a placement the provider never answers. Every
     // walk below starts from its own unknown placement.
-    const unknownPlacement = async (label: string, placedAt: Date) => {
+    const unknownPlacement = async (
+      label: string,
+      placedAt: Date,
+      through: { service?: GroupedCheckoutService; scenario?: FakeProviderScenario } = {},
+    ) => {
+      const service = through.service ?? checkout;
+      const scenario = through.scenario ?? 'MALFORMED';
       const userId = createUuidV7();
       await pool.query(
         "INSERT INTO marketplace.users (user_id,state,data_classification) VALUES ($1,'ACTIVE','RESTRICTED')",
@@ -407,26 +417,47 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         ],
       );
       const context = customerContext(userId);
+      // Each walk takes one unit and, by design, never gives it back, so
+      // each has a shelf of its own rather than starving the next.
+      const own = `${label}${userId.replaceAll('-', '').slice(-6).toUpperCase()}`;
+      const product = await catalogue.createProduct({
+        context: vendorContext(store0.ownerUserId),
+        vendor_location_id: store0.locationId,
+        product_reference: `SYNTH-PROD-${own}`,
+        title: `SYNTH ${label} Product`,
+        category: 'FRUIT_VEGETABLE',
+        unit_label: 'EACH',
+        tax_basis: 'EXEMPT',
+        variable_weight: false,
+        sku: `SYNTH-SKU-${own}`,
+        variant_title: `SYNTH ${label} Variant`,
+        price_minor: 10_000,
+        initial_stock_quantity: 1,
+        low_stock_threshold: 0,
+        now: placedAt,
+      });
       const cart = await carts.currentCart({ context, now: placedAt });
       await carts.setCartAddress({ context, customer_address_id: addressId, now: placedAt });
       await carts.addLine({
         context,
         vendor_location_id: store0.locationId,
-        catalogue_variant_id: product0.catalogue_variant_id,
+        catalogue_variant_id: product.catalogue_variant_id,
         quantity: 1,
         now: placedAt,
       });
       const quote = await checkout.createQuote({ context, cart_id: cart.cart_id, now: placedAt });
-      const placed = await checkout.place({
+      const placed = await service.place({
         context,
         checkout_quote_id: quote.checkout_quote_id,
-        provider_scenario: 'MALFORMED',
+        provider_scenario: scenario,
+        idempotency_key: `phase7-${label}-${userId}`,
         now: placedAt,
       });
-      check(
-        placed.lifecycle_state === 'PAYMENT_UNKNOWN',
-        `${label}: placement was not held unknown`,
-      );
+      if (scenario === 'MALFORMED')
+        check(
+          placed.lifecycle_state === 'PAYMENT_UNKNOWN',
+          `${label}: placement was not held unknown`,
+        );
       const operation = await pool.query<{ provider_operation_reference: string }>(
         `SELECT provider_operation_reference FROM marketplace.payment_transactions WHERE payment_transaction_id=$1`,
         [placed.payment_transaction_id],
@@ -481,7 +512,7 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
           now: at,
         });
       };
-      return { context, evidence, placed, userId, webhook };
+      return { context, evidence, placed, quote, userId, webhook };
     };
     const sweeper = systemContext(createUuidV7());
     const sixMinutes = new Date(now.getTime() + 6 * 60_000);
@@ -560,7 +591,7 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
           voided.payment_state === 'VOIDED' &&
           voided.exception_state === 'RESOLVED' &&
           JSON.stringify(voided.events) ===
-            '["AUTHORIZATION_RESULT:UNKNOWN_REQUIRES_RECONCILIATION","WEBHOOK_RESULT:AUTHORIZED","PAYMENT_VOIDED:VOIDED"]',
+            '["AUTHORIZATION_STARTED:AUTHORIZING","AUTHORIZATION_RESULT:UNKNOWN_REQUIRES_RECONCILIATION","WEBHOOK_RESULT:AUTHORIZED","PAYMENT_VOIDED:VOIDED"]',
         `A late success after abandonment was not voided through the provider (${JSON.stringify(voided)})`,
       );
     } finally {
@@ -685,6 +716,263 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         { deliveries: deliveries.map((delivery) => delivery.replayed), raced },
       )})`,
     );
+
+    // 7.5: the submission is recorded, and committed, before the provider is
+    // asked. The provider here looks at the database from another
+    // connection while it is being asked: what it can see has been committed,
+    // and no row it needs is locked.
+    const seenByProvider: Record<string, unknown>[] = [];
+    const witness = new (class extends LocalFakeMoneyProvider {
+      override async authorize(input: ProviderOperationInput): Promise<FakeProviderOutcome> {
+        const seen = await pool.query<Record<string, unknown>>(
+          `SELECT g.lifecycle_state AS checkout_state, p.payment_state,
+                  (SELECT count(*)::text FROM marketplace.outbox_events o
+                    WHERE o.aggregate_id=g.checkout_group_id AND o.event_type='checkout.submitted') AS outbox,
+                  (SELECT count(*)::text FROM marketplace.checkout_events e
+                    WHERE e.checkout_group_id=g.checkout_group_id AND e.event_type='CHECKOUT_SUBMITTED') AS submitted,
+                  (SELECT min(r.expires_at)::text FROM marketplace.checkout_quote_lines l
+                     JOIN marketplace.checkout_quote_groups qg ON qg.checkout_quote_group_id=l.checkout_quote_group_id
+                     JOIN marketplace.inventory_reservations r ON r.reservation_id=l.inventory_reservation_id
+                    WHERE qg.checkout_quote_id=g.checkout_quote_id) AS hold_expires_at,
+                  (SELECT count(*)::text FROM pg_locks k
+                     JOIN pg_class c ON c.oid=k.relation
+                    WHERE c.relname='checkout_groups' AND k.mode LIKE 'Row%' AND k.granted) AS row_locks
+             FROM marketplace.checkout_groups g
+             JOIN marketplace.payment_transactions p USING (payment_transaction_id)
+            WHERE p.provider_operation_reference=$1`,
+          [input.operation_reference],
+        );
+        seenByProvider.push(seen.rows[0] ?? {});
+        return super.authorize(input);
+      }
+    })({ webhook_key: webhookKey });
+    const witnessed = new GroupedCheckoutService({
+      connection_string: connectionString,
+      provider: witness,
+    });
+    try {
+      const recorded = await unknownPlacement('RECORDED', now, {
+        service: witnessed,
+        scenario: 'SUCCESS',
+      });
+      const seen = seenByProvider[0];
+      const placedHoldFloor = new Date(now.getTime() + PAYMENT_UNKNOWN_DEADLINE_MS - 1_000);
+      check(
+        seen?.checkout_state === 'PROCESSING' &&
+          seen.payment_state === 'AUTHORIZING' &&
+          seen.outbox === '1' &&
+          seen.submitted === '1' &&
+          new Date(String(seen.hold_expires_at)) >= placedHoldFloor &&
+          seen.row_locks === '0' &&
+          recorded.placed.lifecycle_state === 'ACTIVE' &&
+          recorded.placed.orders.length === 1,
+        `The submission was not committed before the provider was asked, or a row was held while asking (${JSON.stringify(seen)})`,
+      );
+      const recordedTrail = await pool.query<{ events: string[]; versions: string[] }>(
+        `SELECT (SELECT array_agg(e.event_type || ':' || e.resulting_state ORDER BY e.payment_version)
+                   FROM marketplace.payment_events e WHERE e.payment_transaction_id=$2) AS events,
+                (SELECT array_agg(t.previous_version || '>' || t.resulting_version || ':' || t.to_state ORDER BY t.resulting_version)
+                   FROM marketplace.aggregate_transitions t WHERE t.aggregate_id=$1) AS versions`,
+        [recorded.placed.checkout_group_id, recorded.placed.payment_transaction_id],
+      );
+      check(
+        JSON.stringify(recordedTrail.rows[0]?.events) ===
+          '["AUTHORIZATION_STARTED:AUTHORIZING","AUTHORIZATION_RESULT:AUTHORIZED"]' &&
+          JSON.stringify(recordedTrail.rows[0]?.versions) === '["0>1:PROCESSING","1>2:ACTIVE"]',
+        `The submission and its answer were not recorded as two steps with real versions (${JSON.stringify(recordedTrail.rows[0])})`,
+      );
+
+      // The placed order's holds outlive the quote: the inventory sweep,
+      // run after the quote's own life, leaves them PROVISIONAL and the
+      // shelf as the order left it.
+      await inventory.expireDue({ context: sweeper, now: sixMinutes });
+      const placedHolds = await pool.query<{ states: string[]; expires: string[] }>(
+        `SELECT array_agg(r.reservation_state) AS states,
+                array_agg((r.expires_at > $2)::text) AS expires
+           FROM marketplace.vendor_order_lines l
+           JOIN marketplace.vendor_orders o ON o.vendor_order_id=l.vendor_order_id
+           JOIN marketplace.inventory_reservations r ON r.reservation_id=l.inventory_reservation_id
+          WHERE o.checkout_group_id=$1`,
+        [
+          recorded.placed.checkout_group_id,
+          new Date(now.getTime() + PLACED_ORDER_HOLD_MS - 60_000),
+        ],
+      );
+      check(
+        JSON.stringify(placedHolds.rows[0]) === '{"states":["PROVISIONAL"],"expires":["true"]}',
+        `A placed order's hold did not outlive the quote (${JSON.stringify(placedHolds.rows[0])})`,
+      );
+
+      // A submission still waiting on the provider survives the inventory
+      // sweep too: its soft hold was carried to the submission's deadline.
+      const awaiting = await unknownPlacement('AWAITING', now);
+      await inventory.expireDue({ context: sweeper, now: sixMinutes });
+      const awaitingEvidence = await awaiting.evidence();
+      check(
+        awaitingEvidence.checkout_state === 'PAYMENT_UNKNOWN' && awaitingEvidence.holds === '1',
+        `The inventory sweep took the holds of a submission awaiting its provider (${JSON.stringify(awaitingEvidence)})`,
+      );
+
+      // Duplicate submission: the same result. The same key on another
+      // quote is a different submission and is refused; a declined
+      // submission retried is declined again, not "quote invalid".
+      await rejects(
+        () =>
+          witnessed.place({
+            context: recorded.context,
+            checkout_quote_id: awaiting.quote.checkout_quote_id,
+            idempotency_key: `phase7-RECORDED-${recorded.userId}`,
+            now,
+          }),
+        CheckoutConflictError,
+        'An idempotency key reused for a different quote returned the earlier checkout',
+      );
+      const replayed = await witnessed.place({
+        context: recorded.context,
+        checkout_quote_id: recorded.quote.checkout_quote_id,
+        idempotency_key: `phase7-RECORDED-${recorded.userId}`,
+        now: sixMinutes,
+      });
+      check(
+        replayed.checkout_group_id === recorded.placed.checkout_group_id &&
+          replayed.orders.length === 1 &&
+          seenByProvider.length === 1,
+        'A duplicate submission was not answered with the same checkout without asking the provider again',
+      );
+      const declinedTwice = await unknownPlacement('DECLINED', now, {
+        service: witnessed,
+        scenario: 'DECLINE',
+      }).catch((error: unknown) => error);
+      check(
+        declinedTwice instanceof CheckoutPaymentDeclinedError,
+        `A declined submission did not surface as a decline (${String(declinedTwice instanceof Error ? declinedTwice.stack : JSON.stringify(declinedTwice))})`,
+      );
+      const declinedGroup = await pool.query<{
+        checkout_group_id: UuidV7;
+        checkout_quote_id: UuidV7;
+        customer_user_id: UuidV7;
+        idempotency_key: string;
+      }>(
+        `SELECT g.checkout_group_id, g.checkout_quote_id, g.customer_user_id, g.idempotency_key
+           FROM marketplace.checkout_groups g
+          WHERE g.idempotency_key LIKE 'phase7-DECLINED-%' ORDER BY g.created_at DESC LIMIT 1`,
+      );
+      const declined = declinedGroup.rows[0];
+      check(declined !== undefined, 'A declined submission left no record of itself');
+      await rejects(
+        () =>
+          witnessed.place({
+            context: customerContext(declined.customer_user_id),
+            checkout_quote_id: declined.checkout_quote_id,
+            idempotency_key: declined.idempotency_key,
+            now: sixMinutes,
+          }),
+        CheckoutPaymentDeclinedError,
+        'A duplicate of a declined submission did not answer the same decline',
+      );
+    } finally {
+      await witnessed.close();
+    }
+
+    // The process that died between the two transactions. While the
+    // provider is being asked -- exactly the window -- the sweep runs with
+    // the provider's status answer and settles the group; the call's own
+    // return then finds the group settled and, disagreeing, opens a conflict
+    // rather than changing anything.
+    const revived = new (class extends LocalFakeMoneyProvider {
+      sweep: (() => Promise<number>) | null = null;
+      override async authorize(): Promise<FakeProviderOutcome> {
+        const settled = await this.sweep?.();
+        check(settled === 1, `The sweep did not settle the stale submission (${settled})`);
+        return 'DECLINED';
+      }
+      override async status(): Promise<FakeProviderOutcome | undefined> {
+        return 'SUCCEEDED';
+      }
+    })({ webhook_key: webhookKey });
+    const reviving = new GroupedCheckoutService({
+      connection_string: connectionString,
+      provider: revived,
+    });
+    try {
+      const afterProcessingDeadline = new Date(now.getTime() + PROCESSING_DEADLINE_MS + 1_000);
+      revived.sweep = () =>
+        reviving.reconcileProcessingPlacements({ context: sweeper, now: afterProcessingDeadline });
+      const earlySweep = await reviving.reconcileProcessingPlacements({
+        context: sweeper,
+        now: new Date(now.getTime() + PROCESSING_DEADLINE_MS - 1_000),
+      });
+      const recovered = await unknownPlacement('RECOVERED', now, {
+        service: reviving,
+        scenario: 'SUCCESS',
+      });
+      const recoveredEvidence = await recovered.evidence();
+      const recoveredTrail = await pool.query<{ events: string[] }>(
+        `SELECT array_agg(e.event_type || ':' || e.resulting_state ORDER BY e.payment_version) AS events
+           FROM marketplace.payment_events e WHERE e.payment_transaction_id=$1`,
+        [recovered.placed.payment_transaction_id],
+      );
+      check(
+        earlySweep === 0 &&
+          recovered.placed.lifecycle_state === 'ACTIVE' &&
+          recovered.placed.orders.length === 1 &&
+          recoveredEvidence.payment_state === 'AUTHORIZED' &&
+          recoveredEvidence.conflicts === '1' &&
+          JSON.stringify(recoveredTrail.rows[0]?.events) ===
+            '["AUTHORIZATION_STARTED:AUTHORIZING","RECONCILIATION_RESULT:AUTHORIZED"]',
+        `A submission settled by the sweep was not left standing against the call's late, contradicting answer (${JSON.stringify(
+          { earlySweep, recoveredEvidence, trail: recoveredTrail.rows[0] },
+        )})`,
+      );
+    } finally {
+      await reviving.close();
+    }
+
+    // The same window, no status answer: the sweep holds the submission as
+    // unknown, and the call's own definitive answer then settles it.
+    const silent = new (class extends LocalFakeMoneyProvider {
+      sweep: (() => Promise<number>) | null = null;
+      override async authorize(): Promise<FakeProviderOutcome> {
+        await this.sweep?.();
+        return 'SUCCEEDED';
+      }
+      override async status(): Promise<FakeProviderOutcome | undefined> {
+        return undefined;
+      }
+    })({ webhook_key: webhookKey });
+    const silently = new GroupedCheckoutService({
+      connection_string: connectionString,
+      provider: silent,
+    });
+    try {
+      silent.sweep = () =>
+        silently.reconcileProcessingPlacements({
+          context: sweeper,
+          now: new Date(now.getTime() + PROCESSING_DEADLINE_MS + 1_000),
+        });
+      const lateCall = await unknownPlacement('LATECALL', now, {
+        service: silently,
+        scenario: 'SUCCESS',
+      });
+      const lateCallTrail = await pool.query<{ events: string[]; states: string[] }>(
+        `SELECT (SELECT array_agg(e.event_type || ':' || e.resulting_state ORDER BY e.payment_version)
+                   FROM marketplace.payment_events e WHERE e.payment_transaction_id=$2) AS events,
+                (SELECT array_agg(t.to_state ORDER BY t.resulting_version)
+                   FROM marketplace.aggregate_transitions t WHERE t.aggregate_id=$1) AS states`,
+        [lateCall.placed.checkout_group_id, lateCall.placed.payment_transaction_id],
+      );
+      check(
+        lateCall.placed.lifecycle_state === 'ACTIVE' &&
+          lateCall.placed.orders.length === 1 &&
+          JSON.stringify(lateCallTrail.rows[0]?.events) ===
+            '["AUTHORIZATION_STARTED:AUTHORIZING","RECONCILIATION_RESULT:UNKNOWN_REQUIRES_RECONCILIATION","AUTHORIZATION_RESULT:AUTHORIZED"]' &&
+          JSON.stringify(lateCallTrail.rows[0]?.states) ===
+            '["PROCESSING","PAYMENT_UNKNOWN","ACTIVE"]',
+        `A call's answer arriving after the sweep held the submission unknown did not settle it (${JSON.stringify(lateCallTrail.rows[0])})`,
+      );
+    } finally {
+      await silently.close();
+    }
 
     // CUS-33 at the quote. A collected group carries no delivery fee, and a
     // group whose store no longer offers its method is blocked with a stable

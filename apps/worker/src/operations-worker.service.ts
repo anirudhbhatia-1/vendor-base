@@ -332,6 +332,11 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#checkout.expireQuotes({ context, now }),
         0,
       );
+      const reconciled = await pass(
+        'checkout.reconcileProcessingPlacements',
+        () => this.#checkout.reconcileProcessingPlacements({ context, now }),
+        0,
+      );
       const abandoned = await pass(
         'checkout.abandonUnknownPayments',
         () => this.#checkout.abandonUnknownPayments({ context, now }),
@@ -448,6 +453,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       const changed =
         reservations.length +
         quotes +
+        reconciled +
         abandoned +
         accepts.length +
         decisions.length +
@@ -481,6 +487,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           offers,
           outbox: outbox.published,
           quotes,
+          reconciled_placements: reconciled,
           abandoned_payments: abandoned,
           reservations: reservations.length,
         });

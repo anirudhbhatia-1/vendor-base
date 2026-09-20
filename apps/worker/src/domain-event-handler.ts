@@ -82,6 +82,7 @@ export const ACKNOWLEDGED_WITHOUT_REACTION: ReadonlySet<string> = new Set([
   'checkout.payment_abandoned',
   'checkout.payment_unknown',
   'checkout.placed',
+  'checkout.submitted',
   'checkout.webhook_authorized',
   'partner.reinstated',
   'vendor.reinstated',
