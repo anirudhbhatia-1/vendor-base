@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   formatCountdown,
   formatDistanceMeters,
+  formatTravelSeconds,
   formatMoneyMinor,
   humaniseEnum,
   parseRupeesToMinor,
@@ -65,4 +66,13 @@ test('an amount that is not a plain price is rejected, not guessed', () => {
   for (const bad of ['', '-5', '4.567', 'abc', '1e3', '4.']) {
     assert.equal(parseRupeesToMinor(bad), null, bad);
   }
+});
+
+test('a travel time is whole minutes, at least one, and an estimate says so', () => {
+  assert.equal(formatTravelSeconds(0), '~1 min');
+  assert.equal(formatTravelSeconds(59, 'MAPBOX'), '~1 min');
+  assert.equal(formatTravelSeconds(721, 'MAPBOX'), '~13 min');
+  assert.equal(formatTravelSeconds(721, 'ESTIMATE'), '~13 min (est.)');
+  assert.equal(formatTravelSeconds(5_460), '~1 h 31 min');
+  assert.equal(formatTravelSeconds(-1), '—');
 });

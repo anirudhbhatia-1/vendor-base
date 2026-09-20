@@ -2,7 +2,7 @@
 
 **Register status:** Active  
 **Established:** 13 August 2026  
-**Scope:** D-01 through D-16; historical records retained, current staging amendment D-15, test compute D-16
+**Scope:** D-01 through D-17; historical records retained, current staging amendment D-15, test compute D-16, routing provider D-17
 
 The owner and due date columns assign responsibility for producing evidence and a recommendation. They do not approve the underlying decision.
 
@@ -37,5 +37,6 @@ The delivery-fee example, provider simulators, privacy periods, support targets,
 | [D-14](D-14.md) | Engineering Lead; recorded 29 August 2026 | Accepted implementation design; production not activated | Separate least-privilege production database design; no staging/production capability certification. |
 | [D-15](D-15.md) | Project Owner implementation request / Engineering Lead; recorded 6 September 2026 | Current staging implementation direction | Eight clients, selected staging adapters and revised checkout; deployment, provider access, payout selection and public launch remain gated. |
 | [D-16](D-16.md) | Project Owner / Engineering Lead; recorded 17 September 2026 | Approved test deployment direction; synthetic only | Azure for Students VM replaces the paused OCI compute target; static shells on Azure Static Web Apps; customer PWA as a container; every other D-15 gate unchanged. |
+| [D-17](D-17.md) | Project Owner / Engineering Lead; recorded 20 September 2026 | Approved routing provider; synthetic only | Mapbox replaces Mappls as the maps target for road distance and travel time in the synthetic environments; a labelled estimate is the fallback and test provider; production routing, real coordinates and paid tiers remain gated. |
 
 D-12 is not the current blanket prohibition on Supabase/staging implementation. D-04's local-simulator-only scope remains historical test evidence, not permission to select fake staging providers. Existing due dates are historical accountability records; do not manufacture new approvals or completion evidence.

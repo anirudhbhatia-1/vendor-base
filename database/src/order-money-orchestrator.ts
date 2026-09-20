@@ -164,7 +164,10 @@ export class OrderMoneyOrchestrator {
     }>(
       `SELECT assignment.delivery_assignment_id, assignment.partner_user_id,
               assignment.package_count,
-              ST_Distance(location.coordinates, address.coordinates)::bigint::text AS route_metres,
+              -- The road the order was priced on, from the quote (0085). A quote
+              -- older than routing carries none and falls back to the line.
+              COALESCE(quote_group.route_metres::bigint,
+                       ST_Distance(location.coordinates, address.coordinates)::bigint)::text AS route_metres,
               payment.payment_transaction_id, payment.payment_state,
               orders.order_reference, orders.vendor_location_id,
               quote.policy_version_reference,
@@ -183,6 +186,9 @@ export class OrderMoneyOrchestrator {
            ON location.vendor_location_id = orders.vendor_location_id
          JOIN marketplace.checkout_quotes quote
            ON quote.checkout_quote_id = grouping.checkout_quote_id
+         LEFT JOIN marketplace.checkout_quote_groups quote_group
+           ON quote_group.checkout_quote_id = quote.checkout_quote_id
+          AND quote_group.vendor_location_id = orders.vendor_location_id
          LEFT JOIN marketplace.customer_addresses address
            ON address.customer_address_id = quote.customer_address_id
          LEFT JOIN marketplace.payment_allocations allocation

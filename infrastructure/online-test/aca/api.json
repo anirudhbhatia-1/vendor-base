@@ -141,6 +141,22 @@
               "value": "fake"
             },
             {
+              "name": "ROUTING_PROVIDER",
+              "value": "${ROUTING_PROVIDER}"
+            },
+            {
+              "name": "ROUTING_PROFILE",
+              "value": "${ROUTING_PROFILE}"
+            },
+            {
+              "name": "ROUTING_TIMEOUT_MS",
+              "value": "${ROUTING_TIMEOUT_MS}"
+            },
+            {
+              "name": "MAPBOX_ACCESS_TOKEN",
+              "value": "${MAPBOX_ACCESS_TOKEN}"
+            },
+            {
               "name": "OTP_HASH_KEY",
               "secretRef": "otp-hash-key"
             },

@@ -12,6 +12,7 @@ import {
 } from '../src/grouped-checkout.js';
 import { InventoryReservationService } from '../src/inventory-reservations.js';
 import { calculateDistanceAmount } from '../src/money-policy.js';
+import { ESTIMATE_ROAD_FACTOR, RoutingService, type RoutingProvider } from '../src/routing.js';
 import {
   activateConfigurationVersion,
   approveConfigurationVersion,
@@ -145,13 +146,28 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
         [group.vendor_location_id, addressId],
       );
       const metres = Number(route.rows[0]?.metres);
+      // No maps provider is configured here, so the road is the labelled
+      // estimate: the straight line times the road factor (D-17). The fee is
+      // priced on that road, and the promise is the shop's preparation time
+      // plus the road's travel time.
+      const road = Math.round(metres * ESTIMATE_ROAD_FACTOR);
       check(
         group.item_minor === 10_000 &&
-          group.delivery_minor === calculateDistanceAmount(metres) &&
+          group.delivery_minor === calculateDistanceAmount(road) &&
           group.delivery_minor === 1_500 &&
           group.tip_minor === 0 &&
           group.total_minor === 11_500,
         `A quoted group's amounts are not the pricing module's for its route (${JSON.stringify({ item: group.item_minor, delivery: group.delivery_minor, tip: group.tip_minor, total: group.total_minor, metres })})`,
+      );
+      check(
+        group.route_source === 'ESTIMATE' &&
+          group.route_metres !== null &&
+          Math.abs(group.route_metres - road) <= 2 &&
+          group.route_seconds === Math.max(60, Math.round((group.route_metres ?? 0) / 5)) &&
+          group.ready_after_seconds === 1_200 &&
+          group.arrives_after_seconds === 1_200 + (group.route_seconds ?? 0) &&
+          /^Arrives in about \d+–\d+ minutes$/.test(String(group.promise)),
+        `A quoted group does not carry the road it was priced on and the promise made from it (${JSON.stringify({ route_metres: group.route_metres, route_seconds: group.route_seconds, route_source: group.route_source, ready: group.ready_after_seconds, arrives: group.arrives_after_seconds, promise: group.promise })})`,
       );
     }
     check(quote.total_minor === 23_000, 'The quote total is not the sum of its groups');
@@ -447,6 +463,17 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       'A delivered group at the same distance carried no delivery fee',
     );
     check(methodQuote.blocked_groups.length === 0, 'A group with an offered method was blocked');
+    const collectedGroup = methodQuote.groups.find(
+      (group) => group.vendor_location_id === collectingStore.locationId,
+    );
+    check(
+      collectedGroup?.route_metres === null &&
+        collectedGroup.route_source === null &&
+        collectedGroup.arrives_after_seconds === null &&
+        collectedGroup.ready_after_seconds === 1_200 &&
+        String(collectedGroup.promise) === 'Ready in about 20 minutes',
+      `A collected group travels no route and promises the shop's preparation time (${JSON.stringify(collectedGroup)})`,
+    );
 
     // The store withdraws collection after the group chose it. The next quote
     // (after the first expires) blocks that group and only that group.
@@ -1004,6 +1031,84 @@ export async function verifyGroupedCheckout(connectionString: string): Promise<v
       price_minor: 5_000,
       now: new Date(t0.getTime() + 10_000),
     });
+
+    // D-17: with a maps provider answering, the fee is priced on the road it
+    // returns, the road and its source are stored on the quote group, and the
+    // provider is asked once per pair -- a second quote of the same pair is
+    // served from the cache.
+    let providerCalls = 0;
+    const roads: RoutingProvider = {
+      source: 'MAPBOX',
+      profile: 'driving',
+      route: async () => ({ distance_metres: 3_500, duration_seconds: 700 }),
+      routeMany: async (_origin, destinations) => {
+        providerCalls += 1;
+        return destinations.map(() => ({ distance_metres: 3_500, duration_seconds: 700 }));
+      },
+    };
+    const routedCheckout = new GroupedCheckoutService({
+      connection_string: connectionString,
+      webhook_key: webhookKey,
+      routing: new RoutingService({ provider: roads, pool }),
+    });
+    try {
+      const roadCustomer = await customerWithCart('ROAD');
+      await carts.addLine({
+        context: customerContext(roadCustomer.userId),
+        vendor_location_id: storeA.locationId,
+        catalogue_variant_id: productA.catalogue_variant_id,
+        quantity: 1,
+        now: t0,
+      });
+      const routedQuote = await routedCheckout.createQuote({
+        context: customerContext(roadCustomer.userId),
+        cart_id: roadCustomer.cartId,
+        now: new Date(t0.getTime() + 20_000),
+      });
+      const routedGroup = routedQuote.groups[0];
+      check(
+        routedQuote.groups.length === 1 &&
+          routedGroup?.route_metres === 3_500 &&
+          routedGroup.route_seconds === 700 &&
+          routedGroup.route_source === 'MAPBOX' &&
+          routedGroup.delivery_minor === calculateDistanceAmount(3_500) &&
+          routedGroup.delivery_minor === 2_700 &&
+          routedGroup.arrives_after_seconds === 1_900 &&
+          String(routedGroup.promise) === 'Arrives in about 32–47 minutes',
+        `A quote with a maps provider was not priced and promised on the road it returned (${JSON.stringify(routedGroup)})`,
+      );
+      const stored = await pool.query<{ route_metres: string; route_source: string }>(
+        'SELECT route_metres::text, route_source FROM marketplace.checkout_quote_groups WHERE checkout_quote_id=$1',
+        [routedQuote.checkout_quote_id],
+      );
+      check(
+        stored.rows[0]?.route_metres === '3500' && stored.rows[0].route_source === 'MAPBOX',
+        'The road the quote was priced on is not stored on the quote group',
+      );
+      check(providerCalls === 1, `The provider was asked ${providerCalls} times for one pair`);
+      // Change the cart so a fresh quote is made for the same store and door.
+      await carts.addLine({
+        context: customerContext(roadCustomer.userId),
+        vendor_location_id: storeA.locationId,
+        catalogue_variant_id: extra.catalogue_variant_id,
+        quantity: 1,
+        now: new Date(t0.getTime() + 21_000),
+      });
+      const cachedQuote = await routedCheckout.createQuote({
+        context: customerContext(roadCustomer.userId),
+        cart_id: roadCustomer.cartId,
+        now: new Date(t0.getTime() + 22_000),
+      });
+      check(
+        cachedQuote.checkout_quote_id !== routedQuote.checkout_quote_id &&
+          cachedQuote.groups[0]?.route_metres === 3_500 &&
+          cachedQuote.groups[0].route_source === 'MAPBOX' &&
+          providerCalls === 1,
+        `A second quote for the same pair asked the provider again (${providerCalls} calls)`,
+      );
+    } finally {
+      await routedCheckout.close();
+    }
   } finally {
     await Promise.all([checkout.close(), inventory.close(), catalogue.close(), carts.close()]);
     await pool.end();

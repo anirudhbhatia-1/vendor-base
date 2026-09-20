@@ -5,6 +5,8 @@ import { loadRuntimeConfig } from './runtime-config.js';
 const managedKeys = [
   'ALLOW_SYNTHETIC_PROVIDERS',
   'APP_ENV',
+  'MAPBOX_ACCESS_TOKEN',
+  'ROUTING_PROVIDER',
   'OBJECT_STORAGE_CATALOGUE_BUCKET',
   'OBJECT_STORAGE_DRIVER',
   'OBJECT_STORAGE_EVIDENCE_BUCKET',
@@ -109,6 +111,9 @@ describe('the fake OTP gate is independent of object storage', () => {
     process.env.OBJECT_STORAGE_DRIVER = 'supabase';
     process.env.OBJECT_STORAGE_CATALOGUE_BUCKET = 'catalogue-approved';
     process.env.OBJECT_STORAGE_EVIDENCE_BUCKET = 'evidence-quarantine';
+    // Real roads too (D-17), so the shared routing gate is satisfied on its own.
+    process.env.ROUTING_PROVIDER = 'mapbox';
+    process.env.MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoidW5pdCIsImEiOiJ0ZXN0MDEyMyJ9.unit-test-signature';
     assert.throws(loadRuntimeConfig, /fake OTP adapter cannot authenticate/);
   });
 });

@@ -1397,6 +1397,17 @@ Two of the five requirements were met. The quote was *not* bound to the cart's c
 
 **Step 7.3: VERIFIED_LOCAL**, with the promise (fixed copy) and route (straight line) scope notes carried for an owner.
 
+## Between runs 43 and 44 (20 September 2026) — real roads (D-17)
+
+Not an audit step. Runs 41 and 43 recorded two scope notes for an owner — the route was a straight line, the promise was fixed copy — and the owner answered them in one instruction: real maps for everyone, Mapbox, everywhere a distance or a time is shown. [D-17](../decisions/D-17.md) records the decision; [road-routing.md](road-routing.md) records the design. What matters for this log:
+
+- One routing service (`database/src/routing.ts`) with two sources: `MAPBOX` and a labelled `ESTIMATE` (the line times 1.3 at 18 km/h) that is the test provider and the fallback. Routes are cached for a day by rounded pair (migration 0085). A deployment must route on real roads or acknowledge itself as synthetic, the same rule as the fake OTP.
+- The quote stores the road it priced on and the promise it made from it (`route_metres`, `route_seconds`, `route_source`, `ready_after_seconds`, `arrives_after_seconds`); the fee is priced on the road; offers and settlement read the stored route rather than measuring a line of their own; discovery orders and filters by road; the vendor's console shows the road for a self-delivered order; the promise is composed in the customer's language and marked when estimated.
+- Eleven routing assertions in a new ladder module, seven in the checkout verifier (estimate and a fake Mapbox answering 3 500 m: ₹27 delivery, 32–47 minutes, stored, asked once), two in fulfilment (the offer shows the quoted road; the earning is paid on it), one in discovery. Five mutation probes, all caught — two only after the fulfilment fixture's address was moved off the store, because a road and a line are the same number at zero distance and a settlement measuring its own line could not be told from one reading the quote.
+- The Mapbox token is not configured anywhere yet. Until `ROUTING_PROVIDER=mapbox` and `MAPBOX_ACCESS_TOKEN` are injected into an environment, every route there is a labelled estimate; the container-app templates and env examples carry the variables.
+
+Runs 41 and 43's scope notes on route and promise are closed by this; the tax-basis note stands.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

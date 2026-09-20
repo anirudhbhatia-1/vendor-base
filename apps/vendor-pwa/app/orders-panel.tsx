@@ -13,6 +13,8 @@ import {
   Sheet,
   StatusPill,
   formatCountdown,
+  formatDistanceMeters,
+  formatTravelSeconds,
   humaniseEnum,
   formatMoneyMinor,
   parseRupeesToMinor,
@@ -33,6 +35,10 @@ type Order = {
   fulfilment_method: string;
   /** When the shop's own staff left with a self-delivered order (VEN-37). */
   out_for_delivery_at: string | null;
+  /** The road to the door as the quote priced it; null on a collected order. */
+  route_metres?: number | null;
+  route_seconds?: number | null;
+  route_source?: 'ESTIMATE' | 'MAPBOX' | null;
   delivery_otp_attempts: number;
   collection: {
     readonly assignment_state: string;
@@ -420,6 +426,9 @@ function OrderCard({
             <Notice tone="information">
               This order is delivered by your own staff. Start the delivery when it leaves the shop;
               the customer will show a delivery code at the door.
+              {order.route_metres != null && order.route_seconds != null
+                ? ` The door is ${formatDistanceMeters(order.route_metres)} by road, ${formatTravelSeconds(order.route_seconds, order.route_source)}.`
+                : ''}
             </Notice>
             <Button
               busy={busy}

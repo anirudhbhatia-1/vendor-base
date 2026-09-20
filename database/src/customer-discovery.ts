@@ -3,6 +3,7 @@ import {
   type AvailabilityFreshness,
 } from './catalogue-freshness-moderation.js';
 import { createDatabasePool } from './database-pool.js';
+import { RoutingService, type RouteSource } from './routing.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -25,13 +26,20 @@ export interface ProductSearchHit {
   readonly title: string;
   readonly price_minor: number | null;
   readonly is_available: boolean;
+  /** The road to the shop selling it, so a hit can say how far and how long. */
+  readonly distance_meters: number;
+  readonly travel_seconds: number;
+  readonly distance_source: RouteSource;
 }
 
 export interface StoreSummary {
   readonly vendor_location_id: UuidV7;
   readonly location_name: string;
   readonly category: string;
+  /** By road, from the routing provider or a labelled estimate (0085); a straight line before that. */
   readonly distance_meters: number;
+  readonly travel_seconds: number;
+  readonly distance_source: RouteSource;
   readonly minimum_order_minor: number;
   readonly currency: string;
   readonly fulfilment_modes: readonly string[];
@@ -165,6 +173,9 @@ const synonyms: Readonly<Record<string, readonly string[]>> = Object.freeze({
  * permission optional. Both origins produce the same one-row `origin`
  * relation, so the discovery queries are unchanged apart from where they start.
  */
+/** How many in-zone stores, nearest by the line, are routed before a page is cut. */
+export const DISCOVERY_ROUTED_CANDIDATES = 200;
+
 export type DiscoveryOrigin =
   | { readonly kind: 'ADDRESS'; readonly customer_address_id: UuidV7; readonly user_id: UuidV7 }
   | { readonly kind: 'POINT'; readonly latitude: number; readonly longitude: number };
@@ -285,12 +296,14 @@ async function recordEvent(
 export class CustomerDiscoveryService {
   readonly #pool: Pool;
 
-  constructor(input: { readonly connection_string: string }) {
+  readonly #routing: RoutingService;
+  constructor(input: { readonly connection_string: string; readonly routing?: RoutingService }) {
     this.#pool = createDatabasePool({
       connectionString: input.connection_string,
       application_name: 'neighbourhood-store-customer-discovery',
       max: 8,
     });
+    this.#routing = input.routing ?? new RoutingService({ pool: this.#pool });
   }
 
   async close(): Promise<void> {
@@ -357,11 +370,18 @@ export class CustomerDiscoveryService {
     const offset = Math.max(options.offset ?? 0, 0);
     const now = options.now ?? new Date();
     const from = originRelation(origin);
+    // Every eligible store in the zone, nearest by the line first, capped so a
+    // dense area stays one matrix call; the page is cut after the road is
+    // known, because "nearest first" means the road, not the crow.
     const result = await this.#pool.query<{
       vendor_location_id: string;
       location_name: string;
       category: string;
       distance_meters: string;
+      store_latitude: number;
+      store_longitude: number;
+      origin_latitude: number;
+      origin_longitude: number;
       minimum_order_minor: string;
       currency: string;
       fulfilment_modes: string[];
@@ -373,6 +393,10 @@ export class CustomerDiscoveryService {
       `WITH origin AS (${from.sql})
         SELECT l.vendor_location_id, l.location_name, l.category,
               ST_Distance(l.coordinates, a.coordinates)::text AS distance_meters,
+              ST_Y(l.coordinates::geometry)::float8 AS store_latitude,
+              ST_X(l.coordinates::geometry)::float8 AS store_longitude,
+              ST_Y(a.coordinates::geometry)::float8 AS origin_latitude,
+              ST_X(a.coordinates::geometry)::float8 AS origin_longitude,
               l.minimum_order_minor::text AS minimum_order_minor, l.currency,
               -- Platform delivery is only offered when somebody could actually
               -- perform it. Dispatch looks for a partner who is online, still
@@ -416,23 +440,38 @@ export class CustomerDiscoveryService {
          JOIN marketplace.vendor_publication_cases p
            ON p.vendor_location_id = l.vendor_location_id AND p.lifecycle_state = 'PUBLISHED'
         ORDER BY distance_meters ASC, l.vendor_location_id ASC
-        LIMIT $4 OFFSET $5`,
-      [...from.params, now, limit, offset],
+        LIMIT $4`,
+      [...from.params, now, DISCOVERY_ROUTED_CANDIDATES],
     );
-    return Object.freeze(
-      result.rows.map((row) =>
-        Object.freeze({
-          vendor_location_id: parseUuidV7(row.vendor_location_id),
-          location_name: row.location_name,
-          category: row.category,
-          distance_meters: Number(row.distance_meters),
-          minimum_order_minor: Number(row.minimum_order_minor),
-          currency: row.currency,
-          fulfilment_modes: Object.freeze([...row.fulfilment_modes]),
-          is_open_now: row.is_open_now,
-        }),
-      ),
+    const first = result.rows[0];
+    if (!first) return Object.freeze([]);
+    const legs = await this.#routing.routeMany(
+      { latitude: first.origin_latitude, longitude: first.origin_longitude },
+      result.rows.map((row) => ({ latitude: row.store_latitude, longitude: row.store_longitude })),
+      now,
     );
+    const routed = result.rows.map((row, index) => {
+      const leg = legs[index];
+      if (!leg) throw new CustomerDiscoveryConflictError('A store was left without a route');
+      return Object.freeze({
+        vendor_location_id: parseUuidV7(row.vendor_location_id),
+        location_name: row.location_name,
+        category: row.category,
+        distance_meters: leg.distance_metres,
+        travel_seconds: leg.duration_seconds,
+        distance_source: leg.source,
+        minimum_order_minor: Number(row.minimum_order_minor),
+        currency: row.currency,
+        fulfilment_modes: Object.freeze([...row.fulfilment_modes]),
+        is_open_now: row.is_open_now,
+      });
+    });
+    routed.sort(
+      (left, right) =>
+        left.distance_meters - right.distance_meters ||
+        left.vendor_location_id.localeCompare(right.vendor_location_id),
+    );
+    return Object.freeze(routed.slice(offset, offset + limit));
   }
 
   /**
@@ -519,10 +558,18 @@ export class CustomerDiscoveryService {
       title: string;
       price_minor: string | null;
       is_available: boolean;
+      store_latitude: number;
+      store_longitude: number;
+      origin_latitude: number;
+      origin_longitude: number;
     }>(
       `WITH origin AS (${from.sql})
         SELECT p.vendor_location_id, p.catalogue_product_id, v.catalogue_variant_id, p.title,
               price.price_minor::text AS price_minor,
+              ST_Y(l.coordinates::geometry)::float8 AS store_latitude,
+              ST_X(l.coordinates::geometry)::float8 AS store_longitude,
+              ST_Y(a.coordinates::geometry)::float8 AS origin_latitude,
+              ST_X(a.coordinates::geometry)::float8 AS origin_longitude,
               COALESCE(item.availability_state IN ('AVAILABLE','LOW_STOCK','VENDOR_CONFIRMS'), false)
                 AS is_available
          FROM origin a
@@ -566,6 +613,8 @@ export class CustomerDiscoveryService {
           AND ($5::text IS NULL OR p.category=$5)
           AND ($6::boolean=false OR COALESCE(item.availability_state IN ('AVAILABLE','LOW_STOCK','VENDOR_CONFIRMS'),false))
           AND ($7::text IS NULL OR EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes fm WHERE fm.vendor_location_id=l.vendor_location_id AND fm.fulfilment_mode=$7))
+          -- The line never exceeds the road, so this only discards stores the
+          -- road check below could not keep; the road decides the rest.
           AND ($8::integer IS NULL OR ST_Distance(l.coordinates,a.coordinates) <= $8)
         ORDER BY is_available DESC,
                  ts_rank(p.search_document, plainto_tsquery('simple', $3)) DESC,
@@ -583,17 +632,40 @@ export class CustomerDiscoveryService {
         limit,
       ],
     );
+    const firstHit = result.rows[0];
+    if (!firstHit) return Object.freeze([]);
+    // One road per distinct store, however many of its products matched.
+    const stores = [...new Map(result.rows.map((row) => [row.vendor_location_id, row])).values()];
+    const legs = await this.#routing.routeMany(
+      { latitude: firstHit.origin_latitude, longitude: firstHit.origin_longitude },
+      stores.map((row) => ({ latitude: row.store_latitude, longitude: row.store_longitude })),
+      new Date(),
+    );
+    const roadByStore = new Map(stores.map((row, index) => [row.vendor_location_id, legs[index]]));
     return Object.freeze(
-      result.rows.map((row) =>
-        Object.freeze({
-          vendor_location_id: parseUuidV7(row.vendor_location_id),
-          catalogue_product_id: parseUuidV7(row.catalogue_product_id),
-          catalogue_variant_id: parseUuidV7(row.catalogue_variant_id),
-          title: row.title,
-          price_minor: row.price_minor === null ? null : Number(row.price_minor),
-          is_available: row.is_available,
-        }),
-      ),
+      result.rows.flatMap((row) => {
+        const leg = roadByStore.get(row.vendor_location_id);
+        if (!leg) throw new CustomerDiscoveryConflictError('A store was left without a route');
+        if (
+          options.max_distance_meters !== undefined &&
+          leg.distance_metres > options.max_distance_meters
+        ) {
+          return [];
+        }
+        return [
+          Object.freeze({
+            vendor_location_id: parseUuidV7(row.vendor_location_id),
+            catalogue_product_id: parseUuidV7(row.catalogue_product_id),
+            catalogue_variant_id: parseUuidV7(row.catalogue_variant_id),
+            title: row.title,
+            price_minor: row.price_minor === null ? null : Number(row.price_minor),
+            is_available: row.is_available,
+            distance_meters: leg.distance_metres,
+            travel_seconds: leg.duration_seconds,
+            distance_source: leg.source,
+          }),
+        ];
+      }),
     );
   }
 

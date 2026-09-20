@@ -2,6 +2,7 @@ export { cx } from './classnames.js';
 export {
   formatCountdown,
   formatDistanceMeters,
+  formatTravelSeconds,
   formatMoneyMinor,
   formatRelativeTime,
   humaniseEnum,

@@ -126,6 +126,8 @@ Phase 5.5 adds one-active-attempt delivery assignment, expiring offers, exact pa
 
 Phase 5.6 adds integer-paise synthetic payment allocation, fake authorization/capture/refund/payout outcomes, maker-checker refunds, append-only balanced ledger posting, policy-derived vendor/partner settlement, unknown-result containment, statement reconciliation, and finance-authorized mutation APIs. See [Synthetic Money Lifecycle](../engineering/synthetic-money-lifecycle.md).
 
+D-17 (20 September 2026) adds road distance and travel time through one routing service — Mapbox in the synthetic environments, a labelled estimate as fallback and test provider, a day-long route cache — feeding the quote's delivery fee and promise, partner offers and settled earnings, store discovery and vendor self-delivery. See [Road Routing](../engineering/road-routing.md).
+
 ## Toolchain pins
 
 - Node.js `24.19.0` in `.node-version`, `.nvmrc` and the root package engine.

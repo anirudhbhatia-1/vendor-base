@@ -107,11 +107,17 @@ export type ShopRequestQueueEntry = {
   updated_at: string;
 };
 
+/** Where a road distance came from: the maps provider, or a labelled estimate when none answered. */
+export type RouteSource = 'ESTIMATE' | 'MAPBOX';
+
 export type Store = {
   vendor_location_id: string;
   location_name: string;
   category: string;
+  /** By road (0085): the maps provider's distance, or an estimate that says so. */
   distance_meters: number;
+  travel_seconds: number;
+  distance_source: RouteSource;
   minimum_order_minor: number;
   currency: string;
   fulfilment_modes: string[];
@@ -181,6 +187,10 @@ export type SearchResult = {
   catalogue_variant_id: string;
   title: string;
   price_minor: number | null;
+  /** The road to the shop selling it. */
+  distance_meters: number;
+  travel_seconds: number;
+  distance_source: RouteSource;
 };
 
 export type RecentSearch = {
@@ -286,7 +296,13 @@ export type CheckoutGroupQuote = {
   tip_minor: number;
   total_minor: number;
   fulfilment_method: string;
+  /** The promise in words, and the numbers it was made from (0085). */
   promise: string;
+  route_metres: number | null;
+  route_seconds: number | null;
+  route_source: RouteSource | null;
+  ready_after_seconds: number;
+  arrives_after_seconds: number | null;
   decision_rule: string;
 };
 
@@ -465,6 +481,10 @@ export type VendorOrder = {
   checkout_group_id: string;
   status: string;
   fulfilment_method: FulfilmentMethod;
+  /** The road from the shop to the door as the quote priced it; null on a collected order. */
+  route_metres?: number | null;
+  route_seconds?: number | null;
+  route_source?: RouteSource | null;
   lines: VendorOrderLine[];
   total_minor: number;
   placed_at: string;
@@ -507,6 +527,8 @@ export type DeliveryAssignment = {
    * says the amount is unavailable rather than showing a plausible guess.
    */
   route_metres?: number | null;
+  route_seconds?: number | null;
+  route_source?: RouteSource | null;
   expected_earning_minor?: number | null;
 };
 

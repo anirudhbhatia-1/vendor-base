@@ -27,6 +27,7 @@ import {
   Skeleton,
   TextAction,
   formatDistanceMeters,
+  formatTravelSeconds,
   formatMoneyMinor,
 } from '@neighbourhood-store/ui';
 import { AddressSetup } from './address-setup';
@@ -112,6 +113,7 @@ function StoreCard({
               {store.category.replaceAll('_', ' ').toLowerCase()}
             </span>{' '}
             · {formatDistanceMeters(store.distance_meters)} ·{' '}
+            {formatTravelSeconds(store.travel_seconds, store.distance_source)} ·{' '}
             {t('customer.store.minimum', 'Minimum')}{' '}
             {formatMoneyMinor(store.minimum_order_minor, 'compact')}
           </p>

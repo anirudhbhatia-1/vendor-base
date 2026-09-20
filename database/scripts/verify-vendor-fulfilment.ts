@@ -20,6 +20,8 @@ import {
   MoneyNotFoundError,
   MoneyStateError,
 } from '../src/money-lifecycle.js';
+import { calculatePartnerOfferEarning } from '../src/money-policy.js';
+import { ESTIMATE_ROAD_FACTOR } from '../src/routing.js';
 import { OrderMoneyOrchestrator } from '../src/order-money-orchestrator.js';
 import { CustomerCartService } from '../src/customer-cart.js';
 import { DeliveryDispatchOrchestrator } from '../src/delivery-dispatch.js';
@@ -132,9 +134,17 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     await pool.query(
       `INSERT INTO marketplace.customer_addresses
         (customer_address_id,user_id,address_reference,label,pin_code,coordinates,request_id,correlation_id)
-       VALUES ($1,$2,'SYNTH-ADDRESS-FULFIL','SYNTH Fulfilment Home','302020',
-         ST_SetSRID(ST_MakePoint(75.811,26.911),4326)::geography,$3,$3)`,
-      [addressId, customerId, createUuidV7()],
+       VALUES ($1,$2,'SYNTH-ADDRESS-FULFIL-' || $4,'SYNTH Fulfilment Home','302020',
+         ST_SetSRID(ST_MakePoint(75.815,26.911),4326)::geography,$3,$3)`,
+      [
+        addressId,
+        customerId,
+        createUuidV7(),
+        // A few hundred metres east of store A rather than on it, so a road and
+        // a straight line are different numbers and an earning or an offer that
+        // measured its own line would be caught (D-17). Unique per run.
+        customerId.replaceAll('-', '').slice(-10).toUpperCase(),
+      ],
     );
     const cart = await carts.currentCart({ context: customerContext(customerId), now });
     await carts.setCartAddress({
@@ -1787,6 +1797,38 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           held.partner_user_id === riders.near,
         `The first offer did not go to the nearest online partner (${JSON.stringify(held)})`,
       );
+      // D-17: the offer card shows the road the order was priced on -- the
+      // quote's stored route, with its travel time and source -- not a line
+      // measured again at offer time.
+      const offered = await assignments.listOffersForPartner({
+        now: new Date(dispatchBase.getTime() + 1_500),
+        partner_user_id: riders.near,
+      });
+      const shown = offered.find(
+        (offer) => offer.delivery_assignment_id === attempt.delivery_assignment_id,
+      );
+      const pricedForOffer = await pool.query<{ route_metres: string; route_seconds: string }>(
+        `SELECT qg.route_metres::text, qg.route_seconds::text
+           FROM marketplace.delivery_assignments a
+           JOIN marketplace.vendor_orders o ON o.vendor_order_id = a.vendor_order_id
+           JOIN marketplace.checkout_groups cg USING (checkout_group_id)
+           JOIN marketplace.checkout_quote_groups qg
+             ON qg.checkout_quote_id = cg.checkout_quote_id AND qg.vendor_location_id = o.vendor_location_id
+          WHERE a.delivery_assignment_id=$1`,
+        [attempt.delivery_assignment_id],
+      );
+      check(
+        shown !== undefined &&
+          shown.route_metres === Number(pricedForOffer.rows[0]?.route_metres) &&
+          shown.route_seconds === Number(pricedForOffer.rows[0]?.route_seconds) &&
+          shown.route_source === 'ESTIMATE' &&
+          shown.expected_earning_minor ===
+            calculatePartnerOfferEarning({
+              package_count: shown.package_count,
+              route_metres: shown.route_metres ?? 0,
+            }).total_minor,
+        `The offer does not show the road the order was priced on (${JSON.stringify({ shown, priced: pricedForOffer.rows[0] })})`,
+      );
 
       // They ignore it. Five minutes later the offer expires, returns to the
       // pool, and must go to the other rider -- not straight back.
@@ -2128,6 +2170,37 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           Number(earning.rows[0]?.net_minor) > 0 &&
           earning.rows[0]?.ledger !== null,
         'The partner’s earning was not recorded and posted to the ledger',
+      );
+      // D-17: the earning is computed on the road the order was priced on --
+      // the route the quote stored -- not on a straight line drawn at
+      // settlement. The two differ by the road factor, so a settlement that
+      // measured its own line would land on a different amount.
+      const pricedRoute = await pool.query<{ route_metres: string; line: string }>(
+        `SELECT qg.route_metres::text,
+                ST_Distance(l.coordinates, a.coordinates)::bigint::text AS line
+           FROM marketplace.vendor_orders o
+           JOIN marketplace.checkout_groups cg USING (checkout_group_id)
+           JOIN marketplace.checkout_quotes q ON q.checkout_quote_id = cg.checkout_quote_id
+           JOIN marketplace.checkout_quote_groups qg
+             ON qg.checkout_quote_id = q.checkout_quote_id AND qg.vendor_location_id = o.vendor_location_id
+           JOIN marketplace.vendor_locations l ON l.vendor_location_id = o.vendor_location_id
+           JOIN marketplace.customer_addresses a ON a.customer_address_id = q.customer_address_id
+          WHERE o.vendor_order_id=$1`,
+        [orderA.vendor_order_id],
+      );
+      const pricedMetres = Number(pricedRoute.rows[0]?.route_metres);
+      const expectedEarning = calculatePartnerOfferEarning({
+        package_count: 1,
+        route_metres: pricedMetres,
+      });
+      check(
+        Number.isSafeInteger(pricedMetres) &&
+          pricedMetres > 0 &&
+          pricedMetres !== Number(pricedRoute.rows[0]?.line) &&
+          pricedMetres === Math.round(Number(pricedRoute.rows[0]?.line) * ESTIMATE_ROAD_FACTOR) &&
+          Number(earning.rows[0]?.net_minor) ===
+            expectedEarning.base_minor + expectedEarning.distance_minor,
+        `The partner was paid on a distance other than the road the order was priced on (net ${earning.rows[0]?.net_minor}, road ${pricedMetres}, line ${pricedRoute.rows[0]?.line})`,
       );
 
       // An order nobody delivered still settles. Settlement ran only on

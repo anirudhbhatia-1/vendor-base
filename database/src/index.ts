@@ -45,4 +45,5 @@ export * from './admin-onboarding.js';
 export * from './vendor-settings.js';
 export * from './config.js';
 export * from './database-pool.js';
+export * from './routing.js';
 export * from './runtime-config.js';

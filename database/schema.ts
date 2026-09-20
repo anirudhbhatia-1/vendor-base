@@ -1635,3 +1635,34 @@ export const deliveryAssignmentRatings = marketplaceSchema.table(
     index('delivery_assignment_ratings_by_partner').on(table.partnerUserId, table.createdAt),
   ],
 );
+
+/** Road routes by rounded coordinate pair, so one order's quote, offer and settlement ask the provider once (0085). */
+export const routeCache = marketplaceSchema.table(
+  'route_cache',
+  {
+    routeCacheId: uuid('route_cache_id').primaryKey(),
+    provider: text('provider').notNull(),
+    profile: text('profile').notNull(),
+    originKey: text('origin_key').notNull(),
+    destinationKey: text('destination_key').notNull(),
+    distanceMetres: integer('distance_metres').notNull(),
+    durationSeconds: integer('duration_seconds').notNull(),
+    computedAt: timestamp('computed_at', { withTimezone: true }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    check('route_cache_provider_allowed', sql`${table.provider} IN ('MAPBOX')`),
+    check(
+      'route_cache_amounts_sane',
+      sql`${table.distanceMetres} >= 0 AND ${table.durationSeconds} >= 0`,
+    ),
+    check('route_cache_window', sql`${table.expiresAt} > ${table.computedAt}`),
+    uniqueIndex('route_cache_pair_unique').on(
+      table.provider,
+      table.profile,
+      table.originKey,
+      table.destinationKey,
+    ),
+    index('route_cache_expiry').on(table.expiresAt),
+  ],
+);

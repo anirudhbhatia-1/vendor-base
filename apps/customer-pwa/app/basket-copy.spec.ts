@@ -4,6 +4,7 @@ import {
   groupUnavailableSentence,
   lineStaleSentence,
   quoteBlockedSentence,
+  quotePromiseSentence,
 } from './basket-copy.js';
 
 const fallback = (_key: string, text: string) => text;
@@ -42,4 +43,46 @@ test('a blocked quote group is explained by its reason, and a new reason is stil
   assert.match(quoteBlockedSentence('MINIMUM_NOT_MET', fallback), /under the store’s minimum/);
   assert.match(quoteBlockedSentence('INVENTORY_UNAVAILABLE', fallback), /not have enough/);
   assert.match(quoteBlockedSentence('SOMETHING_NEW', fallback), /cannot take this order/);
+});
+
+test('the promise is composed from the stored numbers, and an estimated road says so', () => {
+  assert.equal(
+    quotePromiseSentence(
+      {
+        fulfilment_method: 'CUSTOMER_PICKUP',
+        ready_after_seconds: 900,
+        arrives_after_seconds: null,
+        route_metres: null,
+        route_source: null,
+      },
+      fallback,
+    ),
+    'Ready in about 15 minutes.',
+  );
+  assert.equal(
+    quotePromiseSentence(
+      {
+        fulfilment_method: 'PLATFORM_DELIVERY',
+        ready_after_seconds: 900,
+        arrives_after_seconds: 1_500,
+        route_metres: 2_346,
+        route_source: 'MAPBOX',
+      },
+      fallback,
+    ),
+    'Arrives in about 25–40 minutes, 2.3 km by road.',
+  );
+  assert.match(
+    quotePromiseSentence(
+      {
+        fulfilment_method: 'VENDOR_DELIVERY',
+        ready_after_seconds: 600,
+        arrives_after_seconds: 1_200,
+        route_metres: 1_950,
+        route_source: 'ESTIMATE',
+      },
+      fallback,
+    ),
+    /Arrives in about 20–35 minutes, 1\.9 km by road\. The road is estimated\./,
+  );
 });

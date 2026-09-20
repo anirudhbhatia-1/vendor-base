@@ -45,6 +45,9 @@ export interface DeliveryAssignmentRecord {
    * accept work without being told how far it was or what it paid.
    */
   readonly route_metres?: number | null;
+  /** Travel time on that route and where the route came from, when the quote stored one (0085). */
+  readonly route_seconds?: number | null;
+  readonly route_source?: 'ESTIMATE' | 'MAPBOX' | null;
   readonly expected_earning_minor?: number | null;
   readonly approximate_pickup_area: string;
   /**
@@ -517,15 +520,21 @@ export class AssignmentCustodyService {
       vendor_order_id: string | null;
       version: number;
       route_metres: string | null;
+      route_seconds: string | null;
+      route_source: 'ESTIMATE' | 'MAPBOX' | null;
     }>(
-      // The route is measured from the vendor to the customer's address, the
-      // same pair the delivery fee was quoted against, so the distance a
-      // partner is shown is the distance the order was actually priced on.
+      // The route is the one the quote priced the order on -- the road from
+      // the vendor to the customer's address (0085) -- so the distance a
+      // partner is shown is the distance the order was actually priced on. A
+      // quote older than routing carries none and falls back to the line.
       `SELECT a.delivery_assignment_id, a.source_order_reference, a.vendor_location_id,
               a.partner_user_id, a.assignment_state, a.custody_state, a.package_count,
               a.handling_flags, a.approximate_pickup_area, a.approximate_drop_area,
               a.offer_expires_at, a.vendor_order_id, a.version,
-              ST_Distance(location.coordinates, address.coordinates)::bigint::text AS route_metres
+              COALESCE(quote_group.route_metres::bigint,
+                       ST_Distance(location.coordinates, address.coordinates)::bigint)::text AS route_metres,
+              quote_group.route_seconds::text AS route_seconds,
+              quote_group.route_source
          FROM marketplace.delivery_assignments a
          JOIN marketplace.vendor_locations location
            ON location.vendor_location_id = a.vendor_location_id
@@ -533,6 +542,9 @@ export class AssignmentCustodyService {
          LEFT JOIN marketplace.checkout_groups g ON g.checkout_group_id = o.checkout_group_id
          LEFT JOIN marketplace.checkout_quotes quote
                 ON quote.checkout_quote_id = g.checkout_quote_id
+         LEFT JOIN marketplace.checkout_quote_groups quote_group
+                ON quote_group.checkout_quote_id = quote.checkout_quote_id
+               AND quote_group.vendor_location_id = a.vendor_location_id
          LEFT JOIN marketplace.customer_addresses address
                 ON address.customer_address_id = quote.customer_address_id
         WHERE a.assignment_state = 'OFFERED'
@@ -560,6 +572,8 @@ export class AssignmentCustodyService {
       }
       return Object.freeze({
         route_metres: routeMetres,
+        route_seconds: row.route_seconds === null ? null : Number(row.route_seconds),
+        route_source: row.route_source,
         expected_earning_minor: expectedEarning,
         delivery_assignment_id: parseUuidV7(row.delivery_assignment_id),
         source_order_reference: row.source_order_reference,

@@ -15,21 +15,31 @@
     "malwareScanning": "ClamAV (deferred until an adapter exists)",
     "push": "FCM and Web Push",
     "observability": "Grafana Cloud Free",
-    "analytics": "PostHog Free"
+    "analytics": "PostHog Free",
+    "routing": "Mapbox Directions and Matrix (D-17) for road distance and travel time; the labelled estimate until MAPBOX_ACCESS_TOKEN is injected"
   },
-  "notYetConnected": ["objectStorage", "malwareScanning", "push", "observability", "analytics"],
+  "notYetConnected": [
+    "objectStorage",
+    "malwareScanning",
+    "push",
+    "observability",
+    "analytics",
+    "routing"
+  ],
   "externalResourceState": {
     "pwaAndCdn": "provisioned",
     "database": "provisioned-synthetic-development-project",
     "objectStorage": "not-activated",
     "compute": "provisioned",
-    "remainingProviders": "not-connected"
+    "remainingProviders": "not-connected",
+    "routing": "adapter-implemented-token-not-configured"
   },
   "credentialPolicy": "Provider credentials are stored only in provider secret stores, the company password manager and the VM's uncommitted release.env, and are never committed.",
   "supersededTargets": {
     "objectStorage": "Cloudflare R2, superseded by D-15 which approves Supabase Storage; the adapter is implemented, no bucket is provisioned",
     "pwaAndCdn": "Cloudflare Pages for all four PWAs (D-12), Workers/OpenNext for the customer PWA (D-15) and Azure Static Web Apps (D-16 first draft: not creatable in the subscription's allowed regions), superseded by Azure Storage static websites for the shells and a container app for the customer PWA",
     "compute": "OCI Always Free with a Cloudflare Tunnel (D-15 inventory) and an Azure VM (D-16 first draft: no B-series size is offered to the subscription, the smallest VM costs about $54/month), superseded by Azure Container Apps",
-    "queue": "Valkey on OCI, then on the Azure VM, superseded by a Valkey container app"
+    "queue": "Valkey on OCI, then on the Azure VM, superseded by a Valkey container app",
+    "routing": "Mappls (D-15 staging target), superseded by D-17 which selects Mapbox for the synthetic environments"
   }
 }

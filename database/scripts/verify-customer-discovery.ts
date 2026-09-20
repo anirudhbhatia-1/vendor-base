@@ -18,6 +18,7 @@ import {
 import { InventoryReservationService } from '../src/inventory-reservations.js';
 import { LocalProtectedObjectStorage } from '../src/protected-object-storage.js';
 import { VendorOnboardingService } from '../src/vendor-onboarding.js';
+import { ESTIMATE_ROAD_FACTOR } from '../src/routing.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
 import { adminContext, check, rejects, vendorContext } from './verify-support.js';
 
@@ -97,6 +98,28 @@ export async function verifyCustomerDiscovery(connectionString: string): Promise
         stores[0]?.vendor_location_id === near.locationId &&
         stores[1]?.vendor_location_id === midtown.locationId,
       'Discovery did not resolve exactly the in-zone published stores, nearest first',
+    );
+    // D-17: the distance a store is listed at is the road, and it says where
+    // it came from. No maps provider is configured here, so the road is the
+    // labelled estimate -- the straight line times the road factor -- and the
+    // travel time follows from it.
+    const midtownLine = await pool.query<{ metres: string }>(
+      `SELECT ST_Distance(l.coordinates, a.coordinates)::text AS metres
+         FROM marketplace.vendor_locations l, marketplace.customer_addresses a
+        WHERE l.vendor_location_id=$1 AND a.customer_address_id=$2`,
+      [midtown.locationId, addressId],
+    );
+    const midtownRoad = Math.round(Number(midtownLine.rows[0]?.metres) * ESTIMATE_ROAD_FACTOR);
+    check(
+      stores[1] !== undefined &&
+        stores[1].distance_source === 'ESTIMATE' &&
+        // The estimate is spherical and PostGIS is spheroidal: a quarter of a
+        // percent apart at ten kilometres.
+        Math.abs(stores[1].distance_meters - midtownRoad) <= midtownRoad * 0.005 &&
+        stores[1].travel_seconds === Math.max(60, Math.round(stores[1].distance_meters / 5)) &&
+        stores[0]?.distance_meters === 0 &&
+        stores[0].travel_seconds === 60,
+      `Stores are not listed at their road distance with its source (${JSON.stringify(stores.map((s) => [s.distance_meters, s.travel_seconds, s.distance_source]))}, expected road ${midtownRoad})`,
     );
     check(
       !stores.some((store) => store.vendor_location_id === far.locationId),

@@ -40,6 +40,7 @@ import { verifyVendorPublication } from './verify-vendor-publication.js';
 import { verifyInventoryReservations } from './verify-inventory-reservations.js';
 import { verifyAssignmentCustody } from './verify-assignment-custody.js';
 import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
+import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
 import { verifyCatalogueFreshnessModeration } from './verify-catalogue-freshness-moderation.js';
@@ -780,6 +781,7 @@ await withDatabaseClient(config, async (client) => {
   await measure('customer_addresses', () => verifyCustomerAddresses(config.connectionString));
   await measure('customer_discovery', () => verifyCustomerDiscovery(config.connectionString));
   await measure('customer_enrolment', () => verifyCustomerEnrolment(config.connectionString));
+  await measure('routing', () => verifyRouting(config.connectionString));
   await measure('customer_cart', () => verifyCustomerCart(config.connectionString));
   await measure('grouped_checkout', () => verifyGroupedCheckout(config.connectionString));
   await measure('vendor_fulfilment', () => verifyVendorFulfilment(config.connectionString));

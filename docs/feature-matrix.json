@@ -212,7 +212,7 @@
       "name": "Transparent pricing",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Quote shows per-group item/delivery/tip/buffer breakdown. Audit run 41: amounts asserted against the pricing module at the connected layer, D-05 worked examples table-driven, the policy version stamped and resolvable as of the quote instant after a later policy change.",
+      "notes": "Quote shows per-group item/delivery/tip/buffer breakdown. Audit run 41: amounts asserted against the pricing module at the connected layer, D-05 worked examples table-driven, the policy version stamped and resolvable as of the quote instant after a later policy change. D-17: the delivery fee is priced on the road (Mapbox, or a labelled estimate), stored on the quote group with its source.",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -615,7 +615,7 @@
       "name": "Serviceability validation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Discovery returns only eligible stores for address",
+      "notes": "Discovery returns only eligible stores for address. D-17: stores are ordered and the maximum-distance filter applied by road, with travel time and the route's source on every store.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1171,7 +1171,7 @@
       "name": "Multi-store quote",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Per-group totals, fulfilment, promise; a collected group carries no delivery fee (batch 10). Audit run 43: bound to the cart's content -- a retry replays, a change re-quotes, a changed cart cannot place the old quote; every group returned quoted or blocked with a reason the checkout explains by store. The promise is fixed copy, not a calculation.",
+      "notes": "Per-group totals, fulfilment, promise; a collected group carries no delivery fee (batch 10). Audit run 43: bound to the cart's content -- a retry replays, a change re-quotes, a changed cart cannot place the old quote; every group returned quoted or blocked with a reason the checkout explains by store. D-17: the promise is preparation time plus road travel time, composed in the customer's language and marked when the road is estimated.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4384,7 +4384,7 @@
       "name": "Offer earnings preview",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Expected earning and route distance are computed from versioned policy and shown before acceptance",
+      "notes": "Expected earning and route distance are computed from versioned policy and shown before acceptance. D-17: the distance is the road the order was priced on (the quote's stored route) with its travel time and source; the settled earning uses the same road.",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { HealthController } from './health.controller.js';
+import { apiLogger } from './json-logger.js';
 import { LifecycleService } from './lifecycle.service.js';
 import { RequestExceptionFilter } from './request-exception.filter.js';
 import { RequestReferenceInterceptor } from './request-reference.interceptor.js';
@@ -37,6 +38,9 @@ import {
   PartnerWaitPolicyService,
   LocalNotificationService,
   LocalFakeMoneyProvider,
+  RoutingService,
+  createDatabasePool,
+  createRoutingService,
   ConfigurationAdminService,
   AdminOnboardingService,
   VendorSettingsService,
@@ -55,10 +59,11 @@ import { WhoAmIController } from './whoami.controller.js';
 import {
   ACCESS_IDENTITY,
   ADMIN_ONBOARDING,
+  GATED_CAPABILITIES,
   IDENTITY_PASSWORD,
   OTP_IDENTITY,
+  ROUTING,
   SESSION_IDENTITY,
-  GATED_CAPABILITIES,
   VENDOR_NETWORK,
   VENDOR_SETTINGS,
 } from './tokens.js';
@@ -332,10 +337,27 @@ import {
         new CustomerAddressService({ connection_string: config.databaseUrl }),
     },
     {
-      provide: CUSTOMER_DISCOVERY,
+      // One road-routing service for every module that needs a distance or a
+      // travel time (D-17): Mapbox with the injected token, or the labelled
+      // estimate. The cache lives in the same database.
+      provide: ROUTING,
       inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new CustomerDiscoveryService({ connection_string: config.databaseUrl }),
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>): RoutingService =>
+        createRoutingService({
+          routing: config.routing,
+          pool: createDatabasePool({
+            connectionString: config.databaseUrl,
+            application_name: 'neighbourhood-store-routing',
+            max: 4,
+          }),
+          log: (event, fields) => apiLogger.event(event, fields),
+        }),
+    },
+    {
+      provide: CUSTOMER_DISCOVERY,
+      inject: [RUNTIME_CONFIG, ROUTING],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, routing: RoutingService) =>
+        new CustomerDiscoveryService({ connection_string: config.databaseUrl, routing }),
     },
     {
       provide: CUSTOMER_CART,
@@ -345,14 +367,15 @@ import {
     },
     {
       provide: GROUPED_CHECKOUT,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+      inject: [RUNTIME_CONFIG, ROUTING],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, routing: RoutingService) =>
         new GroupedCheckoutService({
           connection_string: config.databaseUrl,
           provider: new LocalFakeMoneyProvider({
             clearing_account_reference: config.providerClearingAccountReference,
             webhook_key: config.paymentWebhookKey,
           }),
+          routing,
         }),
     },
     {

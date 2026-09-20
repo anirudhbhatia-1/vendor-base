@@ -25,7 +25,12 @@ import {
   formatCountdown,
   formatMoneyMinor,
 } from '@neighbourhood-store/ui';
-import { groupUnavailableSentence, lineStaleSentence, quoteBlockedSentence } from './basket-copy';
+import {
+  groupUnavailableSentence,
+  lineStaleSentence,
+  quoteBlockedSentence,
+  quotePromiseSentence,
+} from './basket-copy';
 import { useCart } from './cart-store';
 import { customerApiClient } from './customer-session';
 import { displayLabel, shortReference } from './display';
@@ -534,7 +539,7 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
                   ? ` · ${t('customer.quote.tip', 'Tip')} ${formatMoneyMinor(group.tip_minor)}`
                   : ''}
               </p>
-              <p className="quote-promise">{group.promise}</p>
+              <p className="quote-promise">{quotePromiseSentence(group, t)}</p>
             </Card>
           ))}
 

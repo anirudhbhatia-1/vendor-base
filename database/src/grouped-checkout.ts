@@ -11,6 +11,7 @@ import { Pool, type PoolClient } from 'pg';
 import { calculateCheckoutPricing } from './checkout-pricing.js';
 import { resolveFinancialPolicy } from './financial-policy.js';
 import { releaseReservationsLocked } from './inventory-reservations.js';
+import { promiseWindow, RoutingService, type RouteLeg } from './routing.js';
 import {
   LocalFakeMoneyProvider,
   type FakeProviderScenario,
@@ -78,7 +79,13 @@ type GroupRow = {
   method_offered: boolean;
   tip_minor: string;
   minimum_order_minor: string;
-  route_metres: string;
+  /** The straight line, kept as the estimate's input; the road comes from routing. */
+  straight_line_metres: string;
+  store_latitude: number;
+  store_longitude: number;
+  address_latitude: number;
+  address_longitude: number;
+  preparation_seconds: number;
   lines: QuoteLineRow[];
 };
 type SuppliedGroupRow = Omit<GroupRow, 'lines'> & { lines: SuppliedLineRow[] };
@@ -178,7 +185,31 @@ type QuoteGroupProjection = Record<string, unknown> & {
   readonly tip_minor: string | number;
   readonly total_minor: string | number;
   readonly vendor_location_id: string;
+  readonly route_metres: string | number | null;
+  readonly route_seconds: string | number | null;
+  readonly route_source: 'ESTIMATE' | 'MAPBOX' | null;
+  readonly ready_after_seconds: string | number;
+  readonly arrives_after_seconds: string | number | null;
 };
+
+/**
+ * The promise in words, from the numbers the quote stored. Rounded up to
+ * whole minutes with a quarter hour of slack on delivery; an estimate says
+ * "about" the same way a routed answer does, because both are.
+ */
+export function promiseSentence(input: {
+  readonly fulfilment_method: string;
+  readonly ready_after_seconds: number;
+  readonly arrives_after_seconds: number | null;
+  readonly route_source: 'ESTIMATE' | 'MAPBOX' | null;
+}): string {
+  const readyMinutes = Math.max(1, Math.ceil(input.ready_after_seconds / 60));
+  if (input.fulfilment_method === 'CUSTOMER_PICKUP' || input.arrives_after_seconds === null) {
+    return `Ready in about ${readyMinutes} minutes`;
+  }
+  const from = Math.max(1, Math.ceil(input.arrives_after_seconds / 60));
+  return `Arrives in about ${from}–${from + 15} minutes`;
+}
 type BlockedGroupProjection = {
   readonly cart_vendor_group_id: string;
   readonly reason_code: string;
@@ -222,9 +253,12 @@ function reference(prefix: 'CHECKOUT' | 'ORDER' | 'PAY' | 'CMD', id: string) {
 export class GroupedCheckoutService {
   readonly #pool: Pool;
   readonly #provider: MoneyProviderAdapter;
+  readonly #routing: RoutingService;
   constructor(input: {
     readonly connection_string: string;
     readonly provider?: MoneyProviderAdapter;
+    /** Road distance and travel time; without one, every route is a labelled estimate. */
+    readonly routing?: RoutingService;
     readonly webhook_key?: string;
   }) {
     this.#pool = createDatabasePool({
@@ -237,6 +271,7 @@ export class GroupedCheckoutService {
       new LocalFakeMoneyProvider({
         ...(input.webhook_key === undefined ? {} : { webhook_key: input.webhook_key }),
       });
+    this.#routing = input.routing ?? new RoutingService({ pool: this.#pool });
   }
   async close() {
     await this.#pool.end();
@@ -328,6 +363,22 @@ export class GroupedCheckoutService {
         .filter((entry) => entry.reason === null)
         .map((entry) => entry.group as unknown as SuppliedGroupRow);
       if (!valid.length) throw new CheckoutConflictError('Every cart group is blocked');
+      // The road from each store to the door, for every group that travels
+      // one. D-05 prices per route kilometre; until routing existed the fee
+      // was priced on the straight line and no travel time was promised.
+      const routes = new Map<string, RouteLeg | null>();
+      for (const group of valid) {
+        routes.set(
+          group.cart_vendor_group_id,
+          group.fulfilment_method === 'CUSTOMER_PICKUP'
+            ? null
+            : await this.#routing.route(
+                { latitude: group.store_latitude, longitude: group.store_longitude },
+                { latitude: group.address_latitude, longitude: group.address_longitude },
+                now,
+              ),
+        );
+      }
       // The quote is priced by whichever policy version is in force right now,
       // and stamps that version so nothing can re-price it later under another.
       const financialPolicy = await resolveFinancialPolicy(client, { at: now });
@@ -339,7 +390,7 @@ export class GroupedCheckoutService {
             (sum, line) => sum + Number(line.unit_price_minor) * line.quantity,
             0,
           ),
-          route_metres: Number(group.route_metres),
+          route_metres: routes.get(group.cart_vendor_group_id)?.distance_metres ?? 0,
           tip_minor: Number(group.tip_minor),
         })),
         financialPolicy,
@@ -383,8 +434,10 @@ export class GroupedCheckoutService {
         if (!price) throw new CheckoutConflictError('Pricing group disappeared');
         const quoteGroupId = createUuidV7();
         const reservationRef = reference('CHECKOUT', quoteGroupId);
+        const route = routes.get(group.cart_vendor_group_id) ?? null;
+        const promise = promiseWindow({ preparation_seconds: group.preparation_seconds, route });
         await client.query(
-          `INSERT INTO marketplace.checkout_quote_groups (checkout_quote_group_id,checkout_quote_id,cart_vendor_group_id,vendor_location_id,item_minor,delivery_minor,tip_minor,total_minor,reservation_reference) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          `INSERT INTO marketplace.checkout_quote_groups (checkout_quote_group_id,checkout_quote_id,cart_vendor_group_id,vendor_location_id,item_minor,delivery_minor,tip_minor,total_minor,reservation_reference,route_metres,route_seconds,route_source,ready_after_seconds,arrives_after_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
           [
             quoteGroupId,
             quoteId,
@@ -395,6 +448,11 @@ export class GroupedCheckoutService {
             price.tip_minor,
             price.total_minor,
             reservationRef,
+            route?.distance_metres ?? null,
+            route?.duration_seconds ?? null,
+            route?.source ?? null,
+            promise.ready_after_seconds,
+            promise.arrives_after_seconds,
           ],
         );
         for (const [lineIndex, line] of group.lines.entries()) {
@@ -1057,10 +1115,19 @@ export class GroupedCheckoutService {
         delivery_minor: Number(g.delivery_minor),
         tip_minor: Number(g.tip_minor),
         total_minor: Number(g.total_minor),
-        promise:
-          g.fulfilment_method === 'CUSTOMER_PICKUP'
-            ? 'Ready in 30–45 minutes'
-            : 'Arrives in 45–75 minutes',
+        route_metres: g.route_metres === null ? null : Number(g.route_metres),
+        route_seconds: g.route_seconds === null ? null : Number(g.route_seconds),
+        route_source: g.route_source,
+        ready_after_seconds: Number(g.ready_after_seconds),
+        arrives_after_seconds:
+          g.arrives_after_seconds === null ? null : Number(g.arrives_after_seconds),
+        promise: promiseSentence({
+          fulfilment_method: g.fulfilment_method,
+          ready_after_seconds: Number(g.ready_after_seconds),
+          arrives_after_seconds:
+            g.arrives_after_seconds === null ? null : Number(g.arrives_after_seconds),
+          route_source: g.route_source,
+        }),
         decision_rule: 'Quoted only when store, minimum, service area, price and stock validate',
       })),
       blocked_groups: blocked.rows,
@@ -1316,7 +1383,10 @@ export class GroupedCheckoutService {
     return client.query<GroupRow>(
       `SELECT g.cart_vendor_group_id,g.vendor_location_id,g.fulfilment_method,g.tip_minor::text,
               l.minimum_order_minor::text,
-              ST_Distance(l.coordinates,a.coordinates)::bigint::text route_metres,
+              ST_Distance(l.coordinates,a.coordinates)::bigint::text straight_line_metres,
+              ST_Y(l.coordinates::geometry)::float8 store_latitude, ST_X(l.coordinates::geometry)::float8 store_longitude,
+              ST_Y(a.coordinates::geometry)::float8 address_latitude, ST_X(a.coordinates::geometry)::float8 address_longitude,
+              l.preparation_seconds,
               (l.lifecycle_state='ACTIVE' AND vendor.lifecycle_state='ACTIVE'
                AND EXISTS (SELECT 1 FROM marketplace.vendor_publication_cases pub
                             WHERE pub.vendor_location_id=l.vendor_location_id AND pub.lifecycle_state='PUBLISHED')
@@ -1346,7 +1416,8 @@ export class GroupedCheckoutService {
          LEFT JOIN marketplace.inventory_items i ON i.vendor_location_id=g.vendor_location_id AND i.product_reference=p.product_reference
         WHERE c.cart_id=$1 AND c.user_id=$2 AND g.lifecycle_state='ACTIVE'
         GROUP BY g.cart_vendor_group_id,g.vendor_location_id,g.fulfilment_method,g.tip_minor,
-                 l.vendor_location_id,l.minimum_order_minor,l.coordinates,a.coordinates,l.lifecycle_state,vendor.lifecycle_state
+                 l.vendor_location_id,l.minimum_order_minor,l.coordinates,a.coordinates,l.preparation_seconds,
+                 l.lifecycle_state,vendor.lifecycle_state
         ORDER BY g.vendor_location_id`,
       [cartId, userId],
     );

@@ -12,6 +12,21 @@ export interface ProtectedObjectBucketNames {
   readonly vendor_onboarding: string;
 }
 
+export type RoutingProviderName = 'estimate' | 'mapbox';
+
+/**
+ * How road distance and travel time are found (D-17). `mapbox` needs the token;
+ * `estimate` is the straight line times a road factor, allowed only where the
+ * other synthetic adapters are, because a fee priced on an estimate is a
+ * synthetic fee.
+ */
+export interface RoutingRuntimeConfig {
+  readonly provider: RoutingProviderName;
+  readonly mapboxAccessToken: string | undefined;
+  readonly profile: 'cycling' | 'driving' | 'walking';
+  readonly timeoutMs: number;
+}
+
 export interface SharedRuntimeConfig {
   readonly dataMode: 'synthetic';
   readonly databaseUrl: string;
@@ -24,6 +39,7 @@ export interface SharedRuntimeConfig {
   readonly paymentWebhookKey: string;
   readonly providerClearingAccountReference: string;
   readonly queuePrefix: string;
+  readonly routing: RoutingRuntimeConfig;
   readonly syntheticProvidersAcknowledged: boolean;
   readonly valkeyUrl: string;
   readonly version: string;
@@ -220,6 +236,7 @@ export function loadSharedRuntimeConfig(): SharedRuntimeConfig {
   if (!/^[A-Z0-9][A-Z0-9._:/-]{3,127}$/.test(providerClearingAccountReference)) {
     throw new Error('PROVIDER_CLEARING_ACCOUNT_REFERENCE is invalid');
   }
+  const routing = resolveRoutingConfig(environment, syntheticProvidersAcknowledged);
   return Object.freeze({
     dataMode: 'synthetic',
     databaseUrl: resolveDatabaseUrl(environment),
@@ -232,8 +249,49 @@ export function loadSharedRuntimeConfig(): SharedRuntimeConfig {
     paymentWebhookKey,
     providerClearingAccountReference,
     queuePrefix,
+    routing,
     syntheticProvidersAcknowledged,
     valkeyUrl,
     version,
+  });
+}
+
+function resolveRoutingConfig(
+  environment: RuntimeEnvironment,
+  syntheticProvidersAcknowledged: boolean,
+): RoutingRuntimeConfig {
+  const rawProvider = process.env.ROUTING_PROVIDER ?? 'estimate';
+  if (rawProvider !== 'estimate' && rawProvider !== 'mapbox') {
+    throw new Error('ROUTING_PROVIDER must be estimate or mapbox');
+  }
+  const profile = process.env.ROUTING_PROFILE ?? 'driving';
+  if (profile !== 'cycling' && profile !== 'driving' && profile !== 'walking') {
+    throw new Error('ROUTING_PROFILE must be cycling, driving or walking');
+  }
+  const timeoutMs = Number(process.env.ROUTING_TIMEOUT_MS ?? '4000');
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 500 || timeoutMs > 30_000) {
+    throw new Error('ROUTING_TIMEOUT_MS must be a whole number of milliseconds from 500 to 30000');
+  }
+  const mapboxAccessToken = process.env.MAPBOX_ACCESS_TOKEN;
+  if (rawProvider === 'mapbox') {
+    if (!mapboxAccessToken) {
+      throw new Error('MAPBOX_ACCESS_TOKEN is required when ROUTING_PROVIDER=mapbox');
+    }
+    if (!/^(pk|sk)\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}$/.test(mapboxAccessToken)) {
+      throw new Error('MAPBOX_ACCESS_TOKEN is not a Mapbox token');
+    }
+  } else if (!syntheticProvidersAcknowledged) {
+    // The estimate is a synthetic distance, and a delivery fee priced on it is
+    // a synthetic fee: a deployment must either route on real roads or say
+    // knowingly that it is synthetic, the way it must for the fake OTP.
+    throw new Error(
+      `Routing by estimate is a synthetic provider and cannot serve the ${environment} environment. Set ROUTING_PROVIDER=mapbox with MAPBOX_ACCESS_TOKEN, or ALLOW_SYNTHETIC_PROVIDERS=synthetic-testing-only to run a knowingly synthetic deployment`,
+    );
+  }
+  return Object.freeze({
+    provider: rawProvider,
+    mapboxAccessToken: rawProvider === 'mapbox' ? mapboxAccessToken : undefined,
+    profile,
+    timeoutMs,
   });
 }

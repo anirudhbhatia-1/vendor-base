@@ -38,6 +38,22 @@ export function formatDistanceMeters(meters: number): string {
 }
 
 /**
+ * A travel time in whole minutes, never "0 min": a road of any length takes
+ * at least a minute to a person reading it. An estimate is marked as one, so
+ * a number the maps provider did not produce is not read as if it had.
+ */
+export function formatTravelSeconds(
+  seconds: number,
+  source?: 'ESTIMATE' | 'MAPBOX' | null,
+): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  const minutes = Math.max(1, Math.ceil(seconds / 60));
+  const time =
+    minutes >= 90 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`;
+  return source === 'ESTIMATE' ? `~${time} (est.)` : `~${time}`;
+}
+
+/**
  * Turns a wire enum into a sentence.
  *
  * `AWAITING_CUSTOMER_DECISION` was being printed at customers verbatim, or at

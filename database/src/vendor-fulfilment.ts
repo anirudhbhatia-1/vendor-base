@@ -145,6 +145,14 @@ export interface VendorOrderSummary {
    */
   readonly fulfilment_method: string;
   /**
+   * The road from the shop to the door, as the quote priced it (0085), so the
+   * shop's own driver knows how far and how long before setting off. Null on
+   * a collected order and on any quote older than routing.
+   */
+  readonly route_metres: number | null;
+  readonly route_seconds: number | null;
+  readonly route_source: 'ESTIMATE' | 'MAPBOX' | null;
+  /**
    * Who is collecting, and how far along they are.
    *
    * A shopkeeper with a packed order and a READY badge could not tell whether a
@@ -570,14 +578,14 @@ const VENDOR_ORDER_SUMMARY_SQL = `
          o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
          o.pickup_otp_attempts, o.out_for_delivery_at, o.delivery_otp_expires_at,
          o.delivery_otp_attempts, o.decline_reason_code,
-         method.fulfilment_method,
+         method.fulfilment_method, method.route_metres, method.route_seconds, method.route_source,
          collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
          resolution.reason_code AS resolution_reason_code,
          resolution.actor_kind AS resolution_actor_kind,
          resolution.occurred_at AS resolution_occurred_at
     FROM marketplace.vendor_orders o
     LEFT JOIN LATERAL (
-      SELECT cvg.fulfilment_method
+      SELECT cvg.fulfilment_method, cqg.route_metres, cqg.route_seconds, cqg.route_source
         FROM marketplace.checkout_groups cg
         JOIN marketplace.checkout_quote_groups cqg
           ON cqg.checkout_quote_id = cg.checkout_quote_id
@@ -650,6 +658,9 @@ function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
     // The same default `customerTracking` and dispatch apply: an order whose
     // checkout group cannot be joined is treated as a platform delivery.
     fulfilment_method: (row['fulfilment_method'] as string | null) ?? 'PLATFORM_DELIVERY',
+    route_metres: row['route_metres'] == null ? null : Number(row['route_metres']),
+    route_seconds: row['route_seconds'] == null ? null : Number(row['route_seconds']),
+    route_source: (row['route_source'] as 'ESTIMATE' | 'MAPBOX' | null) ?? null,
     resolution: row['resolution_reason_code']
       ? Object.freeze({
           reason_code: row['resolution_reason_code'] as string,

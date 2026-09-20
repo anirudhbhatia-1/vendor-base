@@ -14,6 +14,10 @@ const managedKeys = [
   'PAYMENT_WEBHOOK_KEY',
   'PROVIDER_CLEARING_ACCOUNT_REFERENCE',
   'RELEASE_VERSION',
+  'ROUTING_PROFILE',
+  'ROUTING_PROVIDER',
+  'ROUTING_TIMEOUT_MS',
+  'MAPBOX_ACCESS_TOKEN',
   'SUPABASE_DATABASE_URL',
   'VALKEY_URL',
 ] as const;
@@ -133,6 +137,9 @@ describe('object-storage driver selection', () => {
   it('lets the Supabase adapter serve a remote runtime with no synthetic acknowledgement', () => {
     configureDeployedEnvironment();
     Reflect.deleteProperty(process.env, 'ALLOW_SYNTHETIC_PROVIDERS');
+    // An unacknowledged deployment must route on real roads too (D-17).
+    process.env.ROUTING_PROVIDER = 'mapbox';
+    process.env.MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoidW5pdCIsImEiOiJ0ZXN0MDEyMyJ9.unit-test-signature';
     process.env.OBJECT_STORAGE_DRIVER = 'supabase';
     process.env.OBJECT_STORAGE_CATALOGUE_BUCKET = 'catalogue-approved';
     process.env.OBJECT_STORAGE_EVIDENCE_BUCKET = 'evidence-quarantine';
@@ -159,5 +166,55 @@ describe('object-storage driver selection', () => {
     process.env.OBJECT_STORAGE_CATALOGUE_BUCKET = 'one-bucket';
     process.env.OBJECT_STORAGE_EVIDENCE_BUCKET = 'one-bucket';
     assert.throws(loadSharedRuntimeConfig, /must not share a bucket/);
+  });
+});
+
+describe('routing provider selection', () => {
+  afterEach(restore);
+
+  it('defaults local development to the estimate', () => {
+    process.env.APP_ENV = 'local';
+    const config = loadSharedRuntimeConfig();
+    assert.equal(config.routing.provider, 'estimate');
+    assert.equal(config.routing.profile, 'driving');
+    assert.equal(config.routing.mapboxAccessToken, undefined);
+  });
+
+  it('routes on Mapbox when told to, with the token, and refuses a token that is not one', () => {
+    process.env.APP_ENV = 'local';
+    process.env.ROUTING_PROVIDER = 'mapbox';
+    assert.throws(() => loadSharedRuntimeConfig(), /MAPBOX_ACCESS_TOKEN is required/);
+    process.env.MAPBOX_ACCESS_TOKEN = 'definitely-not-a-token';
+    assert.throws(() => loadSharedRuntimeConfig(), /not a Mapbox token/);
+    process.env.MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoidW5pdCIsImEiOiJ0ZXN0MDEyMyJ9.unit-test-signature';
+    process.env.ROUTING_PROFILE = 'cycling';
+    const config = loadSharedRuntimeConfig();
+    assert.equal(config.routing.provider, 'mapbox');
+    assert.equal(config.routing.profile, 'cycling');
+    assert.equal(config.routing.mapboxAccessToken, process.env.MAPBOX_ACCESS_TOKEN);
+  });
+
+  it('refuses the estimate on a deployment that never acknowledged synthetic providers', () => {
+    configureDeployedEnvironment();
+    Reflect.deleteProperty(process.env, 'ALLOW_SYNTHETIC_PROVIDERS');
+    process.env.OBJECT_STORAGE_DRIVER = 'supabase';
+    process.env.OBJECT_STORAGE_CATALOGUE_BUCKET = 'catalogue';
+    process.env.OBJECT_STORAGE_EVIDENCE_BUCKET = 'evidence';
+    assert.throws(() => loadSharedRuntimeConfig(), /Routing by estimate is a synthetic provider/);
+    process.env.ROUTING_PROVIDER = 'mapbox';
+    process.env.MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoidW5pdCIsImEiOiJ0ZXN0MDEyMyJ9.unit-test-signature';
+    assert.equal(loadSharedRuntimeConfig().routing.provider, 'mapbox');
+  });
+
+  it('refuses a provider, profile or timeout it does not know', () => {
+    process.env.APP_ENV = 'local';
+    process.env.ROUTING_PROVIDER = 'google';
+    assert.throws(() => loadSharedRuntimeConfig(), /must be estimate or mapbox/);
+    process.env.ROUTING_PROVIDER = 'estimate';
+    process.env.ROUTING_PROFILE = 'flying';
+    assert.throws(() => loadSharedRuntimeConfig(), /ROUTING_PROFILE/);
+    process.env.ROUTING_PROFILE = 'driving';
+    process.env.ROUTING_TIMEOUT_MS = '10';
+    assert.throws(() => loadSharedRuntimeConfig(), /ROUTING_TIMEOUT_MS/);
   });
 });

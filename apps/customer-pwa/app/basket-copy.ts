@@ -96,3 +96,41 @@ export function quoteBlockedSentence(reason: string, t: Translate): string {
       return t('customer.quote.blocked.other', 'This store cannot take this order right now.');
   }
 }
+
+/**
+ * The quote's promise in the customer's language, from the numbers the
+ * server stored: the shop's preparation time, and the road for a delivery.
+ * The server's `promise` string is English; this composes the same promise
+ * from `ready_after_seconds` and `arrives_after_seconds`, and names the road
+ * as an estimate when the maps provider did not answer.
+ */
+export function quotePromiseSentence(
+  group: {
+    readonly fulfilment_method: string;
+    readonly ready_after_seconds: number;
+    readonly arrives_after_seconds: number | null;
+    readonly route_metres: number | null;
+    readonly route_source: 'ESTIMATE' | 'MAPBOX' | null;
+  },
+  t: Translate,
+): string {
+  const readyMinutes = String(Math.max(1, Math.ceil(group.ready_after_seconds / 60)));
+  if (group.fulfilment_method === 'CUSTOMER_PICKUP' || group.arrives_after_seconds === null) {
+    return t('customer.quote.promise.ready', 'Ready in about {minutes} minutes.').replace(
+      '{minutes}',
+      readyMinutes,
+    );
+  }
+  const from = Math.max(1, Math.ceil(group.arrives_after_seconds / 60));
+  const km = group.route_metres === null ? '' : (group.route_metres / 1000).toFixed(1);
+  const sentence = t(
+    'customer.quote.promise.arrives',
+    'Arrives in about {from}–{to} minutes, {km} km by road.',
+  )
+    .replace('{from}', String(from))
+    .replace('{to}', String(from + 15))
+    .replace('{km}', km);
+  return group.route_source === 'ESTIMATE'
+    ? `${sentence} ${t('customer.quote.promise.estimated', 'The road is estimated.')}`
+    : sentence;
+}

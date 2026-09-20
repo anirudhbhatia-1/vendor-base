@@ -19,6 +19,7 @@ import {
   TopBar,
   formatCountdown,
   formatDistanceMeters,
+  formatTravelSeconds,
   formatMoneyMinor,
 } from '@neighbourhood-store/ui';
 import Link from 'next/link';
@@ -53,6 +54,8 @@ type Assignment = {
   readonly source_order_reference: string;
   readonly version: number;
   readonly route_metres?: number | null;
+  readonly route_seconds?: number | null;
+  readonly route_source?: 'ESTIMATE' | 'MAPBOX' | null;
   readonly expected_earning_minor?: number | null;
   /**
    * Present only while this partner is holding the goods. The API decides that,
@@ -951,7 +954,10 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
                       <p className="offer-card__meta">
                         {offer.route_metres == null
                           ? 'Distance unavailable'
-                          : formatDistanceMeters(offer.route_metres)}{' '}
+                          : formatDistanceMeters(offer.route_metres)}
+                        {offer.route_seconds == null
+                          ? ''
+                          : ` · ${formatTravelSeconds(offer.route_seconds, offer.route_source)}`}{' '}
                         · {offer.package_count} package{offer.package_count === 1 ? '' : 's'}
                         {remaining === null ? '' : ` · ${remaining} to decide`}
                       </p>
