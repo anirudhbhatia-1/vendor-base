@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import type { WhoAmI } from '@neighbourhood-store/contracts';
@@ -287,6 +287,22 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
       setOutput(error instanceof Error ? error.message : 'Zones failed.');
     }
   }
+
+  // A control room shows its work on arrival. Every view used to open empty
+  // -- "Refresh queues to load current operational work." -- until a button
+  // was pressed, and the catalogue view said "0 live cases" over a queue that
+  // was not empty. The loaders are plain closures on this component, so the
+  // effect runs on mount and whenever the view changes.
+  useEffect(() => {
+    void refresh();
+    if (view === 'orders') void loadOrdersMonitor();
+    if (view === 'zones') void loadZones();
+    if (view === 'finance') {
+      void loadFinanceExceptions();
+      void loadPayments();
+    }
+    if (view === 'access') void loadOwnAccess();
+  }, [view]);
 
   async function loadOrdersMonitor() {
     try {

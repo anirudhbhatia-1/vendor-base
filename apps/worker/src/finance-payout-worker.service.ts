@@ -14,6 +14,7 @@ import {
   createAuthenticatedActor,
   createRequestContext,
   createUuidV7,
+  PLATFORM_SYSTEM_USER_ID,
 } from '@neighbourhood-store/domain-types';
 import { Queue, Worker } from 'bullmq';
 import { Pool } from 'pg';
@@ -151,8 +152,11 @@ export class FinancePayoutWorkerService implements OnApplicationBootstrap, OnApp
 
   #systemContext(job?: DurableJob) {
     return createRequestContext({
+      // The platform actor: the payout run acts on nobody's behalf, and the
+      // finance histories it writes require a user (0089). The worker's own
+      // id stays the session, which is what it is.
       actor: createAuthenticatedActor({
-        actor_id: this.#workerId,
+        actor_id: PLATFORM_SYSTEM_USER_ID,
         actor_kind: 'system',
         session_id: this.#workerId,
       }),

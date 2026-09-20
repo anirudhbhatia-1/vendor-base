@@ -25,9 +25,12 @@ const asCustomer = RequireAuthorization({
 });
 // A shop request is a lead for the vendor pipeline, so the queue is read and
 // moved under the onboarding capabilities rather than a capability of its own.
+// The queue is read by both sides of the onboarding pair (0091): it was gated
+// on `review`, so the operator who triages and closes requests could not
+// list them.
 const reviewRequests = RequireAuthorization({
   admin_scope: { kind: 'GLOBAL' },
-  capability: 'admin.vendor_onboarding.review',
+  capability: 'admin.vendor_onboarding.read',
   conceal_resource: true,
 });
 const manageRequests = RequireAuthorization({

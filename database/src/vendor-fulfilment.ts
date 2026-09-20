@@ -2562,7 +2562,10 @@ export class VendorFulfilmentService {
       const row = order.rows[0];
       if (!row) throw new FulfilmentNotFoundError();
       if (row.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
-      if (row.lifecycle_state !== 'PICKED_UP')
+      // A collected order ends at PICKED_UP; a delivered one at DELIVERED
+      // (0055). The check predates DELIVERED, so no delivered order could be
+      // rated: every rating from the orders screen answered a state conflict.
+      if (row.lifecycle_state !== 'PICKED_UP' && row.lifecycle_state !== 'DELIVERED')
         throw new FulfilmentConflictError('Only a completed order can be rated');
       const ids = contextIds(input.context);
       const inserted = await client.query(

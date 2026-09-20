@@ -54,6 +54,7 @@ function executionContext(request: Partial<AuthorizedRequest>): ExecutionContext
 }
 
 function buildGuard(input: {
+  readonly actorKind?: 'admin' | 'customer' | 'partner' | 'vendor_staff';
   readonly decision?:
     | {
         readonly actor_kind: 'admin' | 'customer' | 'partner' | 'vendor_staff';
@@ -87,6 +88,7 @@ function buildGuard(input: {
     },
   } as unknown as IdentitySessionService;
   const access = {
+    resolveActorKind: async () => input.actorKind ?? 'customer',
     evaluate: async (value: Record<string, unknown>) => {
       input.onEvaluate?.(value);
       return (
@@ -139,14 +141,18 @@ test('rejects a protected route without an opaque access credential', async () =
   await assert.rejects(() => activate(guard, { headers: {} }), UnauthorizedException);
 });
 
-test('authenticates an explicit session-only route without inferring a role', async () => {
-  const guard = buildGuard({ sessionRequired: true });
+test('authenticates an explicit session-only route as the actor the user is, with no role', async () => {
+  const guard = buildGuard({ sessionRequired: true, actorKind: 'vendor_staff' });
   const request: Partial<AuthorizedRequest> = {
     headers: { authorization: `Bearer ${accessToken}` },
   };
   assert.equal(await activate(guard, request), true);
   assert.equal(request[AUTHENTICATED_SESSION]?.user_id, userId);
-  assert.equal(request[AUTHORIZED_ACTOR], undefined);
+  // The request context carries who is calling -- the notifications list
+  // answered 500 for everyone while a session-only route ran with no actor --
+  // but no capability decision, and so no role.
+  assert.equal(request[AUTHORIZED_ACTOR]?.actor_id, userId);
+  assert.equal(request[AUTHORIZED_ACTOR]?.actor_kind, 'vendor_staff');
   assert.equal(request[AUTHORIZED_ROLE], undefined);
 });
 

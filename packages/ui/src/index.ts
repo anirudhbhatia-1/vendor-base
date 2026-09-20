@@ -85,7 +85,9 @@ export {
   isFinitePoint,
   parseGeocodeCandidates,
   parseReverseLabel,
+  parseReversePlace,
   reverseGeocodeUrl,
   type GeoPoint,
   type GeocodeCandidate,
+  type ReversePlace,
 } from './location-picker-support.js';

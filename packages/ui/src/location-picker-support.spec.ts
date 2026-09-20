@@ -9,6 +9,7 @@ import {
   parseGeocodeCandidates,
   parseReverseLabel,
   reverseGeocodeUrl,
+  parseReversePlace,
 } from './location-picker-support.js';
 
 const token = 'pk.eyJ1IjoidW5pdCIsImEiOiJ0ZXN0MDEyMyJ9.unit-test-signature';
@@ -88,4 +89,34 @@ test('points are validated and read back to five decimals', () => {
   assert.equal(isFinitePoint(null), false);
   assert.equal(formatPoint({ latitude: 26.91549, longitude: 75.811512 }), '26.91549, 75.81151');
   assert.equal(formatPoint(null), '—');
+});
+
+test('a reverse geocode answers with the place and the postcode it carries', () => {
+  const body = {
+    features: [
+      {
+        id: 'address.1',
+        geometry: { coordinates: [75.6344, 23.1055] },
+        properties: {
+          name: 'Freeganj',
+          full_address: 'Freeganj, 456222, Ujjain, Madhya Pradesh, India',
+          context: { postcode: { name: '456222' } },
+        },
+      },
+    ],
+  };
+  assert.deepEqual(parseReversePlace(body), {
+    label: 'Freeganj, 456222, Ujjain, Madhya Pradesh, India',
+    postcode: '456222',
+  });
+  assert.equal(parseReversePlace({ features: [] }), null);
+  const withoutPostcode = {
+    features: [
+      {
+        geometry: { coordinates: [75.6, 23.1] },
+        properties: { name: 'Somewhere', context: {} },
+      },
+    ],
+  };
+  assert.equal(parseReversePlace(withoutPostcode)?.postcode, null);
 });

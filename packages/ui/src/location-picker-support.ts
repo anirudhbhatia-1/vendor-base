@@ -112,10 +112,34 @@ export function parseGeocodeCandidates(body: unknown): readonly GeocodeCandidate
   return Object.freeze(candidates);
 }
 
+/** Where a dropped pin landed, in words, with the postcode the place carries. */
+export interface ReversePlace {
+  readonly label: string;
+  /** The postcode Mapbox attaches to the place, or null when it has none. */
+  readonly postcode: string | null;
+}
+
+/**
+ * The first candidate's address and postcode, for saying where a dropped pin
+ * landed and for filling the PIN a person would otherwise read off the map
+ * and type back in. Mapbox v6 carries the postcode in the feature's context.
+ */
+export function parseReversePlace(body: unknown): ReversePlace | null {
+  const [first] = parseGeocodeCandidates(body);
+  if (!first) return null;
+  const features = (body as { features?: unknown[] }).features ?? [];
+  const feature = features[0] as
+    { properties?: { context?: { postcode?: { name?: unknown } } } } | undefined;
+  const postcode = feature?.properties?.context?.postcode?.name;
+  return Object.freeze({
+    label: first.address || first.name,
+    postcode: typeof postcode === 'string' && postcode.trim() ? postcode.trim() : null,
+  });
+}
+
 /** The first candidate's address, for saying where a dropped pin landed. */
 export function parseReverseLabel(body: unknown): string | null {
-  const [first] = parseGeocodeCandidates(body);
-  return first ? first.address || first.name : null;
+  return parseReversePlace(body)?.label ?? null;
 }
 
 /**

@@ -43,6 +43,10 @@ test('an address is placed on a map, and saved at the point the customer chose',
     'with the token the API hands out',
   );
   assert.ok(source.includes('latitude: point.latitude'), 'and saved exactly where the pin is');
+  // The PIN the map read off the place is filled in; the person used to read
+  // it from the map's own caption and type it back.
+  assert.ok(source.includes('setPinCode(place.postcode)'), 'the PIN is filled from the place');
+  assert.ok(source.includes('setPinTyped(true)'), 'a PIN the person typed is theirs');
   assert.ok(
     source.includes("source === 'DEVICE' ? ('DEVICE_LOCATION' as const) : ('MANUAL_PIN' as const)"),
     'a device fix and a placed pin are told apart on the record',

@@ -78,6 +78,9 @@ test('scopes every partner application route to partner.application.manage', () 
 test('scopes every admin partner application route to admin.partner_application.review', () => {
   for (const method of adminApplicationRoutes) {
     assert.equal(adminAppAuth(method)?.capability, 'admin.partner_application.review', `${method}`);
+    // An ADMIN_SCOPE capability is evaluated against the scope in the
+    // evidence; without one it can never match, and the queue answered 404.
+    assert.deepEqual(adminAppAuth(method)?.admin_scope, { kind: 'GLOBAL' }, `${method} scope`);
   }
 });
 

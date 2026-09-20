@@ -161,6 +161,9 @@ assert(
       '0086_payment_intake_outcomes',
       '0087_checkout_submission',
       '0088_checkout_decisions_and_answers',
+      '0089_platform_system_user',
+      '0090_configuration_read',
+      '0091_vendor_onboarding_read',
     ]),
   'Unexpected reviewed migrations',
 );

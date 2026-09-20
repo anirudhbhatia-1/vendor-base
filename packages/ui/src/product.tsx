@@ -233,6 +233,8 @@ export function ProductTile({
           />
         ) : (
           <button
+            // Every tile on a page says "Add"; the name says what.
+            aria-label={unavailable ? `${title} is unavailable` : `Add ${title}`}
             className="ns-button ns-button--primary ns-button--small ns-button--block"
             disabled={busy || unavailable}
             onClick={() => onQuantityChange(1)}

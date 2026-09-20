@@ -1534,6 +1534,28 @@ The screen's own logic is in `checkout-outcome.ts` with four unit tests (each co
 
 **Step 7.6: VERIFIED_LOCAL**, with the hosted-handoff note and the Phase 8 forward finding carried.
 
+## Live QA pass (20 September 2026) — every role's workflow against the running stack
+
+Not an audit step. Between runs 46 and 47 the owner asked for the `supabase-production` stack to be run again and every API and feature walked step by step, per role, in workflow order. A scratch walk of 163 API steps (admin provisioning and every console read; vendor settings, catalogue, inventory, staff, insights, finance; partner standing, availability, earnings; customer preferences, addresses, discovery, cart; then five orders — a full delivery with wait, handover, delivery code, rating, support and settlement; a substitution proposal answered; a customer cancellation; a vendor decline; a customer pickup — and the admin's moderation, shop request, suspension, reports, export and dead-letter recovery) ends at 163 of 163, and the four Playwright journeys (customer OTP → address → basket → checkout; vendor accept → pick → ready; partner online → custody; admin sign-in, order monitor, moderation queue) all pass against the same stack. Nine defects, none of them in the step audits' domains, fixed on the way:
+
+| # | Found | Was | Now |
+|---|---|---|---|
+| L-01 | Worker: `vendor_order_events_actor_id_fkey` on every tick | The worker acted as a fresh random id per process; the accept-deadline sweep wrote an event with it, failed on the foreign key and rolled back — an order the shop never answered was never expired, its holds never released, an error every 15 s forever | A platform system user (`PLATFORM_SYSTEM_USER_ID`, migration 0089) is the actor every sweep and outbox consumer runs as, in both workers; the first tick after the fix expired the two overdue orders and voided their authorisation through the provider |
+| L-02 | `GET /notifications` 500 for every signed-in user | A session-only route ran with no actor in the request context; the notifications list asked who was calling and threw | The guard attaches an actor to session-only routes, its kind resolved from the user's live roles (`IdentityAccessService.resolveActorKind`) |
+| L-03 | Partner application queue and dispute resolution 404 for every admin | Two `admin.*` requirements named no `admin_scope`; an ADMIN_SCOPE capability without one can never match | Scoped; `admin-scope.spec.ts` reads every controller and refuses an admin requirement without a scope |
+| L-04 | Policy register 404 for the approver | Listing configurations was gated on `propose` (operator only) | `admin.configuration.read` (0090) for both sides of the pair |
+| L-05 | Onboarding queue and case 404 for the reviewer; shop-request queue 404 for the operator | Reads gated on one side of the maker-checker pair while the actions belonged to the other | `admin.vendor_onboarding.read` (0091) for both sides; queue, case and shop-request list read under it |
+| L-06 | Rating a delivered order 409 | `submitRating` admitted `PICKED_UP` alone, from before 0055 added `DELIVERED` | `DELIVERED` rated too; the fulfilment verifier rates a delivered order |
+| L-07 | Granting a role someone holds 500 | The single-active-row index (0070) surfaced as a unique violation | The held assignment is answered; the access verifier grants twice |
+| L-08 | Customer address form: the PIN read off the map had to be typed back | The picker showed "456222, Ujjain…" under the pin and left the PIN field empty | `LocationPicker` reports the geocoded place; the form fills the PIN from its postcode until the person types one |
+| L-09 | Admin console opened empty | Every view waited for "Refresh queues"; the catalogue view said "0 live cases" over a queue that was not | The workspace loads on arrival and on each view change |
+
+Also: every product tile's add button is now named after its product (fourteen tiles said "Add"); the three cross-role journeys and the customer loop journey were written against shells since rebuilt and are re-pointed at what the shells say now (the vendor journey ends at the counter note, because the pickup code is the partner's to show); a `checkout.submitted` event dead-lettered by the pre-run-45 worker was recovered through the admin API and consumed.
+
+Two things the walk needed that the repository does not provide: an admin account holding each side of the maker-checker pairs (the bootstrap grants one side; a second synthetic admin was seeded with the other) and a role a bootstrap admin cannot grant itself (`INCIDENT_COMMANDER` for reporting, granted by the second admin). Both are how the pairs are meant to work.
+
+**Verification.** `pnpm db:verify` exit 0 — 91 migrations; `vendor_fulfilment` 176 assertions (175); `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 556 pass / 0 fail; `pnpm test:integration` exit 0; the API walk 163/163 and `pnpm test:e2e` 23 passed with `LIVE_SUPABASE_ACCEPTANCE=true ACCEPTANCE_SEED_FIXTURES=true` against the running stack.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

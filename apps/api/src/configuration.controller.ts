@@ -34,6 +34,14 @@ const propose = RequireAuthorization({
   admin_scope: { kind: 'GLOBAL' },
   conceal_resource: true,
 });
+// Reading the register is its own capability (0090), held by both sides of
+// the maker-checker pair; it was gated on `propose`, so an approver could not
+// see what they were asked to approve.
+const read = RequireAuthorization({
+  capability: 'admin.configuration.read',
+  admin_scope: { kind: 'GLOBAL' },
+  conceal_resource: true,
+});
 const approve = RequireAuthorization({
   capability: 'admin.configuration.approve',
   admin_scope: { kind: 'GLOBAL' },
@@ -47,7 +55,7 @@ export class ConfigurationController {
   ) {}
 
   @Get()
-  @propose
+  @read
   list(@Query('status') status?: string) {
     return this.configuration.list({
       ...(status ? { status: status as ConfigurationStatus } : {}),

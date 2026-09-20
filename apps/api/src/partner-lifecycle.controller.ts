@@ -67,11 +67,16 @@ const partnerEarningsDispute = RequireAuthorization({
   capability: 'partner.earnings.dispute',
   conceal_resource: true,
 });
+// Both capabilities are ADMIN_SCOPE rules: without the scope in the evidence
+// the evaluation could never match, so no admin could open the partner
+// application queue or resolve a dispute -- every call answered 404.
 const adminReviewApplication = RequireAuthorization({
+  admin_scope: { kind: 'GLOBAL' },
   capability: 'admin.partner_application.review',
   conceal_resource: true,
 });
 const adminResolveDispute = RequireAuthorization({
+  admin_scope: { kind: 'GLOBAL' },
   capability: 'admin.partner_earnings.resolve',
   conceal_resource: true,
 });

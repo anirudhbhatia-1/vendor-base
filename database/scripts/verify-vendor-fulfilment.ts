@@ -1343,6 +1343,20 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       FulfilmentConflictError,
       'A second rating was accepted for the same order',
     );
+    // A delivered order can be rated too. The check predated DELIVERED (0055)
+    // and admitted PICKED_UP alone, so the orders screen's rating of any
+    // delivered order answered a state conflict.
+    await fulfilment.submitRating({
+      context: customerContext(customerId),
+      vendor_order_id: orderV.vendor_order_id,
+      stars: 4,
+      review_note: 'SYNTH rating - delivered to the door.',
+    });
+    const ratedDelivery = await pool.query<{ stars: number }>(
+      `SELECT stars FROM marketplace.vendor_order_ratings WHERE vendor_order_id=$1`,
+      [orderV.vendor_order_id],
+    );
+    check(ratedDelivery.rows[0]?.stars === 4, 'A delivered order could not be rated');
     await fulfilment.openSupportCase({
       context: customerContext(customerId),
       vendor_order_id: orderA.vendor_order_id,

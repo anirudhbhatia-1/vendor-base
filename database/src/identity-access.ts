@@ -453,6 +453,15 @@ export class IdentityAccessService {
       if (conflict.rows[0]?.conflict) {
         throw new AccessConflictError('Admin role violates separation of duties');
       }
+      // Granting a role someone already holds is the same grant again, not a
+      // second assignment: one active row per role is a database invariant
+      // (0070), and the duplicate used to surface as its unique violation.
+      const held = await client.query<{ role_assignment_id: string }>(
+        `SELECT role_assignment_id FROM marketplace.role_assignments
+          WHERE user_id = $1 AND role_key = $2 AND state = 'ACTIVE'`,
+        [input.user_id, input.role],
+      );
+      if (held.rows[0]) return parseUuidV7(held.rows[0].role_assignment_id);
       const roleAssignmentId = await this.#insertAssignment(client, {
         ...input,
         now,
@@ -501,6 +510,33 @@ export class IdentityAccessService {
         user_id: input.user_id,
       });
     });
+  }
+
+  /**
+   * What kind of actor a signed-in user is, for a route that needs a session
+   * but no capability: the highest of the kinds their live roles carry, or a
+   * customer for a user who holds no role yet. Session-only routes used to
+   * run with no actor in the request context, so anything downstream that
+   * asked who was calling -- the notifications list, for one -- failed.
+   */
+  async resolveActorKind(input: {
+    readonly user_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<ActorKind> {
+    const now = input.now ?? new Date();
+    const rows = await this.#pool.query<{ actor_kind: EvaluationRow['actor_kind'] }>(
+      `SELECT DISTINCT r.actor_kind
+         FROM marketplace.role_assignments ra
+         JOIN marketplace.roles r USING (role_key)
+        WHERE ra.user_id = $1 AND ra.state = 'ACTIVE' AND ra.valid_from <= $2
+          AND (ra.valid_until IS NULL OR ra.valid_until > $2)`,
+      [parseUuidV7(input.user_id), now],
+    );
+    const held = new Set(rows.rows.map((row) => row.actor_kind));
+    for (const kind of ['ADMIN', 'VENDOR_STAFF', 'PARTNER', 'CUSTOMER'] as const) {
+      if (held.has(kind)) return actorKind(kind);
+    }
+    return 'customer';
   }
 
   async evaluate(input: AccessEvaluationInput): Promise<AccessDecision> {

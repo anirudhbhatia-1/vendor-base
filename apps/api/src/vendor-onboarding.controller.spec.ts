@@ -39,6 +39,12 @@ test('separates onboarding workflow operations from evidence review', () => {
   assert.equal(authorization('createInvitation')?.capability, 'admin.vendor_onboarding.manage');
   assert.equal(authorization('advanceDeadlines')?.capability, 'admin.vendor_onboarding.manage');
   assert.equal(authorization('startReview')?.capability, 'admin.vendor_onboarding.manage');
+  // The queue and a case are read by both sides (0091): a reviewer gated
+  // out of the queue could not open what they were asked to review.
+  for (const method of ['adminQueue', 'adminCase'] as const) {
+    assert.equal(authorization(method)?.capability, 'admin.vendor_onboarding.read', method);
+    assert.equal(authorization(method)?.admin_scope?.kind, 'GLOBAL', method);
+  }
   for (const method of [
     'reviewDocument',
     'approve',

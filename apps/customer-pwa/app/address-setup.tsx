@@ -23,6 +23,11 @@ import { useMapsConfig } from './maps-config';
 export function AddressSetup({ onSaved }: { readonly onSaved: () => void }) {
   const [point, setPoint] = useState<GeoPoint | null>(null);
   const [source, setSource] = useState<LocationSource>('MAP');
+  // The PIN the map read off the place the pin landed on. Filled in for the
+  // person, who used to read it from the map's own caption and type it back;
+  // once they have typed one themselves it is theirs.
+  const [pinCode, setPinCode] = useState('');
+  const [pinTyped, setPinTyped] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { t } = useLocale();
@@ -99,6 +104,10 @@ export function AddressSetup({ onSaved }: { readonly onSaved: () => void }) {
           )}
           initialCentre={maps?.default_centre}
           label={t('customer.address.map.label', 'Where should we deliver?')}
+          onPlace={(place) => {
+            if (!pinTyped && place?.postcode && /^[1-9][0-9]{5}$/.test(place.postcode))
+              setPinCode(place.postcode);
+          }}
           onChange={(next, how) => {
             setPoint(next);
             setSource(how);
@@ -124,8 +133,13 @@ export function AddressSetup({ onSaved }: { readonly onSaved: () => void }) {
           inputMode="numeric"
           label={t('customer.address.pin', 'PIN code')}
           name="pin_code"
+          onChange={(event) => {
+            setPinTyped(true);
+            setPinCode(event.target.value);
+          }}
           pattern="[1-9][0-9]{5}"
           required
+          value={pinCode}
         />
         <Field
           label={t('customer.address.landmark', 'Landmark (optional)')}

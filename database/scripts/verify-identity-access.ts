@@ -379,7 +379,7 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
       'Ended partner assignment',
     );
 
-    await access.grantAdminMembership({
+    const financeGrant = await access.grantAdminMembership({
       context: context(),
       granted_by_user_id: grantor,
       now,
@@ -387,6 +387,17 @@ export async function verifyIdentityAccess(connectionString: string): Promise<vo
       scope: { kind: 'ZONE', scope_id: zoneA },
       user_id: financeMaker,
     });
+    // The same grant again is the same assignment, not a unique violation.
+    const financeGrantAgain = await access.grantAdminMembership({
+      context: context(),
+      granted_by_user_id: grantor,
+      now: new Date(now.getTime() + 1_000),
+      role: 'FINANCE_OPERATOR',
+      scope: { kind: 'ZONE', scope_id: zoneA },
+      user_id: financeMaker,
+    });
+    if (financeGrantAgain !== financeGrant)
+      throw new Error('Granting a held admin role did not answer with the held assignment');
     expectAllowed(
       await access.evaluate({
         admin_scope: { kind: 'ZONE', scope_id: zoneA },

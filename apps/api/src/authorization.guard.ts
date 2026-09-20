@@ -125,7 +125,20 @@ export class AuthorizationGuard implements CanActivate {
       }
     }
     request[AUTHENTICATED_SESSION] = principal;
-    if (!requirement) return true;
+    if (!requirement) {
+      // A session-only route still runs on someone's behalf. Without this the
+      // request context carried no actor, and every session-only service call
+      // that asked who was calling -- the notifications list, marking one
+      // read -- answered 500 for every signed-in user.
+      request[AUTHORIZED_ACTOR] = createAuthenticatedActor({
+        actor_id: principal.user_id,
+        actor_kind: actorKind(
+          await this.enforcement.resolveActorKind({ user_id: principal.user_id }),
+        ),
+        session_id: principal.session_id,
+      });
+      return true;
+    }
 
     const params = (request.params ?? {}) as Record<string, unknown>;
     const ownerUserId = routeUuid(params, requirement.owner_user_id_param);

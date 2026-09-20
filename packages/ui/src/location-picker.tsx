@@ -12,7 +12,8 @@ import {
   forwardGeocodeUrl,
   isFinitePoint,
   parseGeocodeCandidates,
-  parseReverseLabel,
+  parseReversePlace,
+  type ReversePlace,
   reverseGeocodeUrl,
   type GeoPoint,
   type GeocodeCandidate,
@@ -58,6 +59,12 @@ export interface LocationPickerProps {
   readonly accessToken: string | null;
   readonly value: GeoPoint | null;
   readonly onChange: (point: GeoPoint, source: LocationSource) => void;
+  /**
+   * What the pin landed on, once the reverse geocode answers: the address in
+   * words and its postcode. A form can fill the PIN from it rather than have
+   * the person read it off the map and type it back.
+   */
+  readonly onPlace?: ((place: ReversePlace | null) => void) | undefined;
   readonly label: string;
   readonly hint?: string | undefined;
   readonly error?: string | null | undefined;
@@ -87,6 +94,7 @@ export function LocationPicker({
   accessToken,
   value,
   onChange,
+  onPlace,
   label,
   hint,
   error,
@@ -103,8 +111,12 @@ export function LocationPicker({
   const container = useRef<HTMLDivElement | null>(null);
   const map = useRef<MapboxMap | null>(null);
   const marker = useRef<MapboxMarker | null>(null);
-  const latest = useRef<{ onChange: typeof onChange; value: GeoPoint | null }>({ onChange, value });
-  latest.current = { onChange, value };
+  const latest = useRef<{
+    onChange: typeof onChange;
+    onPlace: typeof onPlace;
+    value: GeoPoint | null;
+  }>({ onChange, onPlace, value });
+  latest.current = { onChange, onPlace, value };
   const [ready, setReady] = useState(false);
   const [mapFailed, setMapFailed] = useState(false);
   const [query, setQuery] = useState('');
@@ -248,7 +260,11 @@ export function LocationPicker({
     const controller = new AbortController();
     fetch(reverseGeocodeUrl({ point: value, accessToken }), { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : null))
-      .then((body: unknown) => setPlaceLabel(parseReverseLabel(body)))
+      .then((body: unknown) => {
+        const place = parseReversePlace(body);
+        setPlaceLabel(place?.label ?? null);
+        latest.current.onPlace?.(place);
+      })
       .catch(() => setPlaceLabel(null));
     return () => controller.abort();
   }, [accessToken, value]);

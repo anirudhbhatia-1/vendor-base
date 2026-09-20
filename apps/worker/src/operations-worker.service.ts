@@ -30,6 +30,7 @@ import {
   createRequestContext,
   createUuidV7,
   formatTraceparent,
+  PLATFORM_SYSTEM_USER_ID,
 } from '@neighbourhood-store/domain-types';
 import { Queue, QueueEvents, Worker, type Job } from 'bullmq';
 import { closeQueuesWithin, reportQueueErrors, requireQueueReady } from './queue-readiness.js';
@@ -250,7 +251,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   ): Promise<void> {
     const context = createRequestContext({
       actor: createAuthenticatedActor({
-        actor_id: this.#workerId,
+        actor_id: PLATFORM_SYSTEM_USER_ID,
         actor_kind: 'system',
         session_id: this.#workerId,
       }),
@@ -296,7 +297,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     const now = new Date();
     const context = createRequestContext({
       actor: createAuthenticatedActor({
-        actor_id: this.#workerId,
+        actor_id: PLATFORM_SYSTEM_USER_ID,
         actor_kind: 'system',
         session_id: this.#workerId,
       }),
@@ -411,7 +412,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         'configuration.activateDue',
         () =>
           this.#configuration.activateDue({
-            actor_id: this.#workerId,
+            actor_id: PLATFORM_SYSTEM_USER_ID,
             at: now,
             request_id: context.request_id,
           }),

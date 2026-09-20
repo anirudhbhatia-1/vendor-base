@@ -66,7 +66,7 @@ function adminAuthorization(
 }
 
 test('the shop-request queue is read under review and moved under manage, globally', () => {
-  assert.equal(adminAuthorization('list')?.capability, 'admin.vendor_onboarding.review');
+  assert.equal(adminAuthorization('list')?.capability, 'admin.vendor_onboarding.read');
   for (const method of ['triage', 'close'] as const) {
     assert.equal(adminAuthorization(method)?.capability, 'admin.vendor_onboarding.manage', method);
   }

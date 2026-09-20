@@ -18,6 +18,11 @@ export interface AuthorizationEvidence {
 export class AuthorizationEnforcementService {
   constructor(@Inject(ACCESS_IDENTITY) private readonly access: IdentityAccessService) {}
 
+  /** The actor kind a session-only route runs as; see `IdentityAccessService.resolveActorKind`. */
+  resolveActorKind(input: { readonly user_id: UuidV7 }) {
+    return this.access.resolveActorKind(input);
+  }
+
   async enforce(input: {
     readonly evidence: AuthorizationEvidence;
     readonly requirement: AuthorizationRequirement;

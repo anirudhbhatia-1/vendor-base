@@ -50,19 +50,23 @@ test.describe('cross-role order journey', () => {
     await signIn(page, who as RoleCredentials);
     await page.goto('/');
 
-    // The order list is the step that used to 404: nothing below it could ever
-    // render while the typed client pointed at /vendor/fulfilment.
-    await expect(page.getByRole('heading', { name: /Accept, pick and hand off/i })).toBeVisible();
-    await page.getByRole('button', { name: /Refresh orders/i }).click();
+    // The fulfilment desk heads its live section with the count of orders that
+    // need the shop's hand; the queue used to 404 while the typed client pointed
+    // at /vendor/fulfilment, so nothing below this line could render.
+    await expect(
+      page.getByRole('heading', { name: /^[1-9]\d* active orders?$/ }),
+      'The desk must show at least one live order.',
+    ).toBeVisible();
+    await page
+      .getByRole('button', { name: /^Refresh$/ })
+      .first()
+      .click();
 
     // An empty queue fails this test rather than satisfying it.
     //
     // Every stage below used to be wrapped in `if (await x.isVisible())`, so a
     // vendor with no orders clicked nothing and the test named "accepts, picks and
     // hands over an order" passed having accepted, picked and handed over nothing.
-    // The alternation on the status line did the same job higher up: "No store
-    // orders yet" satisfied the assertion that the golden path was working.
-    await expect(page.getByText(/Orders are current/i)).toBeVisible();
     await expect(
       page.getByRole('button', { name: /^Accept$/ }).first(),
       'The golden path needs one payment-confirmed order awaiting acceptance. ' +
@@ -83,21 +87,25 @@ test.describe('cross-role order journey', () => {
     await expect(openPickList).toBeVisible();
     await openPickList.click();
 
-    const found = page.getByRole('button', { name: /^Found$/ }).first();
+    const found = page.getByRole('button', { name: /^Found it$/ }).first();
     await expect(found).toBeVisible();
     await found.click();
     await expect(found).not.toBeVisible();
+    // The pick list is a dialog over the order card; it is closed once every
+    // line is resolved, and the card's controls are reachable again.
+    await page.getByRole('button', { name: /^Close$/ }).click();
 
     const markReady = page.getByRole('button', { name: /Mark ready/i }).first();
     await expect(markReady).toBeVisible();
     await markReady.click();
 
-    const issueOtp = page.getByRole('button', { name: /Issue pickup OTP/i }).first();
-    await expect(issueOtp).toBeVisible();
-    await issueOtp.click();
-    // The OTP used to be requested and thrown away, which made handover
-    // impossible; it must now be readable by the person at the counter.
-    await expect(page.getByText(/Read out: \d{6}/)).toBeVisible();
+    // The counter step comes with the partner: until one is at the counter the
+    // card says so and offers no code field, because the code is the partner's
+    // to show. The handover with a partner present is walked at the API.
+    await expect(
+      page.getByText(/Hand this order over when the delivery partner is at your counter/i),
+    ).toBeVisible();
+    await expect(page.getByText(/Finding a delivery partner/i).first()).toBeVisible();
   });
 
   test('a partner takes custody only after the vendor released it', async ({ page }, testInfo) => {
@@ -119,8 +127,9 @@ test.describe('cross-role order journey', () => {
     // to a disabled "Await operations" button with no unhappy path at all, and
     // guarding this assertion behind `isVisible()` meant the regression would
     // have returned silently. The control is offered on the way to the customer,
-    // so the fixture leaves this rider holding an order that is en route. ("Delivery
-    // failed" is the state's label, not the control's; the spec named the wrong one.)
+    // so the fixture leaves this rider holding an order that is en route; the
+    // work screen points at it and the active-delivery screen carries the control.
+    await page.getByRole('link', { name: /Open active delivery/i }).click();
     const failure = page.getByRole('button', { name: /I cannot deliver this/i });
     await expect(failure).toBeVisible();
     await expect(failure).toBeEnabled();
@@ -137,15 +146,16 @@ test.describe('cross-role order journey', () => {
     await page.goto('/orders');
     await page.getByRole('button', { name: /Refresh order monitor/i }).click();
     // "No orders loaded yet" satisfied this assertion, so the monitor proved
-    // nothing about whether it can display an order -- and so did "0 checkout
-    // groups loaded", which /checkout group/ matched just as happily. The count
-    // has to start with a non-zero digit.
-    await expect(page.getByText(/^[1-9]\d* checkout groups? loaded\./)).toBeVisible();
+    // nothing about whether it can display an order -- and so did a count of
+    // zero, which /entries/ matched just as happily. The count has to start
+    // with a non-zero digit.
+    await expect(page.getByText(/^Order monitor: [1-9]\d* entries\./)).toBeVisible();
 
     await page.goto('/catalogue');
     // The moderation queue rendered empty regardless of its contents because
     // the response shape was parsed wrongly. "0 live cases" is that defect's
-    // exact symptom, so it is not accepted either.
+    // exact symptom, so it is not accepted either -- and the view loads on
+    // arrival, without a button (it used to open empty until "Refresh queues").
     await expect(page.getByRole('heading', { name: /^[1-9]\d* live cases$/ })).toBeVisible();
   });
 });

@@ -63,6 +63,16 @@ export function createUuidV7(
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}` as UuidV7;
 }
 
+/**
+ * The platform itself, as an actor. Sweeps and outbox consumers act on
+ * nobody's behalf, and several histories (vendor order events, admin audit,
+ * partner earnings) require their actor to be a user; the worker used a
+ * fresh random id per process, so every such write failed on the foreign
+ * key and the sweep that carried it rolled back on every tick. This row is
+ * seeded by migration 0089 and never signs in.
+ */
+export const PLATFORM_SYSTEM_USER_ID = '01900000-0000-7000-8000-00000000c0de' as UuidV7;
+
 export function isUuidV7(value: string): value is UuidV7 {
   return UUID_V7_PATTERN.test(value);
 }

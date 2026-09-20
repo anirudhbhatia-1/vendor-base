@@ -81,6 +81,14 @@ const reviewOnboarding = RequireAuthorization({
   capability: 'admin.vendor_onboarding.review',
   conceal_resource: true,
 });
+// The queue and a case are read by both sides of the pair (0091): the
+// reviewer has to open what they are asked to review, the operator what
+// they manage. Both used to be gated on `manage`.
+const readOnboarding = RequireAuthorization({
+  admin_scope: { kind: 'GLOBAL' },
+  capability: 'admin.vendor_onboarding.read',
+  conceal_resource: true,
+});
 
 @Controller()
 export class VendorOnboardingController {
@@ -408,7 +416,7 @@ export class VendorOnboardingController {
   // Registered before the :onboarding_case_id route so "queue" is not parsed as
   // a case identifier.
   @Get('admin/vendor-onboarding/queue')
-  @manageOnboarding
+  @readOnboarding
   async adminQueue(@Query('limit') limit?: string) {
     try {
       return {
@@ -424,7 +432,7 @@ export class VendorOnboardingController {
   }
 
   @Get('admin/vendor-onboarding/:onboarding_case_id')
-  @manageOnboarding
+  @readOnboarding
   async adminCase(@Param('onboarding_case_id') caseId: string) {
     try {
       return await this.onboarding.getForAdmin({

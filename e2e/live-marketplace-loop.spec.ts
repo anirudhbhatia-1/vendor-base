@@ -121,23 +121,36 @@ test.describe('Supabase-backed marketplace acceptance', () => {
     // test granted above is what "use my current location" places the pin at.
     await page.getByRole('button', { name: /use my current location/i }).click();
     await expect(page.getByText(/Delivery point:/)).not.toContainText('—');
+    // The PIN is read off the place the pin landed on and filled in; nobody
+    // types it back from the map's caption. It arrives with the reverse
+    // geocode, a moment after the point itself.
+    await expect(page.getByLabel(/PIN code/i)).toHaveValue(/^[1-9]\d{5}$/);
     await page.getByRole('button', { name: /save and find stores/i }).click();
-    await expect(page.getByRole('button', { name: /see nearby stores/i })).toBeVisible();
-    await page.getByRole('button', { name: /see nearby stores/i }).click();
+
+    // The home feed lists the stores that reach the address, and their
+    // products by aisle, without another tap.
+    await expect(page.getByRole('heading', { name: /Near your address/i })).toBeVisible();
+    const addPublishedItem = page.getByRole('button', { name: /^Add Fresh tomatoes$/ }).first();
     await expect(
-      page.getByRole('heading', { name: /available from this store/i }).first(),
+      addPublishedItem,
+      "The fixture store's product must be on the shelf; an empty aisle is a missing precondition.",
     ).toBeVisible();
-    const addPublishedItem = page.getByRole('button', { name: /^Add .+ from .+$/ }).first();
-    await expect(addPublishedItem).toBeVisible();
     await addPublishedItem.click();
-    await expect(page.getByText(/added\. The store group remains isolated\./i)).toBeVisible();
-    await expect(page.getByRole('link', { name: /go to checkout/i })).toBeVisible();
-    await page.getByRole('link', { name: /go to checkout/i }).click();
-    await page.getByRole('button', { name: /load my active cart/i }).click();
-    await page.getByRole('button', { name: /quote and hold stock/i }).click();
-    await expect(page.getByRole('button', { name: /pay and place order/i })).toBeVisible();
-    await page.getByRole('button', { name: /pay and place order/i }).click();
-    await expect(page.getByText('ORDER PLACED', { exact: true })).toBeVisible();
-    await expect(page.getByText('1 store orders', { exact: true })).toBeVisible();
+    // The tile becomes its quantity, and the basket carries one line.
+    await expect(
+      page.getByRole('button', { name: /^Increase Fresh tomatoes$/ }).first(),
+    ).toBeVisible();
+
+    await page.goto('/checkout');
+    // The checkout quotes on arrival: the store, its amounts, how the order
+    // arrives, the rule it proceeds under, and what the bank is asked to hold.
+    await expect(page.getByRole('heading', { name: /What each store will charge/i })).toBeVisible();
+    await expect(page.getByText(/How you get it:/)).toBeVisible();
+    await expect(page.getByText(/If something is out of stock:/)).toBeVisible();
+    await expect(page.getByText(/You authorise/)).toBeVisible();
+    await expect(page.getByText(/Cash on delivery is not available/i)).toBeVisible();
+    await page.getByRole('button', { name: /^Pay and place orders$/ }).click();
+    await expect(page.getByRole('heading', { name: /Each store has your order/i })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Track your orders/i })).toBeVisible();
   });
 });
