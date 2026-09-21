@@ -696,11 +696,13 @@ export class CustomerOrderHistoryController {
   async support(@Param('vendor_order_id') orderId: string, @Body() raw: unknown) {
     const body = object(raw);
     try {
+      const lineId = optionalString(body, 'vendor_order_line_id');
       const supportCaseId = await this.fulfilment.openSupportCase({
         context: currentRequestContext(),
         vendor_order_id: uuid(orderId),
         category: stringField(body, 'category'),
         description: stringField(body, 'description'),
+        ...(lineId !== undefined ? { vendor_order_line_id: uuid(lineId) } : {}),
       });
       return { support_case_id: supportCaseId };
     } catch (error) {

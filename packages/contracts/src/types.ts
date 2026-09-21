@@ -444,13 +444,32 @@ export type CustomerOrderGroup = {
   vendor_orders: readonly CustomerOrderEntry[];
 };
 
+/** One line of the customer's receipt: as ordered, and as supplied (8.7). */
 export type CustomerReceiptLine = {
+  vendor_order_line_id: string;
   catalogue_variant_id: string;
   vendor_location_id: string;
   title: string;
+  variant_title: string;
   quantity: number;
   unit_price_minor: number;
   line_total_minor: number;
+  substitution_preference: SubstitutionPreference;
+  pick_state: string;
+  actual_quantity: number | null;
+  actual_unit_price_minor: number | null;
+  /** The replacement's product title when one was approved. */
+  supplied_title: string | null;
+  /** Units in the bag: zero for a missing or refused line. */
+  supplied_quantity: number;
+  supplied_total_minor: number;
+};
+
+export type CustomerReceiptAdjustment = {
+  kind: 'CUSTOMER_DECISION' | 'LINES_NOT_SUPPLIED' | 'VENDOR_ORDER_ENDED';
+  delta_minor: number;
+  reason_note: string | null;
+  occurred_at: string;
 };
 
 export type CustomerRefundEntry = {
@@ -487,8 +506,26 @@ export type CheckoutGroupReceipt = {
 };
 
 export type CustomerReceipt = {
-  order: CustomerOrderEntry;
+  order: CustomerOrderEntry & { ready_at?: string | null; picked_up_at?: string | null };
   lines: readonly CustomerReceiptLine[];
+  /** The order's payment allocation as it stands: what is (or will be) charged. */
+  charged: {
+    item_minor: number;
+    tax_minor: number;
+    delivery_minor: number;
+    tip_minor: number;
+    discount_minor: number;
+    total_minor: number;
+    payment_state: string;
+  };
+  adjustments: readonly CustomerReceiptAdjustment[];
+  refunds: readonly {
+    refund_id: string;
+    refund_state: string;
+    trigger_code: string;
+    refund_total_minor: number;
+    occurred_at: string;
+  }[];
 };
 
 // ─── Notifications ────────────────────────────────────────────────────────────

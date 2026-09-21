@@ -44,6 +44,17 @@ export const HANDLING_FLAGS = Object.freeze([
 ] as const);
 export type HandlingFlag = (typeof HANDLING_FLAGS)[number];
 
+/** What a customer may open a case about (8.7): the console's list, now the server's. */
+export const CUSTOMER_SUPPORT_CATEGORIES = Object.freeze([
+  'MISSING_ITEM',
+  'DAMAGED_ITEM',
+  'WRONG_ITEM',
+  'LATE_DELIVERY',
+  'CANCELLATION_AFTER_PICKUP',
+  'ORDER_HELP',
+] as const);
+export const DEFAULT_SUPPORT_RESPONSE_SECONDS = 14_400;
+
 export const VENDOR_DECLINE_REASONS = Object.freeze([
   'VENDOR_CLOSED',
   'STOCK_MISMATCH',
@@ -277,6 +288,56 @@ export interface CustomerOrderEntry {
   readonly fulfilment_method: string | null;
   /** The promise made at ready (8.5): collect from, or arrives around. */
   readonly promise_at: Date | null;
+}
+
+/** One line of the customer's receipt: as ordered, and as supplied (8.7). */
+export interface CustomerReceiptLine {
+  readonly vendor_order_line_id: UuidV7;
+  readonly catalogue_variant_id: UuidV7;
+  readonly vendor_location_id: UuidV7;
+  readonly title: string;
+  readonly variant_title: string;
+  readonly quantity: number;
+  readonly unit_price_minor: number;
+  readonly line_total_minor: number;
+  readonly substitution_preference: string;
+  readonly pick_state: PickState | 'PENDING';
+  readonly actual_quantity: number | null;
+  readonly actual_unit_price_minor: number | null;
+  /** The replacement's product title when one was approved. */
+  readonly supplied_title: string | null;
+  /** Units in the bag: zero for a missing or refused line. */
+  readonly supplied_quantity: number;
+  /** What the bag's contents of this line cost the customer. */
+  readonly supplied_total_minor: number;
+}
+
+export interface CustomerReceipt {
+  readonly order: VendorOrderSummary;
+  readonly lines: readonly CustomerReceiptLine[];
+  /** The order's payment allocation as it stands: what is (or will be) charged. */
+  readonly charged: {
+    readonly item_minor: number;
+    readonly tax_minor: number;
+    readonly delivery_minor: number;
+    readonly tip_minor: number;
+    readonly discount_minor: number;
+    readonly total_minor: number;
+    readonly payment_state: string;
+  };
+  readonly adjustments: readonly {
+    readonly kind: 'CUSTOMER_DECISION' | 'LINES_NOT_SUPPLIED' | 'VENDOR_ORDER_ENDED';
+    readonly delta_minor: number;
+    readonly reason_note: string | null;
+    readonly occurred_at: string;
+  }[];
+  readonly refunds: readonly {
+    readonly refund_id: UuidV7;
+    readonly refund_state: string;
+    readonly trigger_code: string;
+    readonly refund_total_minor: number;
+    readonly occurred_at: string;
+  }[];
 }
 
 export interface PickRecord {
@@ -3007,6 +3068,8 @@ export class VendorFulfilmentService {
       readonly category: string;
       readonly lifecycle_state: string;
       readonly created_at: string;
+      /** The item the case is about, when the customer named one (8.7). */
+      readonly line_title: string | null;
     }[]
   > {
     await requireVendorMemberPool(this.#pool, input.context, input.vendor_location_id);
@@ -3017,14 +3080,17 @@ export class VendorFulfilmentService {
       category: string;
       lifecycle_state: string;
       created_at: Date;
+      line_title: string | null;
     }>(
       // Deliberately not the description: a customer's account of what went
       // wrong is support's to relay, and the category plus the case reference
-      // is what the store needs in order to act.
+      // -- and the item, when named -- is what the store needs in order to act.
       `SELECT c.support_case_id, c.vendor_order_id, o.order_reference, c.category,
-              c.lifecycle_state, c.created_at
+              c.lifecycle_state, c.created_at, l.product_title_snapshot AS line_title
          FROM marketplace.support_cases c
          JOIN marketplace.vendor_orders o USING (vendor_order_id)
+         LEFT JOIN marketplace.vendor_order_lines l
+           ON l.vendor_order_line_id = c.vendor_order_line_id
         WHERE o.vendor_location_id = $1 AND c.lifecycle_state IN ('OPEN', 'IN_PROGRESS')
         ORDER BY c.created_at DESC
         LIMIT 50`,
@@ -3039,76 +3105,181 @@ export class VendorFulfilmentService {
           category: row.category,
           lifecycle_state: row.lifecycle_state,
           created_at: row.created_at.toISOString(),
+          line_title: row.line_title,
         }),
       ),
     );
   }
 
+  /**
+   * The itemised, vendor-scoped receipt (8.7): each line as ordered and as
+   * supplied -- found, short, missing, replaced (with what), weighed -- the
+   * adjustments that moved the money before capture and why, the refunds
+   * after it, and what was charged: the order's allocation, not its ordered
+   * total. Until audit run 55 the receipt listed the ordered lines at the
+   * ordered prices under the ordered total, whatever the bag held.
+   */
   async getReceipt(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
-  }): Promise<{
-    readonly order: VendorOrderSummary;
-    readonly lines: readonly {
-      readonly catalogue_variant_id: UuidV7;
-      readonly vendor_location_id: UuidV7;
-      readonly title: string;
-      readonly variant_title: string;
-      readonly quantity: number;
-      readonly unit_price_minor: number;
-      readonly line_total_minor: number;
-      readonly pick_state: PickState | 'PENDING';
-      readonly actual_quantity: number | null;
-      readonly actual_unit_price_minor: number | null;
-    }[];
-  }> {
+  }): Promise<CustomerReceipt> {
     const customerId = requireCustomer(input.context);
-    const order = await this.#pool.query(
-      `SELECT o.vendor_order_id, o.order_reference, o.lifecycle_state,
-              o.total_minor::text AS total_minor, o.version, o.accept_by, o.accepted_at,
-              o.ready_at, o.picked_up_at, o.package_count, o.package_condition_note,
-              o.preparation_estimate_seconds, o.pickup_otp_expires_at, o.pickup_otp_attempts,
-              o.decline_reason_code, cg.customer_user_id
+    const owned = await this.#pool.query<{ customer_user_id: string; order_reference: string }>(
+      `SELECT cg.customer_user_id, o.order_reference
          FROM marketplace.vendor_orders o
          JOIN marketplace.checkout_groups cg USING (checkout_group_id)
         WHERE o.vendor_order_id=$1`,
       [input.vendor_order_id],
     );
-    const orderRow = order.rows[0];
-    if (!orderRow) throw new FulfilmentNotFoundError();
-    if (orderRow['customer_user_id'] !== customerId) throw new FulfilmentNotFoundError();
-    const lines = await this.#pool.query(
-      `SELECT l.catalogue_variant_id, o.vendor_location_id,
+    const ownerRow = owned.rows[0];
+    if (!ownerRow || ownerRow.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
+    const order = await orderSummary(this.#pool, input.vendor_order_id);
+    const lines = await this.#pool.query<{
+      vendor_order_line_id: string;
+      catalogue_variant_id: string;
+      vendor_location_id: string;
+      title: string;
+      variant_title: string;
+      quantity: number;
+      unit_price_minor: string;
+      line_total_minor: string;
+      substitution_preference: string;
+      pick_state: PickState | 'PENDING';
+      actual_quantity: number | null;
+      actual_unit_price_minor: string | null;
+      supplied_title: string | null;
+    }>(
+      `SELECT l.vendor_order_line_id, l.catalogue_variant_id, o.vendor_location_id,
               l.product_title_snapshot AS title, l.variant_title_snapshot AS variant_title,
               l.quantity, l.unit_price_minor::text AS unit_price_minor,
-              l.line_total_minor::text AS line_total_minor,
+              l.line_total_minor::text AS line_total_minor, l.substitution_preference,
               COALESCE(p.pick_state, 'PENDING') AS pick_state,
               p.actual_quantity,
-              p.actual_unit_price_minor::text AS actual_unit_price_minor
+              p.actual_unit_price_minor::text AS actual_unit_price_minor,
+              replacement.title AS supplied_title
          FROM marketplace.vendor_order_lines l
          JOIN marketplace.vendor_orders o ON o.vendor_order_id=l.vendor_order_id
          LEFT JOIN marketplace.vendor_order_line_picks p
            ON p.vendor_order_line_id=l.vendor_order_line_id
+         LEFT JOIN marketplace.catalogue_product_variants replacement_variant
+           ON replacement_variant.catalogue_variant_id = p.substitution_variant_id
+         LEFT JOIN marketplace.catalogue_products replacement
+           ON replacement.catalogue_product_id = replacement_variant.catalogue_product_id
         WHERE l.vendor_order_id=$1 ORDER BY l.vendor_order_line_id`,
       [input.vendor_order_id],
     );
-    return {
-      order: projectSummary(orderRow as Record<string, unknown>),
-      lines: lines.rows.map((row) => ({
-        catalogue_variant_id: parseUuidV7(row['catalogue_variant_id']),
-        vendor_location_id: parseUuidV7(row['vendor_location_id']),
-        title: row['title'],
-        variant_title: row['variant_title'],
-        quantity: Number(row['quantity']),
-        unit_price_minor: Number(row['unit_price_minor']),
-        line_total_minor: Number(row['line_total_minor']),
-        pick_state: row['pick_state'],
-        actual_quantity: row['actual_quantity'] ?? null,
-        actual_unit_price_minor: row['actual_unit_price_minor']
-          ? Number(row['actual_unit_price_minor'])
-          : null,
-      })),
-    };
+    const charged = await this.#pool.query<{
+      item_minor: string;
+      tax_minor: string;
+      delivery_minor: string;
+      tip_minor: string;
+      discount_minor: string;
+      total_minor: string;
+      payment_state: string;
+    }>(
+      `SELECT allocation.item_minor::text AS item_minor, allocation.tax_minor::text AS tax_minor,
+              allocation.delivery_minor::text AS delivery_minor, allocation.tip_minor::text AS tip_minor,
+              allocation.discount_minor::text AS discount_minor,
+              allocation.allocated_total_minor::text AS total_minor, payment.payment_state
+         FROM marketplace.vendor_orders o
+         JOIN marketplace.checkout_groups cg USING (checkout_group_id)
+         JOIN marketplace.payment_transactions payment USING (payment_transaction_id)
+         LEFT JOIN marketplace.payment_allocations allocation
+           ON allocation.payment_transaction_id = payment.payment_transaction_id
+          AND allocation.source_order_reference = o.order_reference
+        WHERE o.vendor_order_id=$1`,
+      [input.vendor_order_id],
+    );
+    const adjustments = await this.#pool.query<{
+      adjustment_kind: 'CUSTOMER_DECISION' | 'LINES_NOT_SUPPLIED' | 'VENDOR_ORDER_ENDED';
+      delta_minor: string;
+      reason_note: string | null;
+      created_at: Date;
+    }>(
+      `SELECT a.adjustment_kind, a.delta_minor::text AS delta_minor, d.reason_note, a.created_at
+         FROM marketplace.payment_authorization_adjustments a
+         LEFT JOIN marketplace.vendor_order_customer_decisions d ON d.decision_id = a.decision_id
+        WHERE a.vendor_order_id=$1 ORDER BY a.created_at`,
+      [input.vendor_order_id],
+    );
+    const refunds = await this.#pool.query<{
+      refund_id: string;
+      refund_state: string;
+      trigger_code: string;
+      refund_total_minor: string;
+      created_at: Date;
+    }>(
+      `SELECT refund_id, refund_state, trigger_code, refund_total_minor::text AS refund_total_minor,
+              created_at
+         FROM marketplace.refunds
+        WHERE source_order_reference=$1 AND refund_state NOT IN ('PROPOSED','REJECTED')
+        ORDER BY created_at`,
+      [ownerRow.order_reference],
+    );
+    const money = charged.rows[0];
+    return Object.freeze({
+      order,
+      lines: Object.freeze(
+        lines.rows.map((row) => {
+          const orderedUnit = Number(row.unit_price_minor);
+          const suppliedUnit =
+            row.actual_unit_price_minor === null ? null : Number(row.actual_unit_price_minor);
+          const inBag =
+            row.pick_state === 'FOUND' ||
+            row.pick_state === 'SUBSTITUTION_APPROVED' ||
+            row.pick_state === 'WEIGHT_APPROVED';
+          const suppliedQuantity = inBag ? (row.actual_quantity ?? row.quantity) : 0;
+          const suppliedPrice = inBag ? (suppliedUnit ?? orderedUnit) : 0;
+          return Object.freeze({
+            vendor_order_line_id: parseUuidV7(row.vendor_order_line_id),
+            catalogue_variant_id: parseUuidV7(row.catalogue_variant_id),
+            vendor_location_id: parseUuidV7(row.vendor_location_id),
+            title: row.title,
+            variant_title: row.variant_title,
+            quantity: row.quantity,
+            unit_price_minor: orderedUnit,
+            line_total_minor: Number(row.line_total_minor),
+            substitution_preference: row.substitution_preference,
+            pick_state: row.pick_state,
+            actual_quantity: row.actual_quantity ?? null,
+            actual_unit_price_minor: suppliedUnit,
+            supplied_title: row.supplied_title,
+            supplied_quantity: suppliedQuantity,
+            supplied_total_minor: suppliedQuantity * suppliedPrice,
+          });
+        }),
+      ),
+      charged: Object.freeze({
+        item_minor: Number(money?.item_minor ?? '0'),
+        tax_minor: Number(money?.tax_minor ?? '0'),
+        delivery_minor: Number(money?.delivery_minor ?? '0'),
+        tip_minor: Number(money?.tip_minor ?? '0'),
+        discount_minor: Number(money?.discount_minor ?? '0'),
+        total_minor: Number(money?.total_minor ?? '0'),
+        payment_state: money?.payment_state ?? 'UNKNOWN',
+      }),
+      adjustments: Object.freeze(
+        adjustments.rows.map((row) =>
+          Object.freeze({
+            kind: row.adjustment_kind,
+            delta_minor: Number(row.delta_minor),
+            reason_note: row.reason_note,
+            occurred_at: row.created_at.toISOString(),
+          }),
+        ),
+      ),
+      refunds: Object.freeze(
+        refunds.rows.map((row) =>
+          Object.freeze({
+            refund_id: parseUuidV7(row.refund_id),
+            refund_state: row.refund_state,
+            trigger_code: row.trigger_code,
+            refund_total_minor: Number(row.refund_total_minor),
+            occurred_at: row.created_at.toISOString(),
+          }),
+        ),
+      ),
+    });
   }
 
   async submitRating(input: {
@@ -3514,19 +3685,51 @@ export class VendorFulfilmentService {
     });
   }
 
+  /**
+   * How long operations has to answer a customer's case: the P2 staffed
+   * acknowledgement (`support.p2_staffed_ack_seconds`, implementation.md 6.1),
+   * a SETTING; four staffed hours by default.
+   */
+  async supportResponseSeconds(at?: Date): Promise<number> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: 'support.p2_staffed_ack_seconds',
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value;
+    return typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value >= 60 &&
+      value <= 604_800
+      ? value
+      : DEFAULT_SUPPORT_RESPONSE_SECONDS;
+  }
+
+  /**
+   * A structured case on the smallest affected object (8.7): one of the
+   * customer's categories, the order, and -- when the trouble is one item --
+   * the line it is about. Opened with the severity and the response deadline
+   * the operations queue ranks by, and its own OPENED event, the way the
+   * control plane opens one. Until audit run 55 a customer's case took any
+   * category, named no line, carried no deadline and had no case event.
+   */
   async openSupportCase(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
     readonly category: string;
     readonly description: string;
+    readonly vendor_order_line_id?: UuidV7 | null;
     readonly now?: Date;
   }): Promise<UuidV7> {
-    if (!reasonCode.test(input.category))
-      throw new FulfilmentInputError('Category must be shouting-snake-case');
+    if (!(CUSTOMER_SUPPORT_CATEGORIES as readonly string[]).includes(input.category))
+      throw new FulfilmentInputError(
+        `Category must be one of ${CUSTOMER_SUPPORT_CATEGORIES.join(', ')}`,
+      );
     if (input.description.length < 1 || input.description.length > 1000)
       throw new FulfilmentInputError('Description must be between 1 and 1000 characters');
     const customerId = requireCustomer(input.context);
     const now = input.now ?? new Date();
+    const responseSeconds = await this.supportResponseSeconds(now);
     return tx(this.#pool, async (client) => {
       const order = await client.query<{ customer_user_id: string }>(
         `SELECT cg.customer_user_id FROM marketplace.vendor_orders o
@@ -3535,21 +3738,47 @@ export class VendorFulfilmentService {
         [input.vendor_order_id],
       );
       if (order.rows[0]?.customer_user_id !== customerId) throw new FulfilmentNotFoundError();
+      const lineId = input.vendor_order_line_id ?? null;
+      if (lineId !== null) {
+        const line = await client.query(
+          `SELECT 1 FROM marketplace.vendor_order_lines
+            WHERE vendor_order_line_id=$1 AND vendor_order_id=$2`,
+          [lineId, input.vendor_order_id],
+        );
+        if (line.rows.length === 0) throw new FulfilmentNotFoundError();
+      }
       const caseId = createUuidV7({ now_ms: now.getTime() });
       const ids = contextIds(input.context);
       await client.query(
         `INSERT INTO marketplace.support_cases
-           (support_case_id, vendor_order_id, opened_by_user_id, category, description,
-            request_id, correlation_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+           (support_case_id, vendor_order_id, vendor_order_line_id, opened_by_user_id, category,
+            description, severity, response_due_at, request_id, correlation_id)
+         VALUES ($1,$2,$3,$4,$5,$6,'MEDIUM',$7,$8,$9)`,
         [
           caseId,
           input.vendor_order_id,
+          lineId,
           customerId,
           input.category,
           input.description,
+          new Date(now.getTime() + responseSeconds * 1000),
           ids.request,
           ids.correlation,
+        ],
+      );
+      await client.query(
+        `INSERT INTO marketplace.support_case_events
+           (support_case_event_id, support_case_id, event_type, actor_id, reason_code,
+            request_id, correlation_id, occurred_at)
+         VALUES ($1,$2,'OPENED',$3,$4,$5,$6,$7)`,
+        [
+          createUuidV7({ now_ms: now.getTime() + 1 }),
+          caseId,
+          customerId,
+          input.category,
+          ids.request,
+          ids.correlation,
+          now,
         ],
       );
       await appendEvent(client, {

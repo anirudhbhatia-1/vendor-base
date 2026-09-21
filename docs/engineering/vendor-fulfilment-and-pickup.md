@@ -137,9 +137,21 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   on each answer): until run 52 it was captured as soon as every shop had accepted, so every
   approved dearer change after that was refused for want of an uncaptured payment and a missing
   line was captured in full.
-- **Support cases live at `vendor_order` grain**, not at line grain. Phases.md 8.7 says "the
-  smallest affected object"; today the smallest addressable object a customer support workflow
-  can act on is the vendor_order. Line-level support scoping is a later refinement.
+- **A customer's support case is structured (8.7, audit run 55).** It takes one of
+  `CUSTOMER_SUPPORT_CATEGORIES` (MISSING_ITEM, DAMAGED_ITEM, WRONG_ITEM, LATE_DELIVERY,
+  CANCELLATION_AFTER_PICKUP, ORDER_HELP), the order, and — when the trouble is one item — the line
+  it is about (`support_cases.vendor_order_line_id`, 0098), which the store's case list and the
+  customer's sheet name. It is opened at severity MEDIUM with `response_due_at` from
+  `support.p2_staffed_ack_seconds` (four staffed hours by default) and its own `OPENED` case event,
+  the way the control plane opens one. Until run 55 any shouting-snake-case string was a category,
+  no line could be named, and the case carried no deadline and no case event.
+- **The receipt is the bag and the allocation (8.7, run 55).** `getReceipt` lists each line as
+  ordered and as supplied — found, short, missing, replaced (with what), weighed — with each line's
+  substitution rule (so a reorder rebuilds the basket under the customer's own rules), the
+  pre-capture adjustments and why (`CUSTOMER_DECISION` with the reason, `LINES_NOT_SUPPLIED`,
+  `VENDOR_ORDER_ENDED`), the refunds after capture, and `charged`: the order's payment allocation,
+  which is what capture takes. Until run 55 it listed the ordered lines at the ordered prices under
+  the ordered total, whatever the bag held.
 
 ## Modules
 

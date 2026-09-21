@@ -46,6 +46,7 @@ import {
   FulfilmentAuthorizationError,
   FulfilmentConflictError,
   FulfilmentInputError,
+  DEFAULT_SUPPORT_RESPONSE_SECONDS,
   PICKUP_OTP_LIFETIME_SECONDS,
   PICKUP_OTP_MAX_ATTEMPTS,
   PickupOtpExhaustedError,
@@ -2126,12 +2127,80 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       [orderV.vendor_order_id],
     );
     check(ratedDelivery.rows[0]?.stars === 4, 'A delivered order could not be rated');
-    await fulfilment.openSupportCase({
+    // 8.7 -- a structured case on the smallest affected object: one of the
+    // customer's categories, the order, and the line it is about; opened
+    // with the deadline operations ranks by and its own OPENED event. Until
+    // audit run 55 any category was taken, no line could be named, and the
+    // case carried no deadline and no case event.
+    await rejects(
+      () =>
+        fulfilment.openSupportCase({
+          context: customerContext(customerId),
+          vendor_order_id: orderA.vendor_order_id,
+          category: 'NOT_A_CATEGORY',
+          description: 'SYNTH support case with a made-up category.',
+        }),
+      FulfilmentInputError,
+      'A category outside the customer list opened a case',
+    );
+    const orderBLine = await pool.query<{ id: string }>(
+      `SELECT vendor_order_line_id AS id FROM marketplace.vendor_order_lines
+        WHERE vendor_order_id=$1 LIMIT 1`,
+      [orderB.vendor_order_id],
+    );
+    await rejects(
+      () =>
+        fulfilment.openSupportCase({
+          context: customerContext(customerId),
+          vendor_order_id: orderA.vendor_order_id,
+          category: 'MISSING_ITEM',
+          description: "SYNTH support case naming another order's line.",
+          vendor_order_line_id: orderBLine.rows[0]?.id as UuidV7,
+        }),
+      FulfilmentNotFoundError,
+      "A case named another order's line",
+    );
+    const supportOpenedAt = new Date(now.getTime() + 66_000);
+    const supportCaseId = await fulfilment.openSupportCase({
       context: customerContext(customerId),
       vendor_order_id: orderA.vendor_order_id,
       category: 'MISSING_ITEM',
       description: 'SYNTH support case for coverage.',
+      vendor_order_line_id: vendorOrderLineId as UuidV7,
+      now: supportOpenedAt,
     });
+    const openedCase = await pool.query<{
+      line: string | null;
+      severity: string;
+      due: Date | null;
+      events: string;
+    }>(
+      `SELECT c.vendor_order_line_id AS line, c.severity, c.response_due_at AS due,
+              (SELECT string_agg(e.event_type, ',') FROM marketplace.support_case_events e
+                WHERE e.support_case_id = c.support_case_id) AS events
+         FROM marketplace.support_cases c WHERE c.support_case_id=$1`,
+      [supportCaseId],
+    );
+    check(
+      openedCase.rows[0]?.line === vendorOrderLineId &&
+        openedCase.rows[0]?.severity === 'MEDIUM' &&
+        openedCase.rows[0]?.due?.getTime() ===
+          supportOpenedAt.getTime() + DEFAULT_SUPPORT_RESPONSE_SECONDS * 1000 &&
+        openedCase.rows[0]?.events === 'OPENED',
+      `The customer's case is not structured: line, severity, deadline, event (${JSON.stringify(openedCase.rows)})`,
+    );
+    const storeCases = await fulfilment.locationSupportCases({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_location_id: storeA.locationId,
+    });
+    check(
+      storeCases.some(
+        (entry) =>
+          entry.support_case_id === supportCaseId &&
+          entry.line_title === 'SYNTH Fulfilment Product 0',
+      ),
+      `The store's case list does not name the item (${JSON.stringify(storeCases)})`,
+    );
 
     // 8.1 -- system-driven timeout: a fresh PLACED order whose accept_by has
     // passed transitions to EXPIRED. Build a third store fixture so we can
@@ -2155,6 +2224,17 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         storeC.locationId,
         new Date(now.getTime() + 22_000),
       ],
+    );
+    // 8.7 -- only a completed order can be rated: a placed one cannot.
+    await rejects(
+      () =>
+        fulfilment.submitRating({
+          context: customerContext(customerId),
+          vendor_order_id: timeoutOrderId,
+          stars: 5,
+        }),
+      FulfilmentConflictError,
+      'An order still placed was rated',
     );
     // 8.2 -- past the deadline the shop can no longer accept, whether or not
     // the sweep has reached the order yet.
@@ -2859,6 +2939,49 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         captured.rows[0]?.item === '42000' &&
         captured.rows[0]?.adjustments === 'LINES_NOT_SUPPLIED:-45000',
       `Ready did not take the lines not in the bag off the authorisation (${JSON.stringify(captured.rows)}, started at ${authorisedAtStart})`,
+    );
+    // 8.7 -- the receipt says what became of each line and what is charged:
+    // the allocation, with the adjustments that made it. Until audit run 55
+    // it listed the ordered lines at the ordered prices under the ordered
+    // total, whatever the bag held.
+    const receiptC = await fulfilment.getReceipt({
+      context: customerContext(customerId),
+      vendor_order_id: orderC.vendor_order_id,
+    });
+    const byLine = new Map(receiptC.lines.map((line) => [line.vendor_order_line_id, line]));
+    const suppliedSum = receiptC.lines.reduce((sum, line) => sum + line.supplied_total_minor, 0);
+    check(
+      receiptC.lines.length === 6 &&
+        byLine.get(line1)?.pick_state === 'SUBSTITUTION_APPROVED' &&
+        byLine.get(line1)?.supplied_title === 'SYNTH Decision Product 6' &&
+        byLine.get(line1)?.supplied_total_minor === 18_000 &&
+        byLine.get(line2)?.pick_state === 'WEIGHT_REJECTED' &&
+        byLine.get(line2)?.supplied_quantity === 0 &&
+        byLine.get(line2)?.supplied_total_minor === 0 &&
+        byLine.get(line3)?.supplied_total_minor === 0 &&
+        byLine.get(line4)?.supplied_total_minor === 12_000 &&
+        byLine.get(line5)?.pick_state === 'SUBSTITUTION_REJECTED' &&
+        byLine.get(line6)?.pick_state === 'WEIGHT_APPROVED' &&
+        byLine.get(line6)?.supplied_total_minor === 12_000 &&
+        byLine.get(line3)?.substitution_preference === 'NO_SUBSTITUTION' &&
+        suppliedSum === 42_000 &&
+        receiptC.charged.item_minor === 42_000 &&
+        receiptC.charged.total_minor === authorisedAtStart - 3_000 - 45_000 &&
+        receiptC.charged.payment_state === 'AUTHORIZED' &&
+        receiptC.adjustments.length === 4 &&
+        receiptC.adjustments.filter((entry) => entry.kind === 'CUSTOMER_DECISION').length === 3 &&
+        receiptC.adjustments.some(
+          (entry) => entry.kind === 'LINES_NOT_SUPPLIED' && entry.delta_minor === -45_000,
+        ) &&
+        receiptC.adjustments.some(
+          (entry) =>
+            entry.kind === 'CUSTOMER_DECISION' &&
+            entry.delta_minor === 3_000 &&
+            entry.reason_note?.includes('close substitute'),
+        ) &&
+        receiptC.refunds.length === 0 &&
+        receiptC.order.lifecycle_state === 'READY',
+      `The receipt does not say what the bag held and what is charged (${JSON.stringify({ lines: receiptC.lines.map((line) => [line.pick_state, line.supplied_total_minor]), charged: receiptC.charged, adjustments: receiptC.adjustments })})`,
     );
     // And the found line of order A kept its commitment: it is in the bag.
     const keptA = await pool.query<{ state: string }>(

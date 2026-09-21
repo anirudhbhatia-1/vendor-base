@@ -170,6 +170,7 @@ assert(
       '0095_picking_line_rules',
       '0096_decision_details',
       '0097_ready_packaging',
+      '0098_receipt_and_support_line',
     ]),
   'Unexpected reviewed migrations',
 );

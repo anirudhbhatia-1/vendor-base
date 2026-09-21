@@ -6,6 +6,8 @@ import type {
   CheckoutGroupReceipt,
   CustomerOrderEntry,
   CustomerOrderGroup,
+  CustomerReceiptAdjustment,
+  CustomerReceiptLine,
   CustomerReceipt,
 } from '@neighbourhood-store/contracts';
 import {
@@ -88,6 +90,47 @@ const SUPPORT_CATEGORIES = [
   ['ORDER_HELP', 'Something else'],
 ] as const;
 
+/** What became of a receipt line, in the customer's words (8.7). */
+export function receiptLineNote(
+  line: Pick<
+    CustomerReceiptLine,
+    'pick_state' | 'supplied_title' | 'supplied_quantity' | 'quantity'
+  >,
+  t: (key: string, fallback: string) => string,
+): string {
+  switch (line.pick_state) {
+    case 'MISSING':
+    case 'SUBSTITUTION_REJECTED':
+    case 'WEIGHT_REJECTED':
+      return ` — ${t('customer.receipt.not_supplied', 'not supplied, not charged')}`;
+    case 'SUBSTITUTION_APPROVED':
+      return line.supplied_title
+        ? ` — ${t('customer.receipt.replaced_with', 'replaced with')} ${displayLabel(line.supplied_title)}`
+        : '';
+    case 'FOUND':
+      return line.supplied_quantity < line.quantity
+        ? ` — ${line.supplied_quantity}/${line.quantity}`
+        : '';
+    default:
+      return '';
+  }
+}
+
+/** The receipt's name for a pre-capture adjustment (8.7). */
+export function adjustmentLabel(
+  kind: CustomerReceiptAdjustment['kind'],
+  t: (key: string, fallback: string) => string,
+): string {
+  switch (kind) {
+    case 'LINES_NOT_SUPPLIED':
+      return t('customer.receipt.adjustment.lines', 'Items not in the bag');
+    case 'CUSTOMER_DECISION':
+      return t('customer.receipt.adjustment.decision', 'Change you approved or allowed');
+    default:
+      return t('customer.receipt.adjustment.ended', 'Order ended before it was supplied');
+  }
+}
+
 /** A star control that actually asks for a rating (CUS-66). */
 function StarRating({
   onRate,
@@ -140,6 +183,8 @@ function OrderCard({
   const [supportOpen, setSupportOpen] = useState(false);
   const [supportCategory, setSupportCategory] = useState<string>('MISSING_ITEM');
   const [supportDescription, setSupportDescription] = useState('');
+  const [supportLine, setSupportLine] = useState<string>('');
+  const [supportLines, setSupportLines] = useState<readonly CustomerReceiptLine[]>([]);
   const [rating, setRating] = useState(0);
   const [deliveryRating, setDeliveryRating] = useState(0);
   const [deliveryOtp, setDeliveryOtp] = useState<{ code: string; expiresAt: string } | null>(null);
@@ -275,7 +320,17 @@ function OrderCard({
         >
           <span className="ns-button__label">{t('customer.order.receipt', 'Receipt')}</span>
         </Link>
-        <Button onClick={() => setSupportOpen(true)} variant="secondary">
+        <Button
+          onClick={() => {
+            setSupportOpen(true);
+            // The case can name the item it is about (8.7): the smallest
+            // object support can act on.
+            void run(async (client) => {
+              setSupportLines((await client.orders.receipt(order.vendor_order_id)).lines);
+            });
+          }}
+          variant="secondary"
+        >
           {t('customer.order.help', 'Get help')}
         </Button>
         {!terminal ? (
@@ -420,9 +475,11 @@ function OrderCard({
                 await client.orders.openSupport(order.vendor_order_id, {
                   category: supportCategory,
                   description: supportDescription.trim(),
+                  ...(supportLine === '' ? {} : { vendor_order_line_id: supportLine }),
                 });
                 setSupportOpen(false);
                 setSupportDescription('');
+                setSupportLine('');
                 setMessage(
                   t('customer.support.opened', 'Your case is open. We will come back to you here.'),
                 );
@@ -451,6 +508,20 @@ function OrderCard({
             </option>
           ))}
         </SelectField>
+        {supportLines.length > 0 ? (
+          <SelectField
+            label={t('customer.support.item', 'Which item?')}
+            onChange={(event) => setSupportLine(event.target.value)}
+            value={supportLine}
+          >
+            <option value="">{t('customer.support.item.any', 'The whole order')}</option>
+            {supportLines.map((line) => (
+              <option key={line.vendor_order_line_id} value={line.vendor_order_line_id}>
+                {displayLabel(line.title)}
+              </option>
+            ))}
+          </SelectField>
+        ) : null}
         <label className="ns-field">
           <span className="ns-field__label">
             {t('customer.support.detail', 'Tell us what happened')}
@@ -479,31 +550,70 @@ function OrderCard({
         {receipt ? (
           <>
             <p className="ns-eyebrow">{shortReference(receipt.order.order_reference)}</p>
+            {/* Each line as ordered and as it ended up (8.7): found, short,
+                missing, replaced, weighed -- and then what was charged, which
+                is the allocation, never the ordered total on its own. */}
+            <p className="ns-eyebrow">{t('customer.receipt.ordered', 'You ordered')}</p>
             <ul className="receipt-lines">
               {receipt.lines.map((line) => (
-                <li key={line.catalogue_variant_id}>
-                  <span>{displayLabel(line.title)}</span>
+                <li key={line.vendor_order_line_id}>
+                  <span>
+                    {displayLabel(line.title)}
+                    {receiptLineNote(line, t)}
+                  </span>
                   <span>
                     {line.quantity} × {formatMoneyMinor(line.unit_price_minor)} ={' '}
                     {formatMoneyMinor(line.line_total_minor)}
+                    {line.supplied_total_minor !== line.line_total_minor &&
+                    line.pick_state !== 'PENDING'
+                      ? ` → ${formatMoneyMinor(line.supplied_total_minor)}`
+                      : ''}
                   </span>
                 </li>
               ))}
             </ul>
+            {receipt.adjustments.length > 0 ? (
+              <ul className="receipt-lines">
+                {receipt.adjustments.map((adjustment) => (
+                  <li key={adjustment.occurred_at + adjustment.kind}>
+                    <span>{adjustmentLabel(adjustment.kind, t)}</span>
+                    <span>
+                      {adjustment.delta_minor > 0 ? '+' : '−'}
+                      {formatMoneyMinor(Math.abs(adjustment.delta_minor))}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {receipt.refunds.length > 0 ? (
+              <ul className="receipt-lines">
+                {receipt.refunds.map((refund) => (
+                  <li key={refund.refund_id}>
+                    <span>
+                      {t('customer.receipt.refund', 'Refund')} ·{' '}
+                      {refund.refund_state.toLowerCase().replaceAll('_', ' ')}
+                    </span>
+                    <span>−{formatMoneyMinor(refund.refund_total_minor)}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <div className="ns-row receipt-total">
-              <strong>{t('customer.receipt.total', 'Total')}</strong>
-              <strong>{formatMoneyMinor(receipt.order.total_minor)}</strong>
+              <strong>{t('customer.receipt.charged', 'Charged')}</strong>
+              <strong>{formatMoneyMinor(receipt.charged.total_minor)}</strong>
             </div>
             <Button
               block
               onClick={() =>
                 void run(async (client) => {
+                  // The basket is rebuilt line by line under each line's own
+                  // rule, at today's prices; the cart and the quote revalidate.
                   for (const line of receipt.lines) {
                     await client.cart.addLine({
                       vendor_location_id: line.vendor_location_id,
                       catalogue_variant_id: line.catalogue_variant_id,
                       quantity: line.quantity,
-                      substitution_preference: 'ASK_CUSTOMER',
+                      substitution_preference: line.substitution_preference,
                     });
                   }
                   setReceipt(null);

@@ -1843,6 +1843,41 @@ Five requirements. Four held in their mechanism — a 15-minute code that rotate
 
 **Step 8.6: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 55 (21 September 2026) — step 8.7, order history, receipt, reorder, rating and support entry
+
+Five requirements. Two held (the grouped history with the derived summary since run 47; rating once, on a completed order, by its owner), one held in its mechanism (reorder re-adds the lines and the cart and quote revalidate) but lost each line's rule, and two did not: the receipt was the order as placed, not as supplied or charged, and a support case was a free category on the whole order with no deadline and no case event. Migration 0098; ten connected assertions, one unit test; six mutation probes, all caught. Run 52's forward finding (the receipt omits pre-capture adjustments) is closed here.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Completed and failed child orders under their group | Met (run 47's derivation; the walk reads all three summaries). |
+| 2 | Itemized vendor-scoped receipt | **The order as placed.** The lines at ordered quantity and price under the ordered total, whatever the bag held and whatever was charged — P55-01. |
+| 3 | Recreate a basket with current revalidation | Met in mechanism; every re-added line was given `ASK_CUSTOMER`, losing the rule the customer chose — fixed with the receipt. |
+| 4 | Eligible vendor rating/review | Met: completed orders only, once, by the owner; now also walked for a placed order (refused). |
+| 5 | Structured support case on the smallest affected object | **Neither structured nor smallest.** Any shouting-snake-case category; no line; no severity or deadline for the operations queue to rank by; no `support_case_events` row, unlike a case the control plane opens — P55-02. |
+
+**P55-01 — the receipt.** `getReceipt` returns each line as ordered and as supplied — `pick_state`, the actual quantity and price, the replacement's title when one was approved, `supplied_quantity` (zero for a missing or refused line) and `supplied_total_minor` — with the line's `substitution_preference`; the pre-capture adjustments with their kind and, for a decision, its reason; the refunds after capture; and `charged`: the order's payment allocation, item by item, which is what capture takes. The customer's receipt sheet says "not supplied, not charged", "replaced with …", "3/4", itemises the adjustments, and shows **Charged** as the allocation. Reorder rebuilds the basket under each line's own rule. The walk reads order C's receipt: six lines (two replaced, three refused, one weighed), the supplied sum equal to the items allocation, four adjustments, the charged total equal to the authorisation as it stood.
+
+**P55-02 — the case.** `CUSTOMER_SUPPORT_CATEGORIES` is the vocabulary (400 otherwise); the case may name a `vendor_order_line_id` of its own order (0098; another order's is concealed), is opened at severity `MEDIUM` with `response_due_at` from `support.p2_staffed_ack_seconds` (four staffed hours by default, implementation.md 6.1) and its own `OPENED` event, the way `createSupportCase` in the control plane opens one; the store's case list names the item. The customer's sheet offers "Which item?" from the receipt.
+
+**Mutation results.** Six probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Supplied figures ignore the pick state (old) | *The receipt does not say what the bag held … ([["SUBSTITUTION_REJECTED",15000] …])* |
+| Charged is the ordered total (old) | same check, on `charged.total_minor` |
+| Any category (old) | *A category outside the customer list opened a case* |
+| The named line not checked against the order | *A case named another order's line* |
+| No OPENED case event (old) | *The customer's case is not structured … "events":null* |
+| The replacement's title dropped | *The receipt does not say what the bag held …* |
+
+**Phase 8 exit gate.** One-store prepaid pickup completes exactly once end to end: the collection walk (order P: accept, pick, ready, the customer's code, the vendor fallback, completion once, settlement). Vendor timeout (order T), decline (B), substitution approve (C line 1) / reject (C line 5) / timeout (C line 3, weight), variable weight (heavier asked and refused, lighter recorded), cancellation (X, after acceptance), OTP failure and replay (P), support (A, with its line) and refund input paths (the money walk's proposed refund) pass in the fulfilment verifier. **Met.**
+
+**Forward findings.** (9.x) `confirmPickup` compares the partner's typed package count with the attempt's; offers go out from acceptance rather than ready (owner decision). (11.3) The customer's own case view (`getCustomerSupportCase`) does not yet show the line. (carried) The console does not say a change was applied without asking; no vendor cancellation after acceptance.
+
+**Verification.** `pnpm db:verify` exit 0 — 99 migration files (0000–0098), full ladder; `vendor_fulfilment` 259 assertions (253 after run 54). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 566 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 8.7: VERIFIED_LOCAL. Phase 8 exit gate: met.**
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

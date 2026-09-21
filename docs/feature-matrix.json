@@ -1743,7 +1743,7 @@
       "name": "Receipts",
       "status": "complete_local_synthetic",
       "target_stage": "4",
-      "notes": "PWA shows itemized receipt. Android missing",
+      "notes": "PWA shows the itemized receipt as the bag ended up: each line as ordered and as supplied, the adjustments, the refunds, and the charged amount from the allocation (audit run 55). Android missing",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1789,7 +1789,7 @@
       "name": "Reorder",
       "status": "complete_local_synthetic",
       "target_stage": "4",
-      "notes": "PWA iterates receipt lines to re-add to cart. Android missing",
+      "notes": "PWA iterates receipt lines to re-add to cart under each line's own substitution rule; the cart and the quote revalidate (audit run 55). Android missing",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1811,7 +1811,7 @@
       "name": "Structured support",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Support case creation with category",
+      "notes": "Support case creation with one of the customer categories, optionally naming the item it is about, at severity MEDIUM with the P2 response deadline and its own OPENED event (audit run 55)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {

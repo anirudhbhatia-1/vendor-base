@@ -513,7 +513,10 @@ export function createApiClient(options: ApiClientOptions) {
           json: body,
         }),
 
-      openSupport: (vendorOrderId: string, body: { category: string; description: string }) =>
+      openSupport: (
+        vendorOrderId: string,
+        body: { category: string; description: string; vendor_order_line_id?: string },
+      ) =>
         r<Record<string, unknown>>(`/customer/orders/${vendorOrderId}/support`, {
           method: 'POST',
           json: body,

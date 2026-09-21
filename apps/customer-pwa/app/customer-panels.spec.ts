@@ -186,6 +186,24 @@ test('the decision countdown is driven by the server deadline', () => {
   assert.ok(source.includes('Time is up'), 'expiry is stated plainly');
 });
 
+test('the receipt says what the bag held and what was charged, and a case can name its item', () => {
+  const source = panel('orders-panel.tsx');
+  // The receipt is the allocation, not the ordered total; each line says what
+  // became of it; the basket is rebuilt under each line's own rule (8.7).
+  assert.ok(source.includes('receipt.charged.total_minor'), 'the charged amount is the allocation');
+  assert.ok(source.includes('receiptLineNote(line, t)'), 'each line says what became of it');
+  assert.ok(source.includes('adjustmentLabel(adjustment.kind, t)'), 'adjustments are itemised');
+  assert.ok(
+    source.includes('substitution_preference: line.substitution_preference'),
+    'reorder keeps each line’s own rule',
+  );
+  assert.ok(
+    !source.includes("substitution_preference: 'ASK_CUSTOMER'"),
+    'reorder no longer overwrites the rule',
+  );
+  assert.ok(source.includes('vendor_order_line_id: supportLine'), 'a case can name its item');
+});
+
 test('refunds are shown against the order they belong to', () => {
   const source = panel('orders-panel.tsx');
   assert.ok(source.includes('financeReceipt'), 'the money view is loaded');
