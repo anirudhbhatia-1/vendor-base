@@ -1945,11 +1945,11 @@ Five requirements. Two held (online/offline/paused with a server-side session an
 | The database's date (old) | *A delivery just after midnight IST was not counted in its day (1)* — after the after-midnight case was written; on this IST laptop the first form let it through |
 | Live session not counted | *The summary does not name the active zone with today's online time ({… "online":0})* |
 
-**Environment note.** The laptop was on battery with the lid closed for this run, cycling maintenance sleep between commands; the container VM's clock stalls during each nap and fell minutes behind the host, which made membership checks against `now()` fail mid-ladder. The ladder was re-run with the VM clock kept in step from the host every fifteen seconds; the code under test is unaffected.
+**Environment note.** The laptop was on battery with the lid closed for this run, cycling maintenance sleep between commands; the container VM's clock stalls during each nap and fell minutes behind the host, so a fixture's `valid_from` (host clock) sat in the database's future and membership checks against `now()` failed mid-ladder. Keeping the VM clock in step every fifteen seconds was not enough. The ladder's evidence for this run is CI's: the `Mandatory quality gate` on the branch at `6677f52` (run 35598344878) executed `pnpm db:verify`, the unit and the integration suites on a clean runner and passed.
 
 **Forward findings.** (9.3) A partner with an open offer can be offered a second attempt; the second accept is refused, the second offer lapses. (11.7) Incident controls are read by dispatch now; whether checkout, vendor and payout paths read theirs is 11.7's audit. (carried) `ZONE` scopes match service zones by name.
 
-**Verification.** `pnpm db:verify` exit 0 — 100 migration files (0000–0099), full ladder; `partner_availability` VERIFY_COUNT assertions (14 after batch 9). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 568 pass / 0 fail; `pnpm test:integration` exit 0.
+**Verification.** `pnpm db:verify` exit 0 on CI (run 35598344878) — 100 migration files (0000–0099), full ladder; `partner_availability` 25 assertions (14 after batch 9). Locally: `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 568 pass / 0 fail; `pnpm test:integration` exit 0; the availability module's own walk and all seven probes on a rebuilt database.
 
 **Step 9.2: VERIFIED_LOCAL**, with the forward findings carried.
 
