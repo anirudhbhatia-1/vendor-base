@@ -12,6 +12,7 @@ Only code that has the same meaning on every consuming platform belongs here. Sh
 | `ui/` | Presentation helpers shared by the PWAs: formatting and accessibility behaviour | Business rules, API calls or role-specific screens |
 | `pwa-auth/` | Browser session helpers for the PWA BFF: cookie and CSRF handling | Token minting, authorization decisions or direct database access |
 | `app-auth/` | Native session helpers for the Expo shells: secure token storage, the Supabase client, the sign-in screen | Token minting, authorization decisions or role-specific screens |
+| `app-shell/` | The hosted-workspace shell for the Expo apps: the role's PWA in a WebView with the device states around it (offline, the back button, external links, the location permission) | Business rules, API calls, role-specific screens or anything that makes the shell authoritative |
 
 ## Shared platform kernel
 

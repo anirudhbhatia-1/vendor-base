@@ -2,12 +2,36 @@
   "expo": {
     "name": "Neighbourhood Store Admin",
     "slug": "neighbourhood-admin-internal",
-    "version": "0.0.0",
+    "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "scheme": "neighbourhood-admin",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#18221C"
+    },
     "android": {
-      "package": "com.neighbourhoodstore.internal.admin"
-    }
+      "package": "com.neighbourhoodstore.internal.admin",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#18221C"
+      },
+      "permissions": ["INTERNET", "ACCESS_NETWORK_STATE"],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "neighbourhood-admin"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
+    "plugins": []
   }
 }

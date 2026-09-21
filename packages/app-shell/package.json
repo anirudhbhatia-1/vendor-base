@@ -1,0 +1,37 @@
+{
+  "name": "@neighbourhood-store/app-shell",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The hosted-workspace shell for the Expo apps: the role's PWA in a WebView with the device states around it (offline, back, external links, location permission).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./config": "./src/workspace-config.ts"
+  },
+  "scripts": {
+    "test:unit": "node ../../tooling/scripts/ensure-packages-built.mjs && node --import tsx --test src/*.spec.ts",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@neighbourhood-store/ui-tokens": "workspace:*"
+  },
+  "peerDependencies": {
+    "expo-linking": "56.0.18",
+    "expo-location": "56.0.26",
+    "expo-network": "56.0.5",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-safe-area-context": "5.7.0",
+    "react-native-webview": "13.16.1"
+  },
+  "devDependencies": {
+    "expo-linking": "56.0.18",
+    "expo-location": "56.0.26",
+    "expo-network": "56.0.5",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-safe-area-context": "5.7.0",
+    "react-native-webview": "13.16.1"
+  }
+}

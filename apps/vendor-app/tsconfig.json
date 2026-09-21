@@ -3,20 +3,8 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "lib": ["ES2022"],
-    // @supabase/supabase-js ships type definitions written against the DOM
-    // (BroadcastChannel, HeadersInit, SubtleCrypto). Adding "DOM" to lib would
-    // fix them by making every browser global visible to a React Native app,
-    // where `document` compiling is a crash waiting to happen. Skipping
-    // declaration checking for dependencies is the narrower relaxation: our own
-    // code is still fully checked.
-    //
-    // Verified rather than assumed: with `--skipLibCheck false` this project reports
-    // errors inside third-party declarations (`@supabase/auth-js`), so the override
-    // earns its place. It is not "the only app kind that needs it" — `database/`
-    // needs it for the same dependency, while `admin-app`, the same kind of app,
-    // compiles clean without it and therefore does not set it.
-    "skipLibCheck": true,
-    "types": ["react", "react-native"]
+    "types": ["node", "react", "react-native"],
+    "skipLibCheck": true
   },
-  "include": ["App.tsx"]
+  "include": ["App.tsx", "tests/**/*.ts"]
 }

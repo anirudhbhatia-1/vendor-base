@@ -2,24 +2,29 @@
   "name": "@neighbourhood-store/admin-app",
   "version": "0.0.0",
   "private": true,
-  "description": "Admin and support Expo/React Native Android shell for company-local development.",
+  "description": "Neighbourhood Store Admin Android shell: the admin PWA hosted in a native WebView with the device states around it.",
   "license": "UNLICENSED",
   "type": "module",
   "main": "expo/AppEntry.js",
   "scripts": {
+    "test:unit": "node ../../tooling/scripts/ensure-packages-built.mjs && node --import tsx --test tests/*.spec.ts",
     "android": "node ../../tooling/scripts/ensure-packages-built.mjs && expo start --android --port 8084",
     "build": "expo export --platform android --output-dir dist",
+    "build:apk": "node ../../tooling/scripts/build-android-apk.mjs",
     "dev": "node ../../tooling/scripts/ensure-packages-built.mjs && expo start --offline --port 8084",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@neighbourhood-store/app-auth": "workspace:*",
-    "@neighbourhood-store/contracts": "workspace:*",
+    "@neighbourhood-store/app-shell": "workspace:*",
     "@neighbourhood-store/ui-tokens": "workspace:*",
     "expo": "56.0.19",
-    "expo-secure-store": "56.0.4",
+    "expo-linking": "56.0.18",
+    "expo-location": "56.0.26",
+    "expo-network": "56.0.5",
     "expo-status-bar": "56.0.4",
     "react": "19.2.3",
-    "react-native": "0.85.3"
+    "react-native": "0.85.3",
+    "react-native-safe-area-context": "5.7.0",
+    "react-native-webview": "13.16.1"
   }
 }

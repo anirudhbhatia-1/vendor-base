@@ -1,14 +1,37 @@
 {
   "expo": {
-    "name": "Neighbourhood Store Customer",
+    "name": "Neighbourhood Store",
     "slug": "neighbourhood-customer-internal",
-    "version": "0.0.0",
+    "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "scheme": "neighbourhood-customer",
-    "android": {
-      "package": "com.neighbourhoodstore.internal.customer"
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FFD84D"
     },
-    "plugins": ["expo-router", "expo-secure-store", "expo-splash-screen"]
+    "android": {
+      "package": "com.neighbourhoodstore.internal.customer",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#FFD84D"
+      },
+      "permissions": ["INTERNET", "ACCESS_NETWORK_STATE"],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "neighbourhood-customer"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
+    "plugins": []
   }
 }

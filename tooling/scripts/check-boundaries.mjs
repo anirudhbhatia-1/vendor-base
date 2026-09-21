@@ -22,6 +22,9 @@ const packageImportAllowlist = {
   // The native sign-in screen calls the typed client and paints with the
   // shared tokens; it decides nothing.
   'app-auth': new Set(['contracts', 'ui-tokens']),
+  // The hosted-workspace shell paints with the shared tokens and decides
+  // nothing: the URL it hosts is its whole configuration.
+  'app-shell': new Set(['ui-tokens']),
   'test-data': new Set(['contracts', 'domain-types']),
   ui: new Set(['ui-tokens']),
 };

@@ -353,7 +353,7 @@
       "name": "Secure persistent session",
       "status": "partial_workflow",
       "target_stage": "3",
-      "notes": "Web sessions refresh correctly; the Android shells hold no refresh token",
+      "notes": "Web sessions refresh correctly; the Android apps host the PWA, so the session on Android is the web session in the shell's WebView (the native token shell was retired when the apps became hosted workspaces)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -366,7 +366,7 @@
       },
       "phase_steps": ["4.2"],
       "verified_by": [
-        "apps/customer-app/tests/session-manager.spec.ts",
+        "apps/customer-app/tests/hosted-workspace.spec.ts",
         "apps/customer-pwa/app/customer-panels.spec.ts",
         "database/scripts/verify-identity-sessions.ts",
         "e2e/auth-gates.spec.ts",

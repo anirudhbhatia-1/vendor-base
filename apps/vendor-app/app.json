@@ -2,12 +2,36 @@
   "expo": {
     "name": "Neighbourhood Store Vendor",
     "slug": "neighbourhood-vendor-internal",
-    "version": "0.0.0",
+    "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "scheme": "neighbourhood-vendor",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1F6B45"
+    },
     "android": {
-      "package": "com.neighbourhoodstore.internal.vendor"
-    }
+      "package": "com.neighbourhoodstore.internal.vendor",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#1F6B45"
+      },
+      "permissions": ["INTERNET", "ACCESS_NETWORK_STATE"],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "neighbourhood-vendor"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
+    "plugins": []
   }
 }

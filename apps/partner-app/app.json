@@ -2,12 +2,48 @@
   "expo": {
     "name": "Neighbourhood Store Partner",
     "slug": "neighbourhood-partner-internal",
-    "version": "0.0.0",
+    "version": "0.1.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "scheme": "neighbourhood-partner",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#245E9B"
+    },
     "android": {
-      "package": "com.neighbourhoodstore.internal.partner"
-    }
+      "package": "com.neighbourhoodstore.internal.partner",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#245E9B"
+      },
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "neighbourhood-partner"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Your position at the store and at the customer's door is what makes an arrival trusted."
+        }
+      ]
+    ]
   }
 }

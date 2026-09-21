@@ -17,4 +17,4 @@ Step 2.1 creates package boundaries only. Framework dependencies, entry points, 
 | `api/` | Backend team | NestJS/Fastify modular-monolith HTTP process |
 | `worker/` | Backend/platform team | Independently runnable NestJS/BullMQ background worker process |
 
-Each role receives both clients: one Next.js PWA and one Expo/React Native Android app. Browser applications will use the Next.js App Router when their entry points are created. The API remains the authority for permissions, prices, availability and workflow transitions.
+Each role receives both clients: one Next.js PWA and one Expo/React Native Android app. The Android app is a native shell that hosts the role's PWA in a WebView (`packages/app-shell`), so every workflow is the web's and the shell adds the device states — offline, the back button, external links, the location permission — and the app identity; see `docs/engineering/android-apps.md` for how the four are built and installed. Browser applications will use the Next.js App Router when their entry points are created. The API remains the authority for permissions, prices, availability and workflow transitions.
