@@ -25,7 +25,8 @@ export type ExceptionKind =
   | 'MEDICAL_EMERGENCY'
   | 'THREAT'
   | 'VEHICLE_FAILURE'
-  | 'PROHIBITED_GOODS';
+  | 'PROHIBITED_GOODS'
+  | 'PROOF_SYNC_FAILED';
 
 type ExceptionEvent = {
   readonly partner_exception_event_id: string;
@@ -41,44 +42,6 @@ type OfflineProof = {
   readonly sync_state: 'PENDING' | 'SYNCED' | 'EXPIRED';
   readonly captured_at: string;
 };
-
-/**
- * Where the device remembers the digest it registered.
- *
- * The server accepts a sync only when the digest matches the one saved at
- * capture — that is what makes the sync a claim about the proof this device
- * actually holds, rather than a bare "mark it done". The previous client
- * hashed the proof's own id at sync time, which never matched what capture had
- * registered, so every sync was refused with a digest conflict and a held
- * proof could never be cleared. `localStorage`, not component state, because
- * the whole point is surviving the app being closed in the field.
- */
-const PROOF_DIGEST_PREFIX = 'neighbourhood.partner.proof.';
-
-function rememberDigest(proofId: string, value: string): void {
-  try {
-    window.localStorage.setItem(`${PROOF_DIGEST_PREFIX}${proofId}`, value);
-  } catch {
-    // A device with storage disabled still syncs; it just has to do it in this
-    // session, and the escalation path below covers the rest.
-  }
-}
-
-function recallDigest(proofId: string): string | null {
-  try {
-    return window.localStorage.getItem(`${PROOF_DIGEST_PREFIX}${proofId}`);
-  } catch {
-    return null;
-  }
-}
-
-function forgetDigest(proofId: string): void {
-  try {
-    window.localStorage.removeItem(`${PROOF_DIGEST_PREFIX}${proofId}`);
-  } catch {
-    // Nothing to clean up.
-  }
-}
 
 type WaitTimer = {
   readonly wait_state: 'RUNNING' | 'THRESHOLD_ONE' | 'THRESHOLD_TWO' | 'LEFT_POLICY' | 'RESOLVED';
@@ -431,42 +394,15 @@ export function FieldOpsPanel({
         )
       ) : null}
 
-      {/* ── Held proof (DLP-32, DLP-33, DLP-34) ──────────────────────────── */}
+      {/* ── A proof registered on the server for this job (DLP-32) ─────────── */}
       {heldHere.map((proof) => (
         <Card className="proof-card" key={proof.partner_offline_proof_id} tone="sunken">
-          <StatusPill label="Proof waiting to send" state="SOFT_HELD" />
+          <StatusPill label="Held proof registered" state="SOFT_HELD" />
           <p className="ns-field__hint">
-            Captured {new Date(proof.captured_at).toLocaleTimeString()}. It is held on the server as
-            a digest only — the delivery is not confirmed until this sends.
+            Captured {new Date(proof.captured_at).toLocaleTimeString()}. The server holds its digest
+            only; the delivery is confirmed when the held completion on this device sends. New work
+            waits until it does.
           </p>
-          {recallDigest(proof.partner_offline_proof_id) === null ? (
-            // DLP-34: a proof this device can no longer vouch for is a support
-            // matter, not a button that fails. Saying so beats a digest
-            // conflict the partner cannot act on.
-            <Notice tone="warning">
-              This device no longer holds the capture for that proof. Report it under “Something is
-              wrong” so operations can close the delivery with you.
-            </Notice>
-          ) : (
-            <Button
-              busy={busy}
-              onClick={() =>
-                void run(async () => {
-                  const value = recallDigest(proof.partner_offline_proof_id);
-                  if (value === null) return;
-                  // The same key on a retry, so a repeated tap or an automatic
-                  // retry cannot complete the handoff twice (DLP-33).
-                  await partnerRequest(
-                    `partner/field/offline-proof/${proof.partner_offline_proof_id}/sync`,
-                    { method: 'POST', body: JSON.stringify({ encrypted_payload_digest: value }) },
-                  );
-                  forgetDigest(proof.partner_offline_proof_id);
-                }, 'Proof sent.')
-              }
-            >
-              Send it now
-            </Button>
-          )}
         </Card>
       ))}
 
@@ -540,43 +476,6 @@ export function FieldOpsPanel({
             </Button>
           ))}
         </div>
-        {/* Only a digest and a key reference leave the device: the proof
-            itself stays encrypted locally until it syncs, so a lost phone does
-            not leak a customer's doorstep (DLP-32, SEC-04). */}
-        <Button
-          block
-          onClick={() => {
-            setReportOpen(false);
-            void run(async () => {
-              const captured = new Date().toISOString();
-              const value = await digestOf(`${assignmentId}:DELIVERY:${captured}`);
-              const saved = await partnerRequest<{ partner_offline_proof_id?: string }>(
-                `partner/field/${assignmentId}/offline-proof`,
-                {
-                  method: 'POST',
-                  body: JSON.stringify({
-                    proof_kind: 'DELIVERY',
-                    encrypted_payload_digest: value,
-                    // The column requires this exact prefix; the old client
-                    // sent `SYNTH-KEY-…`, so every capture failed at the
-                    // constraint and surfaced as a server error.
-                    encryption_key_reference: `SYNTH-PARTNER-KEY-${assignmentId
-                      .slice(0, 8)
-                      .toUpperCase()}`,
-                    captured_at: captured,
-                    reason_code: 'PARTNER_OFFLINE_CAPTURE',
-                  }),
-                },
-              );
-              if (saved.partner_offline_proof_id) {
-                rememberDigest(saved.partner_offline_proof_id, value);
-              }
-            }, 'Proof held on this device. Send it when you have signal.');
-          }}
-          variant="ghost"
-        >
-          I have no signal — hold my proof
-        </Button>
       </Sheet>
 
       <Sheet onClose={() => setEmergencyOpen(false)} open={emergencyOpen} title="Are you safe?">
@@ -616,23 +515,4 @@ export function FieldOpsPanel({
       </span>
     </div>
   );
-}
-
-/**
- * A digest of the proof, not the proof. Uses the platform hash where available
- * and falls back to a stable non-cryptographic digest on an old device, so
- * capture never fails outright in the field.
- */
-export async function digestOf(value: string): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (subtle) {
-    const bytes = new TextEncoder().encode(value);
-    const hash = await subtle.digest('SHA-256', bytes);
-    return Array.from(new Uint8Array(hash))
-      .map((byte) => byte.toString(16).padStart(2, '0'))
-      .join('');
-  }
-  let fallback = 0;
-  for (const character of value) fallback = (fallback * 31 + character.charCodeAt(0)) >>> 0;
-  return fallback.toString(16).padStart(64, '0');
 }

@@ -2099,6 +2099,41 @@ Five requirements. Three held (the exact address only in custody; the delivery c
 
 **Step 9.6: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 62 (21 September 2026) — step 9.7, offline proof recovery
+
+Five requirements, and the step was a façade: the partner app's "I have no signal — hold my proof" button made a network request to register a digest of `assignment:DELIVERY:<time>` — a digest of nothing, sent to a server the offline device could not reach — and "Send it now" marked that digest SYNCED, which completed no delivery. The handover's real proof, the customer's code (DLP-30), was never held anywhere; a partner at a door without signal had no path but to try again later against a code that expires in fifteen minutes. One migration (0104); eight connected assertions, four unit tests; six mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Encrypt locally saved proof and bind it to the active assignment | **Not met:** nothing was saved locally but a digest in `localStorage`; nothing was encrypted; the "proof" bore no relation to the handover — P62-01. |
+| 2 | Display pending synchronization, never false success | Met in wording (a held card), but **what it described did not exist** — P62-01. |
+| 3 | Retry idempotently after reconnect | **Not met:** the sync marked a digest SYNCED; the completion was never retried at all — P62-02. |
+| 4 | Block new work until server confirmation or support resolution | Met: the active membership blocks a second job (DLP-14), and the proof-queue policy refuses new work while a registered proof is pending (batch 01). |
+| 5 | Remove local sensitive proof after verified synchronization or approved expiry | **Nothing sensitive was held**, so nothing was removed; now the sealed completion is forgotten on confirmation, on escalation, and the worker expires what never synced on the grace — P62-01, P62-03. |
+
+**P62-01 — what is held.** `held-proof.ts`: the completion command (its stable command reference, the version it was built against, the code, the proof reference, when it was captured) is sealed with AES-GCM under a per-device, non-extractable key kept in IndexedDB, with the assignment and the partner as additional authenticated data; the record opens only for that job on that account on that device. Without a key store the partner is told to keep the code and report to support rather than promised a hold the device cannot keep. `listHeld` reads what is held without opening it; `heldSentence` says "held, not confirmed" and, after a refusal, why. The workspace holds a delivery only when the request never reached the server (`isNetworkFailure`: no status, no code, or the browser offline) and never shows it as delivered.
+
+**P62-02 — the replay.** On reconnect (the `online` event, and once the session is known) the app registers the proof by the digest of the sealed record — the server holds the digest and the key reference, never the code — reusing a registration already pending for the attempt, then replays `deliver` under the held command reference with `held_since` and `offline_proof_id`. `deliver` keeps the code, the attempts and the state guards, and changes one thing: a code that lapsed while the device was dark is accepted when it was current at capture and signal returned within `assignment.offline_proof_grace_seconds` (SETTING, default 24 h); the proof row is consumed — `SYNCED`, `consumed_by_command_reference` (0104) — in the same commit, and the history's reason is `DELIVERY_PROOF_HELD_OFFLINE`, decided by the server. A proof of another attempt, another partner, or no longer pending is refused. A retry finds the command replayed and the proof spent.
+
+**P62-03 — the support path and the clean-up.** A refusal is kept on the device record with its code; the card offers "Report to support", which raises a `PROOF_SYNC_FAILED` exception (a new kind, 0104) with the refusal as its reason and forgets the sealed record. A confirmed completion is forgotten on the server's answer. The worker expires unsynced proofs on the same grace the completion is judged by, not a separate constant.
+
+**Mutation results.** Six probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Capture time not checked against expiry | *A completion captured after the code lapsed was accepted* |
+| No grace window | *A held completion beyond the grace window was accepted* |
+| Proof not bound to the attempt and partner | *A held completion consumed another attempt's proof* |
+| History does not say it was held | *… ({"reason_code":"DELIVERY_PROOF_VERIFIED", …})* |
+| Proof left pending after consumption | *… ({… "sync_state":"PENDING","consumed_by":null …})* |
+| A live lapsed code accepted (grace without `held_since`) | *A lapsed code entered live was accepted* |
+
+**Forward findings.** (DLP-31) Alternative proof stays gated; a held completion is the customer's code only. (9.7) The Android shell does not hold completions offline. (COM-03) A customer whose code lapsed while the partner was dark is not told the handover completed late; the delivered notice is the same. (carried) `ZONE` scopes by name; branch protection off; Android arrivals are claims.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 105 migration files (0000–0104), full ladder; `assignment_custody` 55 assertions (49 before), `vendor_fulfilment` 276, `partner_lifecycle` 73. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 583 pass / 0 fail (581 before: the sealed record and its listing, the deliver route's held fields; two source-text checks rewritten around the real path); `pnpm test:integration` exit 0 on a rebuilt test stack; all six probes on a rebuilt database.
+
+**Step 9.7: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

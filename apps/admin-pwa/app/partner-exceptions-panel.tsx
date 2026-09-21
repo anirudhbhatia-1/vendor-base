@@ -61,6 +61,7 @@ const KIND_COPY: Readonly<Record<string, string>> = {
   UNSAFE_LOCATION: 'Unsafe location',
   VEHICLE_FAILURE: 'Vehicle failure',
   PROHIBITED_GOODS: 'Possible prohibited goods',
+  PROOF_SYNC_FAILED: 'Held delivery proof refused on replay',
 };
 
 function shortReference(value: string): string {

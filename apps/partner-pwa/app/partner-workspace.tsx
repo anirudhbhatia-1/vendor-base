@@ -38,6 +38,27 @@ import {
   rememberAssignments,
   staleSentence,
 } from './active-job-cache';
+import {
+  annotateHeld,
+  browserKeyStore,
+  forgetHeld,
+  heldDigest,
+  heldSentence,
+  holdCompletion,
+  listHeld,
+  recallCompletion,
+  type HeldRecord,
+  type KeyStore,
+} from './held-proof';
+
+/** A request that never reached the server: no status, no code (9.7). */
+export function isNetworkFailure(cause: unknown): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  return (
+    cause instanceof TypeError ||
+    (cause instanceof Error && !('status' in cause) && !('code' in cause))
+  );
+}
 import { EarningsPanel } from './earnings-panel';
 import { FieldOpsPanel } from './field-ops-panel';
 import { PartnerProfilePanel } from './profile-panel';
@@ -633,6 +654,10 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   // When the server last confirmed the assignments shown; null while live (9.4).
   const [staleSince, setStaleSince] = useState<number | null>(null);
+  // Completions held on this device without signal (9.7), and the key store
+  // that seals them; null when the platform cannot keep a key.
+  const [held, setHeld] = useState<readonly HeldRecord[]>([]);
+  const heldKeys = useRef<KeyStore | null>(null);
   const [lastFix, setLastFix] = useState<{ latitude: number; longitude: number } | null>(null);
 
   const loadAlerts = useCallback(async () => {
@@ -681,11 +706,96 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     );
   }, [loadProofQueue]);
 
+  /**
+   * Replays every held completion (9.7): registers the proof the device holds
+   * (its digest, never the code), then the completion itself under its own
+   * command reference, so a retry by hand or by the app cannot hand over
+   * twice. A refusal is kept on the record for the support path; a dropped
+   * connection simply stops until the next reconnect.
+   */
+  const syncHeld = useCallback(async () => {
+    const keys = heldKeys.current;
+    const partnerId = identity?.user_id;
+    if (!keys || !partnerId) return;
+    for (const record of listHeld(window.localStorage)) {
+      if (record.failure) continue;
+      const completion = await recallCompletion(window.localStorage, keys, {
+        assignment_id: record.assignment_id,
+        partner_id: partnerId,
+      });
+      if (!completion) {
+        annotateHeld(window.localStorage, record.assignment_id, { failure: 'UNREADABLE' });
+        continue;
+      }
+      try {
+        let proofId = record.offline_proof_id;
+        if (!proofId) {
+          const digest = await heldDigest(window.localStorage, record.assignment_id);
+          const pending = await partnerRequest<{
+            readonly proofs?: readonly {
+              partner_offline_proof_id: string;
+              delivery_assignment_id: string;
+            }[];
+          }>('partner/field/offline-proofs');
+          const registered = (pending.proofs ?? []).find(
+            (proof) => proof.delivery_assignment_id === record.assignment_id,
+          );
+          if (registered) {
+            proofId = registered.partner_offline_proof_id;
+          } else {
+            const saved = await partnerRequest<{ partner_offline_proof_id: string }>(
+              `partner/field/${record.assignment_id}/offline-proof`,
+              {
+                method: 'POST',
+                body: JSON.stringify({
+                  proof_kind: 'DELIVERY',
+                  encrypted_payload_digest: digest,
+                  encryption_key_reference: `SYNTH-PARTNER-KEY-${record.assignment_id
+                    .slice(0, 8)
+                    .toUpperCase()}`,
+                  captured_at: completion.captured_at,
+                  reason_code: 'PARTNER_OFFLINE_CAPTURE',
+                }),
+              },
+            );
+            proofId = saved.partner_offline_proof_id;
+          }
+          annotateHeld(window.localStorage, record.assignment_id, { offline_proof_id: proofId });
+        }
+        await partnerRequest(`partner/assignments/${record.assignment_id}/deliver`, {
+          method: 'POST',
+          body: JSON.stringify({
+            command_reference: completion.command_reference,
+            expected_version: completion.expected_version,
+            reason_code: 'DELIVERY_PROOF_VERIFIED',
+            otp: completion.otp,
+            proof_reference: completion.proof_reference,
+            held_since: completion.captured_at,
+            offline_proof_id: proofId,
+          }),
+        });
+        forgetHeld(window.localStorage, record.assignment_id);
+        setMessage('A held delivery has been confirmed by the server.');
+      } catch (cause) {
+        if (isNetworkFailure(cause)) break;
+        const code =
+          cause instanceof Error && 'code' in cause && typeof cause.code === 'string'
+            ? cause.code
+            : 'REFUSED';
+        annotateHeld(window.localStorage, record.assignment_id, { failure: code });
+      }
+    }
+    setHeld(listHeld(window.localStorage));
+  }, [identity]);
+
   useEffect(() => {
     setConnected(navigator.onLine);
+    heldKeys.current = browserKeyStore();
+    setHeld(listHeld(window.localStorage));
     const online = () => {
       setConnected(true);
       void loadProofQueue();
+      void syncHeld();
     };
     const offline = () => {
       setConnected(false);
@@ -712,7 +822,12 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       window.removeEventListener('online', online);
       window.removeEventListener('offline', offline);
     };
-  }, [refresh, loadProofQueue]);
+  }, [refresh, loadProofQueue, syncHeld]);
+
+  // Once the session is known, anything held is replayed.
+  useEffect(() => {
+    if (identity && connected) void syncHeld();
+  }, [identity, connected, syncHeld]);
 
   useEffect(() => {
     if (!connected) return;
@@ -848,19 +963,32 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
           fix = { ...position };
         }
       }
-      const outcome = await partnerRequest<Assignment>(
-        `partner/assignments/${assignment.delivery_assignment_id}/${action}`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            command_reference: transitionCommandReference(action, Date.now()),
-            expected_version: assignment.version,
-            reason_code: 'PARTNER_CONFIRMED',
-            ...fix,
-            ...extra,
-          }),
-        },
-      );
+      const commandReference = transitionCommandReference(action, Date.now());
+      let outcome: Assignment;
+      try {
+        outcome = await partnerRequest<Assignment>(
+          `partner/assignments/${assignment.delivery_assignment_id}/${action}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              command_reference: commandReference,
+              expected_version: assignment.version,
+              reason_code: 'PARTNER_CONFIRMED',
+              ...fix,
+              ...extra,
+            }),
+          },
+        );
+      } catch (cause) {
+        // A delivery the server never heard of is held here, sealed, with the
+        // same command reference, and replayed when signal returns (9.7). It
+        // is never shown as delivered.
+        if (action === 'deliver' && isNetworkFailure(cause)) {
+          await holdDelivery(assignment, commandReference, extra);
+          return;
+        }
+        throw cause;
+      }
       await refresh();
       if (action === 'arrive-vendor' && outcome.arrival_claim) {
         setMessage('Arrival noted. The store has to confirm you are at the counter.');
@@ -873,6 +1001,61 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'That step could not be recorded.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function holdDelivery(
+    assignment: Assignment,
+    commandReference: string,
+    extra: Record<string, unknown>,
+  ) {
+    const keys = heldKeys.current;
+    const partnerId = identity?.user_id;
+    if (!keys || !partnerId) {
+      setError(
+        'No signal, and this device cannot hold the proof. Keep the customer’s code and report it to support when you can.',
+      );
+      return;
+    }
+    await holdCompletion(window.localStorage, keys, {
+      assignment_id: assignment.delivery_assignment_id,
+      partner_id: partnerId,
+      completion: {
+        command_reference: commandReference,
+        expected_version: assignment.version,
+        otp: String(extra['otp'] ?? ''),
+        proof_reference: String(extra['proof_reference'] ?? ''),
+        captured_at: new Date().toISOString(),
+      },
+    });
+    setHeld(listHeld(window.localStorage));
+    setMessage(
+      'No signal. The proof is held on this device — the delivery is NOT confirmed yet. It sends when you have signal.',
+    );
+  }
+
+  /** One tap to support with the refusal as the reason (DLP-34). */
+  async function reportHeld(record: HeldRecord) {
+    setBusy(true);
+    try {
+      await partnerRequest(`partner/field/${record.assignment_id}/exception`, {
+        method: 'POST',
+        body: JSON.stringify({
+          exception_kind: 'PROOF_SYNC_FAILED',
+          reason_code: /^[A-Z][A-Z0-9_]{2,63}$/.test(record.failure ?? '')
+            ? record.failure
+            : 'PROOF_SYNC_REFUSED',
+        }),
+      });
+      forgetHeld(window.localStorage, record.assignment_id);
+      setHeld(listHeld(window.localStorage));
+      setMessage(
+        'Reported. Operations will close this delivery with you; the code is no longer held here.',
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The report could not be sent.');
     } finally {
       setBusy(false);
     }
@@ -1154,6 +1337,28 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
           <LoadingState label="Loading dispatch…" lines={4} />
         ) : (
           <>
+            {/* Completions held on this device (9.7): said as held, never as
+                done, with the way to send them and the way to support. */}
+            {held.map((record) => (
+              <Card className="proof-card" key={record.assignment_id} tone="sunken">
+                <StatusPill
+                  label={record.failure ? 'Held proof refused' : 'Proof waiting to send'}
+                  state={record.failure ? 'DELIVERY_FAILED' : 'SOFT_HELD'}
+                />
+                <p className="ns-field__hint">{heldSentence(record, now)}</p>
+                <div className="ns-row">
+                  {record.failure ? (
+                    <Button busy={busy} onClick={() => void reportHeld(record)} variant="danger">
+                      Report to support
+                    </Button>
+                  ) : (
+                    <Button busy={busy} onClick={() => void syncHeld()} variant="secondary">
+                      Send it now
+                    </Button>
+                  )}
+                </div>
+              </Card>
+            ))}
             <Card className="today-strip" tone="sunken">
               <div>
                 <p className="ns-eyebrow">Today</p>

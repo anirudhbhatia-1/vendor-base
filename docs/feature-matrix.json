@@ -3987,7 +3987,7 @@
       "name": "Offline proof capture",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Held proofs are read back from the server and survive the app closing; only a digest leaves the device",
+      "notes": "The completion itself -- the customer's code, sealed on the device under a per-device key, bound to the assignment and the partner -- is held and shown as held, never delivered; only a digest reaches the server (audit run 62 -- until then a digest of nothing was 'held' by a request the offline device could not make)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4013,7 +4013,7 @@
       "name": "Idempotent proof synchronization",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Sync sends the digest registered at capture, held in device storage, so a retry cannot complete a handoff twice",
+      "notes": "The held completion replays under its own command reference with when it was captured and the proof it consumes; the server accepts a code that lapsed while the device was dark within the configured grace, consumes the proof once, and replays the rest (audit run 62)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4039,7 +4039,7 @@
       "name": "Offline proof escalation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Offline proof escalates through the guided report; the capability now binds the assignment so the route is reachable at all",
+      "notes": "A held completion the server refuses stays on the device with the refusal and is one tap from a PROOF_SYNC_FAILED report carrying it as the reason; the registered proof is the stable reference (audit run 62)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

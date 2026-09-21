@@ -176,6 +176,7 @@ assert(
       '0101_trusted_arrival',
       '0102_wait_at_arrival',
       '0103_customer_arrival',
+      '0104_held_proof_completion',
     ]),
   'Unexpected reviewed migrations',
 );

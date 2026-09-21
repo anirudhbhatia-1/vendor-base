@@ -4,7 +4,6 @@ import path from 'node:path';
 import test from 'node:test';
 import { onlineTimeSentence } from './profile-panel.js';
 import { earningsToCsv } from './earnings-panel.js';
-import { digestOf } from './field-ops-panel.js';
 import { offerDeadlineSentence, waitPolicySentence } from './display.js';
 
 const directory = path.resolve(import.meta.dirname);
@@ -35,16 +34,16 @@ test('emergencies are always reachable and separated from routine reports', () =
   assert.ok(source.includes('EMERGENCIES'), 'emergencies are a separate set');
 });
 
-test('offline proof sends a digest, never the proof itself', () => {
-  const source = panel('field-ops-panel.tsx');
-  assert.ok(source.includes('encrypted_payload_digest'));
+test('offline proof sends a digest, never the proof itself (9.7)', () => {
+  // The held completion lives in the workspace now (audit run 62): sealed on
+  // the device, registered by digest, replayed under its own command.
+  const source = panel('partner-workspace.tsx');
+  assert.ok(source.includes('encrypted_payload_digest: digest'));
   assert.ok(source.includes('encryption_key_reference'));
-});
-
-test('the digest is stable and hex, with a fallback on old devices', async () => {
-  const digest = await digestOf('assignment:DELIVERY:2026-08-30T00:00:00.000Z');
-  assert.match(digest, /^[0-9a-f]{64}$/);
-  assert.equal(digest, await digestOf('assignment:DELIVERY:2026-08-30T00:00:00.000Z'));
+  assert.ok(
+    !/encrypted_payload_digest: .*otp/.test(source),
+    'the code is never what is registered',
+  );
 });
 
 test('withdrawing location sharing also goes offline', () => {
@@ -170,17 +169,38 @@ test('an exception resolution sends the fields the endpoint requires', () => {
   assert.ok(source.includes('resolution_state: state'), 'the field is named as the API names it');
 });
 
-test('a held proof survives the app closing, and syncs with the digest it registered', () => {
-  const source = code('field-ops-panel.tsx');
-  // Sync hashed the proof's own id, which never matched what capture had
-  // registered, so every sync was refused and a held proof could never clear.
+test('a held completion survives the app closing and replays under its own command (9.7)', () => {
+  const source = code('partner-workspace.tsx');
   assert.ok(
-    source.includes('partner/field/offline-proofs'),
-    'held proofs are read from the server',
+    source.includes("if (action === 'deliver' && isNetworkFailure(cause)) {"),
+    'only a delivery the server never heard of is held',
   );
-  assert.ok(source.includes('localStorage'), 'the registered digest outlives the session');
-  assert.ok(source.includes('recallDigest'), 'sync uses the digest it registered');
-  assert.ok(!/digestOf\(proof\.partner_offline_proof_id\)/.test(source), 'not the proof id');
+  assert.ok(
+    source.includes('command_reference: completion.command_reference') &&
+      source.includes('held_since: completion.captured_at') &&
+      source.includes('offline_proof_id: proofId'),
+    'the replay carries the same command, when it was captured and the proof it consumes',
+  );
+  assert.ok(
+    source.includes('void syncHeld();') &&
+      source.includes("window.addEventListener('online', online);"),
+    'reconnecting replays what is held',
+  );
+  assert.ok(
+    source.includes('forgetHeld(window.localStorage, record.assignment_id);'),
+    'a confirmed or escalated completion is removed from the device',
+  );
+  assert.ok(
+    source.includes("exception_kind: 'PROOF_SYNC_FAILED'"),
+    'a refused replay is one tap from support',
+  );
+  assert.ok(
+    !/setMessage\([^)]*[Dd]elivered[^)]*\)/.test(
+      source.split('async function holdDelivery')[1]?.split('async function devicePosition')[0] ??
+        '',
+    ),
+    'holding never says delivered',
+  );
 });
 
 // DLP-14 proof eligibility is exercised by proof-queue-policy.spec.ts, including

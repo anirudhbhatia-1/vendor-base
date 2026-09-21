@@ -170,3 +170,37 @@ test('a nudge to the customer is a fixed message the domain admits, carried by a
     'order_reference',
   ]);
 });
+
+test('a held completion carries when it was captured and the proof it consumes (9.7)', async () => {
+  const seen: Record<string, unknown>[] = [];
+  const controller = new PartnerAssignmentController(
+    {
+      deliver: async (input: Record<string, unknown>) => {
+        seen.push(input);
+        return { assignment_state: 'DELIVERED' };
+      },
+    } as never,
+    {} as never,
+  );
+  await requestContextStorage.run(createRequestContext(), async () => {
+    await controller.deliver('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-DELIVER-HELD-T1',
+      expected_version: 9,
+      reason_code: 'DELIVERY_PROOF_VERIFIED',
+      otp: '424242',
+      proof_reference: 'SYNTH-PROOF-DELIVERY-T1',
+      held_since: '2026-09-21T10:00:00.000Z',
+      offline_proof_id: '01a0c40b-070f-7393-8216-0df916eb8540',
+    });
+    await controller.deliver('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-DELIVER-LIVE-T1',
+      expected_version: 9,
+      reason_code: 'DELIVERY_PROOF_VERIFIED',
+      otp: '424242',
+      proof_reference: 'SYNTH-PROOF-DELIVERY-T1',
+    });
+  });
+  assert.equal((seen[0]?.['held_since'] as Date).toISOString(), '2026-09-21T10:00:00.000Z');
+  assert.equal(seen[0]?.['offline_proof_id'], '01a0c40b-070f-7393-8216-0df916eb8540');
+  assert.ok(!('held_since' in (seen[1] ?? {})) && !('offline_proof_id' in (seen[1] ?? {})));
+});

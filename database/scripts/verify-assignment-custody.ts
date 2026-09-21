@@ -14,10 +14,12 @@ import {
   AssignmentInputError,
   AssignmentNotFoundError,
   AssignmentVersionError,
+  DeliveryOtpExpiredError,
   type DeliveryAssignmentRecord,
 } from '../src/assignment-custody.js';
 import { handoverCodeDigest } from '../src/handover-code.js';
 import { PartnerWaitConflictError, PartnerWaitPolicyService } from '../src/partner-wait-policy.js';
+import { PartnerFieldOpsService } from '../src/partner-field-ops.js';
 import {
   activateConfigurationVersion,
   approveConfigurationVersion,
@@ -51,6 +53,7 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
     hash_key: HASH_KEY,
   });
   const waits = new PartnerWaitPolicyService({ connection_string: connectionString });
+  const fieldOps = new PartnerFieldOpsService({ connection_string: connectionString });
   const adminId = createUuidV7();
   const partnerOneId = createUuidV7();
   const partnerTwoId = createUuidV7();
@@ -1232,6 +1235,255 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       reason_code: 'OPERATOR_REASSIGNED',
     });
 
+    // 9.7 -- a completion held offline. The customer read their code at a door
+    // with no signal; the device held the completion; signal came back after
+    // the code had lapsed. The held completion is accepted when the code was
+    // current at capture and signal returned within the grace, consuming the
+    // proof the device registered on reconnect -- once, whatever the retries.
+    const heldSeed = await service.create({
+      approximate_drop_area: 'SYNTH Jhotwara Jaipur',
+      approximate_pickup_area: 'SYNTH Jain Stores Jaipur',
+      command_reference: 'SYNTH-CMD-CREATE-HELD-G001',
+      context: admin,
+      handling_flags: [],
+      now: new Date(now.getTime() + 90_000),
+      package_count: 1,
+      reason_code: 'SYNTH_ASSIGNMENT_CREATED',
+      source_order_reference: 'SYNTH-ORDER-HELD-G001',
+      vendor_location_id: locationId,
+    });
+    const heldOffer = await service.offer({
+      command_reference: 'SYNTH-CMD-OFFER-HELD-G001',
+      context: admin,
+      delivery_assignment_id: heldSeed.delivery_assignment_id,
+      expected_version: heldSeed.version,
+      expires_at: new Date(now.getTime() + 120_000),
+      now: new Date(now.getTime() + 90_000),
+      partner_user_id: partnerTwoId,
+      reason_code: 'SYNTH_OFFER_CREATED',
+    });
+    let heldJob = await service.accept({
+      command_reference: 'SYNTH-CMD-ACCEPT-HELD-G001',
+      context: partnerTwo,
+      delivery_assignment_id: heldSeed.delivery_assignment_id,
+      expected_version: heldOffer.version,
+      now: new Date(now.getTime() + 91_000),
+      reason_code: 'PARTNER_ACCEPTED',
+    });
+    heldJob = await service.arriveAtVendor({
+      command_reference: 'SYNTH-CMD-ARRIVE-HELD-G001',
+      context: partnerTwo,
+      delivery_assignment_id: heldJob.delivery_assignment_id,
+      expected_version: heldJob.version,
+      now: new Date(now.getTime() + 92_000),
+      position: AT_THE_COUNTER,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    heldJob = await service.confirmPickup({
+      command_reference: 'SYNTH-CMD-PICKUP-HELD-G001',
+      context: partnerTwo,
+      delivery_assignment_id: heldJob.delivery_assignment_id,
+      expected_version: heldJob.version,
+      now: new Date(now.getTime() + 93_000),
+      package_count: 1,
+      proof_reference: 'SYNTH-PROOF-PICKUP-HELD-G001',
+      reason_code: 'PICKUP_VERIFIED',
+      vendor_confirmed: true,
+    });
+    heldJob = await service.beginRoute({
+      command_reference: 'SYNTH-CMD-ROUTE-HELD-G001',
+      context: partnerTwo,
+      delivery_assignment_id: heldJob.delivery_assignment_id,
+      expected_version: heldJob.version,
+      now: new Date(now.getTime() + 94_000),
+      reason_code: 'ROUTE_STARTED',
+    });
+    heldJob = await service.arriveAtCustomer({
+      command_reference: 'SYNTH-CMD-ARRIVE-CUSTOMER-HELD-G001',
+      context: partnerTwo,
+      delivery_assignment_id: heldJob.delivery_assignment_id,
+      expected_version: heldJob.version,
+      now: new Date(now.getTime() + 95_000),
+      reason_code: 'CUSTOMER_LOCATION_ARRIVAL',
+    });
+    // The code lapses at +995 s; the device captured the completion at
+    // +100 s and signal returned at +2000 s.
+    const heldOtp = '737373';
+    const heldExpiresAt = new Date(now.getTime() + 995_000);
+    const capturedAt = new Date(now.getTime() + 100_000);
+    const signalBack = new Date(now.getTime() + 2_000_000);
+    await pool.query(
+      `UPDATE marketplace.delivery_assignments
+          SET delivery_otp_hash = $2, delivery_otp_expires_at = $3, delivery_otp_attempts = 0
+        WHERE delivery_assignment_id = $1`,
+      [heldJob.delivery_assignment_id, handoverCodeDigest(HASH_KEY, heldOtp), heldExpiresAt],
+    );
+    const refusedAs = async (input: Parameters<typeof service.deliver>[0]) =>
+      service
+        .deliver(input)
+        .then(() => 'accepted')
+        .catch((error: unknown) =>
+          error instanceof DeliveryOtpExpiredError
+            ? 'expired'
+            : error instanceof AssignmentConflictError
+              ? 'conflict'
+              : `other:${String(error)}`,
+        );
+    const heldBase = {
+      context: partnerTwo,
+      delivery_assignment_id: heldJob.delivery_assignment_id,
+      expected_version: heldJob.version,
+      otp: heldOtp,
+      proof_reference: 'SYNTH-PROOF-DELIVERY-HELD-G001',
+      reason_code: 'DELIVERY_PROOF_VERIFIED',
+    } as const;
+    // Live, after expiry: refused, as before.
+    check(
+      (await refusedAs({
+        ...heldBase,
+        command_reference: 'SYNTH-CMD-DELIVER-LATE-LIVE-G001',
+        now: signalBack,
+      })) === 'expired',
+      'A lapsed code entered live was accepted',
+    );
+    // Held, but captured after the code had lapsed: refused.
+    check(
+      (await refusedAs({
+        ...heldBase,
+        command_reference: 'SYNTH-CMD-DELIVER-HELD-LATE-G001',
+        held_since: new Date(now.getTime() + 1_000_000),
+        now: signalBack,
+      })) === 'expired',
+      'A completion captured after the code lapsed was accepted',
+    );
+    // Held in time, but signal back after the grace: refused.
+    check(
+      (await refusedAs({
+        ...heldBase,
+        command_reference: 'SYNTH-CMD-DELIVER-HELD-STALE-G001',
+        held_since: capturedAt,
+        now: new Date(capturedAt.getTime() + 25 * 60 * 60_000),
+      })) === 'expired',
+      'A held completion beyond the grace window was accepted',
+    );
+    // The proof the device registered on reconnect; another attempt's cannot
+    // be consumed by this completion.
+    const registered = await fieldOps.saveOfflineProof({
+      context: partnerTwo,
+      delivery_assignment_id: heldJob.delivery_assignment_id,
+      proof_kind: 'DELIVERY',
+      encrypted_payload_digest: 'a'.repeat(64),
+      encryption_key_reference: 'SYNTH-PARTNER-KEY-HELD-G001',
+      captured_at: capturedAt,
+      reason_code: 'PARTNER_OFFLINE_CAPTURE',
+      now: signalBack,
+    });
+    const strayProof = await fieldOps.saveOfflineProof({
+      context: partnerOne,
+      delivery_assignment_id: first.delivery_assignment_id,
+      proof_kind: 'DELIVERY',
+      encrypted_payload_digest: 'b'.repeat(64),
+      encryption_key_reference: 'SYNTH-PARTNER-KEY-STRAY-G001',
+      captured_at: capturedAt,
+      reason_code: 'PARTNER_OFFLINE_CAPTURE',
+      now: signalBack,
+    });
+    check(
+      (await refusedAs({
+        ...heldBase,
+        command_reference: 'SYNTH-CMD-DELIVER-HELD-STRAY-G001',
+        held_since: capturedAt,
+        now: signalBack,
+        offline_proof_id: strayProof.partner_offline_proof_id,
+      })) === 'conflict',
+      'A held completion consumed another attempt’s proof',
+    );
+    const heldInput = {
+      ...heldBase,
+      command_reference: 'SYNTH-CMD-DELIVER-HELD-G001',
+      held_since: capturedAt,
+      now: signalBack,
+      offline_proof_id: registered.partner_offline_proof_id,
+    } as const;
+    const heldDelivered = await service.deliver(heldInput);
+    const heldReplayed = await service.deliver({
+      ...heldInput,
+      now: new Date(signalBack.getTime() + 5_000),
+    });
+    const heldTrail = await pool.query<{
+      reason_code: string;
+      sync_state: string;
+      consumed_by: string | null;
+      delivered_events: string;
+    }>(
+      `SELECT (SELECT reason_code FROM marketplace.assignment_events
+                WHERE delivery_assignment_id=$1 AND event_type='DELIVERED') AS reason_code,
+              proof.sync_state, proof.consumed_by_command_reference AS consumed_by,
+              (SELECT count(*) FROM marketplace.assignment_events
+                WHERE delivery_assignment_id=$1 AND event_type='DELIVERED')::text AS delivered_events
+         FROM marketplace.partner_offline_proofs proof
+        WHERE proof.partner_offline_proof_id=$2`,
+      [heldJob.delivery_assignment_id, registered.partner_offline_proof_id],
+    );
+    check(
+      heldDelivered.assignment_state === 'DELIVERED' &&
+        heldReplayed.version === heldDelivered.version &&
+        heldTrail.rows[0]?.reason_code === 'DELIVERY_PROOF_HELD_OFFLINE' &&
+        heldTrail.rows[0].sync_state === 'SYNCED' &&
+        heldTrail.rows[0].consumed_by === 'SYNTH-CMD-DELIVER-HELD-G001' &&
+        heldTrail.rows[0].delivered_events === '1',
+      `A held completion did not complete the delivery exactly once with its proof consumed (${JSON.stringify(heldTrail.rows[0])})`,
+    );
+    // Operations shorten the grace to an hour: the setting resolves at its instant.
+    const graceProposer = createUuidV7();
+    const graceApprover = createUuidV7();
+    for (const actorId of [graceProposer, graceApprover]) {
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [actorId]);
+    }
+    const graceDraft = await createConfigurationDraft(pool, {
+      actor_id: graceProposer,
+      configuration_key: 'assignment.offline_proof_grace_seconds',
+      configuration_kind: 'SETTING',
+      configuration_value: 3_600,
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: graceProposer,
+      configuration_version_id: graceDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: graceApprover,
+      configuration_version_id: graceDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: graceApprover,
+      configuration_version_id: graceDraft.configuration_version_id,
+      effective_from: new Date(signalBack.getTime() + 10_000),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: graceApprover,
+      at: new Date(signalBack.getTime() + 10_000),
+      configuration_version_id: graceDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    check(
+      (await service.offlineProofGraceSeconds(new Date(signalBack.getTime() + 20_000))) === 3_600 &&
+        (await service.offlineProofGraceSeconds(capturedAt)) === 86_400,
+      'The configured offline-proof grace was not applied',
+    );
+    // The stray proof is left expired, as the worker would leave it, so the
+    // partner's pending count is clear for the modules that follow.
+    await pool.query(
+      `UPDATE marketplace.partner_offline_proofs SET sync_state='EXPIRED', updated_at=$2
+        WHERE partner_offline_proof_id=$1`,
+      [strayProof.partner_offline_proof_id, new Date(signalBack.getTime() + 20_000)],
+    );
+
     const activeMemberships = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM marketplace.partner_assignment_memberships
         WHERE state='ACTIVE'`,
@@ -1247,6 +1499,7 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
   } finally {
     await service.close();
     await waits.close();
+    await fieldOps.close();
     await pool
       .query(
         `TRUNCATE marketplace.return_tasks, marketplace.custody_events,

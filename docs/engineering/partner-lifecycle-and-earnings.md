@@ -179,6 +179,24 @@ without touching that aggregate:
   (unique earning per attempt, settlement replayed by order reference). Verified with two
   deliveries of the same code forced to arrive together: one completes, one is refused, one
   event, one closure.
+- **A proof held offline completes the handover it was captured for (9.7, audit run 62).** The
+  delivery's proof is the customer's code (DLP-30); at a door without signal the whole completion
+  command — its command reference, the version it was built against, the code, when it was
+  captured — is sealed on the device (`held-proof.ts`: AES-GCM under a per-device key kept in
+  IndexedDB and never exported, with the assignment and the partner as authenticated data, so a
+  record cannot be opened for another job or account) and shown as *held, not delivered*. When
+  signal returns the app registers the proof by digest (`partner_offline_proofs`, never the code)
+  and replays the completion under its own command reference with `held_since` and the proof id.
+  `deliver` accepts a code that lapsed while the device was dark when it was current at capture
+  and signal returned within `assignment.offline_proof_grace_seconds` (a SETTING, 10 min–48 h,
+  default 24 h); the proof row is consumed in the same commit
+  (`consumed_by_command_reference`, 0104), the history says `DELIVERY_PROOF_HELD_OFFLINE`, and a
+  retry — by hand or by the app — finds the command replayed and the proof spent. A refusal stays
+  on the device record and is one tap from support as a `PROOF_SYNC_FAILED` report with the
+  refusal as its reason; the worker expires unsynced proofs on the same grace. New work stays
+  blocked while the delivery is open (the active membership) and while a registered proof is
+  pending. Until run 62 the app "held" a digest of nothing, sent it to a server it could not reach,
+  and syncing it completed no delivery.
 - **Support and the emergency control travel with the job (9.4).** The field-ops panel with its
   reports and the always-visible Emergency control sit on the active job; an open safety report
   holds the job's next step.

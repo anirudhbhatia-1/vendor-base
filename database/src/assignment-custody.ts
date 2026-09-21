@@ -306,6 +306,14 @@ const HANDLING = /^[A-Z][A-Z0-9_]{2,31}$/;
  */
 const DELIVERY_OTP_LIFETIME_SECONDS = 900;
 const DELIVERY_OTP_MAX_ATTEMPTS = 5;
+/**
+ * How long a completion captured without signal stays good (9.7): the code
+ * was current when the customer read it, the device held it, and signal came
+ * back within this window. A SETTING (`assignment.offline_proof_grace_seconds`,
+ * 10 minutes to 48 hours); the worker expires unsynced proofs on the same clock.
+ */
+export const OFFLINE_PROOF_GRACE_SETTING = 'assignment.offline_proof_grace_seconds';
+export const DEFAULT_OFFLINE_PROOF_GRACE_SECONDS = 24 * 60 * 60;
 
 function assignmentRecord(row: AssignmentRow): DeliveryAssignmentRecord {
   return Object.freeze({
@@ -1358,6 +1366,22 @@ export class AssignmentCustodyService {
     });
   }
 
+  /** How long a completion held offline stays good, in force at `at` (9.7). */
+  async offlineProofGraceSeconds(at?: Date): Promise<number> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: OFFLINE_PROOF_GRACE_SETTING,
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value;
+    return typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value >= 600 &&
+      value <= 48 * 60 * 60
+      ? value
+      : DEFAULT_OFFLINE_PROOF_GRACE_SECONDS;
+  }
+
   /** The arrival geofence in force at `at` (9.4). */
   async arrivalRadiusMetres(at?: Date): Promise<number> {
     const resolved = await resolveConfiguration(this.#pool, {
@@ -1957,14 +1981,40 @@ export class AssignmentCustodyService {
    * default proof; DLP-31 gates every alternative behind approvals that have
    * not been granted, so there is deliberately no bypass here.
    */
+  /**
+   * Completion against the customer's code (DLP-30) -- entered live, or held
+   * on the device without signal and replayed when it returned (9.7).
+   *
+   * A held completion carries `held_since`, when the code was captured, and
+   * the id of the offline proof the device registered on reconnect. The code
+   * must still match and the attempts still count; what changes is expiry:
+   * a code that lapsed while the device was dark is accepted when it was
+   * current at capture and signal returned within the grace window. The
+   * proof row is consumed by the completion in the same commit, so a retry
+   * -- automatic or by hand -- finds the command replayed and the proof
+   * spent, never a second handover.
+   */
   async deliver(
-    input: TransitionInput & { readonly proof_reference: string; readonly otp: string },
+    input: TransitionInput & {
+      readonly proof_reference: string;
+      readonly otp: string;
+      readonly held_since?: Date;
+      readonly offline_proof_id?: UuidV7;
+    },
   ): Promise<DeliveryAssignmentRecord> {
     const who = actor(input.context, ['delivery_partner']);
     const now = input.now ?? new Date();
     if (!/^[0-9]{6}$/.test(input.otp)) {
       throw new AssignmentInputError('The delivery code must be exactly six digits');
     }
+    if (input.held_since !== undefined && Number.isNaN(input.held_since.getTime())) {
+      throw new AssignmentInputError('held_since must be an instant');
+    }
+    if (input.held_since !== undefined && input.held_since.getTime() > now.getTime()) {
+      throw new AssignmentInputError('A proof cannot have been captured in the future');
+    }
+    const grace = input.held_since === undefined ? 0 : await this.offlineProofGraceSeconds(now);
+    const heldOffline = input.held_since !== undefined;
 
     // Validation commits on its own so a wrong attempt is durably counted even
     // though the caller-facing error unwinds their transaction. Without this
@@ -1991,7 +2041,16 @@ export class AssignmentCustodyService {
         );
       }
       if (assignment.delivery_otp_expires_at <= now) {
-        throw new DeliveryOtpExpiredError('That code has expired; ask the customer to refresh it');
+        // Held offline: current at capture, and signal back within the grace.
+        const heldInTime =
+          input.held_since !== undefined &&
+          input.held_since.getTime() < assignment.delivery_otp_expires_at.getTime() &&
+          now.getTime() - input.held_since.getTime() <= grace * 1_000;
+        if (!heldInTime) {
+          throw new DeliveryOtpExpiredError(
+            'That code has expired; ask the customer to refresh it',
+          );
+        }
       }
       const attempted = this.#codeDigest(input.otp);
       if (!handoverDigestsMatch(assignment.delivery_otp_hash, attempted)) {
@@ -2036,6 +2095,29 @@ export class AssignmentCustodyService {
         throw new AssignmentConflictError('Delivery requires arrival with active custody');
       }
       const proofRef = proof(input.proof_reference);
+      // The held proof is this partner's, for this attempt, and still pending:
+      // consumed here, in the same commit as the handover it stood for.
+      if (input.offline_proof_id !== undefined) {
+        const held = await client.query<{ sync_state: string }>(
+          `UPDATE marketplace.partner_offline_proofs
+              SET sync_state='SYNCED', synced_at=$4, consumed_by_command_reference=$5, updated_at=$4
+            WHERE partner_offline_proof_id=$1 AND delivery_assignment_id=$2 AND partner_user_id=$3
+              AND proof_kind='DELIVERY' AND sync_state='PENDING'
+            RETURNING sync_state`,
+          [
+            input.offline_proof_id,
+            assignment.delivery_assignment_id,
+            who.id,
+            now,
+            command(input.command_reference),
+          ],
+        );
+        if (held.rows.length === 0) {
+          throw new AssignmentConflictError(
+            'That held proof is not this attempt’s, or is no longer pending',
+          );
+        }
+      }
       // The code is spent on success, so it cannot be replayed against a later
       // assignment or a re-opened handoff.
       // The customer read their code to the partner: that is the door. An
@@ -2075,7 +2157,9 @@ export class AssignmentCustodyService {
         now,
         package_count: assignment.package_count,
         proof_reference: proofRef,
-        reason_code: input.reason_code,
+        // The history says a completion was held offline; the server decides
+        // that, not the client's reason.
+        reason_code: heldOffline ? 'DELIVERY_PROOF_HELD_OFFLINE' : input.reason_code,
         who,
       });
     });

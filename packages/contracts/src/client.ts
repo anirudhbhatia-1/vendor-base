@@ -1045,7 +1045,13 @@ export function createApiClient(options: ApiClientOptions) {
          */
         deliver: (
           assignmentId: string,
-          body: AssignmentTransition & { otp: string; proof_reference: string },
+          body: AssignmentTransition & {
+            otp: string;
+            proof_reference: string;
+            /** Set on a completion held offline (9.7): when it was captured, and the proof it consumes. */
+            held_since?: string;
+            offline_proof_id?: string;
+          },
         ) =>
           r<DeliveryAssignment>(`/partner/assignments/${assignmentId}/deliver`, {
             method: 'POST',

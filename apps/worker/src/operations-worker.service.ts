@@ -42,7 +42,6 @@ import { workerLogger } from './json-logger.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 
 const POLL_MS = 15_000;
-const OFFLINE_PROOF_TTL_MS = 24 * 60 * 60 * 1_000;
 const QUEUE_NAME = 'operations';
 
 type OperationsJob =
@@ -378,13 +377,18 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#onboarding.advanceDocumentDeadlines({ at: now, context }),
         0,
       );
+      // A held proof outlives its grace (9.7) -- the same window under which a
+      // late completion is still accepted -- and then expires, so the device
+      // can drop what it holds and the partner is sent to support.
       const offlineProofs = await pass(
         'partnerField.expireOfflineProofs',
-        () =>
+        async () =>
           this.#partnerField.expireOfflineProofs({
             context,
             now,
-            older_than: new Date(now.getTime() - OFFLINE_PROOF_TTL_MS),
+            older_than: new Date(
+              now.getTime() - (await this.#assignments.offlineProofGraceSeconds(now)) * 1_000,
+            ),
           }),
         [],
       );

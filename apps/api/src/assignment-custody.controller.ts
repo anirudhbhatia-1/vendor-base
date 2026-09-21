@@ -339,10 +339,18 @@ export class PartnerAssignmentController {
   async deliver(@Param('delivery_assignment_id') id: string, @Body() raw: unknown) {
     const value = object(raw);
     try {
+      // A completion held offline says when it was captured and which held
+      // proof it consumes (9.7); the server decides whether it is in time.
       return await this.assignments.deliver({
         ...transition(value, id),
         otp: stringField(value, 'otp'),
         proof_reference: stringField(value, 'proof_reference'),
+        ...(typeof value['held_since'] === 'string'
+          ? { held_since: dateField(value, 'held_since') }
+          : {}),
+        ...(typeof value['offline_proof_id'] === 'string'
+          ? { offline_proof_id: uuid(stringField(value, 'offline_proof_id')) }
+          : {}),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();

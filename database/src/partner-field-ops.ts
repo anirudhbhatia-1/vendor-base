@@ -35,7 +35,9 @@ export type ExceptionKind =
   | 'MEDICAL_EMERGENCY'
   | 'THREAT'
   | 'VEHICLE_FAILURE'
-  | 'PROHIBITED_GOODS';
+  | 'PROHIBITED_GOODS'
+  /** A completion held offline that the server refused on replay (9.7, DLP-34). */
+  | 'PROOF_SYNC_FAILED';
 
 /**
  * Each guided exception ends in a named resolution rather than a free-text
@@ -99,6 +101,7 @@ const exceptionKinds: ReadonlySet<ExceptionKind> = new Set([
   'THREAT',
   'VEHICLE_FAILURE',
   'PROHIBITED_GOODS',
+  'PROOF_SYNC_FAILED',
 ]);
 /**
  * Resolutions a partner may record themselves.
