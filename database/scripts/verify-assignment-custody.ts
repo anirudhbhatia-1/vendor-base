@@ -1,6 +1,7 @@
 import {
   createAuthenticatedActor,
   createRequestContext,
+  createRequestId,
   createUuidV7,
   type ActorKind,
   type UuidV7,
@@ -15,7 +16,20 @@ import {
   AssignmentVersionError,
 } from '../src/assignment-custody.js';
 import { handoverCodeDigest } from '../src/handover-code.js';
+import {
+  activateConfigurationVersion,
+  approveConfigurationVersion,
+  createConfigurationDraft,
+  scheduleConfigurationVersion,
+  validateConfigurationVersion,
+} from '../src/versioned-configuration.js';
 import { check } from './verify-support.js';
+
+/** The store sits at (75.81, 26.91); these fixes are measured from it. */
+const AT_THE_COUNTER = { latitude: 26.9103, longitude: 75.81, accuracy_meters: 15 };
+const ACROSS_TOWN = { latitude: 26.93, longitude: 75.81, accuracy_meters: 10 };
+const BAD_FIX = { latitude: 26.9101, longitude: 75.81, accuracy_meters: 400 };
+const DOWN_THE_ROAD = { latitude: 26.9127, longitude: 75.81, accuracy_meters: 10 };
 
 function context(kind: ActorKind, actorId: UuidV7) {
   return createRequestContext({
@@ -39,13 +53,17 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
   const partnerTwoId = createUuidV7();
   const vendorId = createUuidV7();
   const locationId = createUuidV7();
+  const counterStaffId = createUuidV7();
+  const otherStoreStaffId = createUuidV7();
+  const counterStaff = context('vendor_staff', counterStaffId);
+  const otherStoreStaff = context('vendor_staff', otherStoreStaffId);
   const now = new Date('2026-08-24T10:00:00.000Z');
   const admin = context('admin', adminId);
   const partnerOne = context('delivery_partner', partnerOneId);
   const partnerTwo = context('delivery_partner', partnerTwoId);
   const system = context('system', createUuidV7());
   try {
-    for (const userId of [adminId, partnerOneId, partnerTwoId]) {
+    for (const userId of [adminId, partnerOneId, partnerTwoId, counterStaffId, otherStoreStaffId]) {
       await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [userId]);
     }
     for (const [partnerId, suffix] of [
@@ -91,6 +109,42 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
          'FRUIT_VEGETABLE','ACTIVE',$3,$3)`,
       [locationId, vendorId, createUuidV7()],
     );
+
+    // 9.4 -- the store's landmark: the written way to find it.
+    await pool.query(
+      `UPDATE marketplace.vendor_locations SET landmark=$2 WHERE vendor_location_id=$1`,
+      [locationId, 'SYNTH opposite the SBI ATM'],
+    );
+    // Vendor staff: one at this store, one at another store of the same vendor.
+    const otherLocationId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.vendor_locations
+        (vendor_location_id,vendor_id,location_name,profile_description,operating_timezone,
+         coordinates,category,lifecycle_state,request_id,correlation_id)
+       VALUES ($1,$2,'SYNTH Assignment Second Store','Synthetic second location','Asia/Kolkata',
+         ST_SetSRID(ST_MakePoint(75.83,26.93),4326)::geography,
+         'FRUIT_VEGETABLE','ACTIVE',$3,$3)`,
+      [otherLocationId, vendorId, createUuidV7()],
+    );
+    for (const [staffId, storeId] of [
+      [counterStaffId, locationId],
+      [otherStoreStaffId, otherLocationId],
+    ] as const) {
+      const roleId = createUuidV7();
+      await pool.query(
+        `INSERT INTO marketplace.role_assignments
+          (role_assignment_id,user_id,role_key,state,valid_from,valid_until,
+           granted_by_user_id,request_id,correlation_id,created_at,updated_at)
+         VALUES ($1,$2,'VENDOR_PICKER','ACTIVE',$3,NULL,$4,$5,$5,$3,$3)`,
+        [roleId, staffId, now, adminId, createUuidV7()],
+      );
+      await pool.query(
+        `INSERT INTO marketplace.staff_memberships
+          (staff_membership_id,role_assignment_id,user_id,vendor_location_id)
+         VALUES ($1,$2,$3,$4)`,
+        [createUuidV7(), roleId, staffId, storeId],
+      );
+    }
 
     const first = await service.create({
       approximate_drop_area: 'SYNTH Vaishali Nagar Jaipur',
@@ -143,14 +197,45 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
     }
     check(wrongPartnerHidden, 'Assignment leaked to another partner');
 
+    // 9.4 -- once the job is theirs, the partner has the store itself: its
+    // name, its landmark and its point. The offer had only the area.
+    const headingThere = (
+      await service.listActiveForPartner({ partner_user_id: partnerOneId })
+    ).find((job) => job.delivery_assignment_id === first.delivery_assignment_id);
+    check(
+      headingThere?.pickup_location?.name === 'SYNTH Assignment Store' &&
+        headingThere.pickup_location.landmark === 'SYNTH opposite the SBI ATM' &&
+        Math.abs(headingThere.pickup_location.latitude - 26.91) < 1e-6 &&
+        Math.abs(headingThere.pickup_location.longitude - 75.81) < 1e-6,
+      `The assigned partner was not given the store's location and landmark (${JSON.stringify(headingThere?.pickup_location)})`,
+    );
+
+    // 9.4 -- arrival is trusted by position: a fix at the counter records the
+    // arrival as TRUSTED_LOCATION with its distance.
     const atVendor = await service.arriveAtVendor({
       command_reference: 'SYNTH-CMD-ARRIVE-VENDOR-A001',
       context: partnerOne,
       delivery_assignment_id: first.delivery_assignment_id,
       expected_version: accepted.version,
       now: new Date(now.getTime() + 10_000),
-      reason_code: 'TRUSTED_VENDOR_ARRIVAL',
+      position: AT_THE_COUNTER,
+      reason_code: 'PARTNER_CONFIRMED',
     });
+    const trustedEvent = await pool.query<{ reason_code: string }>(
+      `SELECT reason_code FROM marketplace.assignment_events
+        WHERE delivery_assignment_id=$1 AND event_type='AT_VENDOR'`,
+      [first.delivery_assignment_id],
+    );
+    check(
+      atVendor.assignment_state === 'AT_VENDOR' &&
+        atVendor.arrival_kind === 'TRUSTED_LOCATION' &&
+        atVendor.arrival_distance_metres !== null &&
+        atVendor.arrival_distance_metres > 20 &&
+        atVendor.arrival_distance_metres < 45 &&
+        atVendor.arrival_claim === null &&
+        trustedEvent.rows[0]?.reason_code === 'TRUSTED_VENDOR_ARRIVAL',
+      `A fix at the counter was not recorded as a trusted arrival (${JSON.stringify({ atVendor, event: trustedEvent.rows[0] })})`,
+    );
     let packageMismatchRejected = false;
     try {
       await service.confirmPickup({
@@ -180,6 +265,13 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       vendor_confirmed: true,
     });
     check(pickedUp.custody_state === 'IN_CUSTODY', 'Pickup did not start custody');
+    const carrying = (await service.listActiveForPartner({ partner_user_id: partnerOneId })).find(
+      (job) => job.delivery_assignment_id === first.delivery_assignment_id,
+    );
+    check(
+      carrying !== undefined && carrying.pickup_location === undefined,
+      'The store stayed on the record after the goods left it',
+    );
 
     let postPickupCancellationRejected = false;
     try {
@@ -307,14 +399,102 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       now: new Date(now.getTime() + 21_000),
       reason_code: 'PARTNER_ACCEPTED',
     });
+    // 9.4 -- no fix: the arrival is a claim, the attempt stays ASSIGNED, and
+    // nothing that needs the partner at the counter can happen until the
+    // counter says they are.
     state = await service.arriveAtVendor({
       command_reference: 'SYNTH-CMD-ARRIVE-RETURN-B001',
       context: partnerTwo,
       delivery_assignment_id: state.delivery_assignment_id,
       expected_version: state.version,
       now: new Date(now.getTime() + 22_000),
-      reason_code: 'TRUSTED_VENDOR_ARRIVAL',
+      reason_code: 'PARTNER_CONFIRMED',
     });
+    const claimEvent = await pool.query<{ event_type: string; reason_code: string }>(
+      `SELECT event_type, reason_code FROM marketplace.assignment_events
+        WHERE delivery_assignment_id=$1 ORDER BY assignment_version DESC LIMIT 1`,
+      [state.delivery_assignment_id],
+    );
+    check(
+      state.assignment_state === 'ASSIGNED' &&
+        state.arrival_kind === null &&
+        state.arrival_claim?.reason === 'NO_LOCATION' &&
+        claimEvent.rows[0]?.event_type === 'ARRIVAL_CLAIMED' &&
+        claimEvent.rows[0].reason_code === 'NO_LOCATION',
+      `An arrival with no fix was not recorded as a claim (${JSON.stringify({ state, event: claimEvent.rows[0] })})`,
+    );
+    let pickupBeforeConfirmationRefused = false;
+    try {
+      await service.confirmPickup({
+        command_reference: 'SYNTH-CMD-PICKUP-EARLY-B001',
+        context: partnerTwo,
+        delivery_assignment_id: state.delivery_assignment_id,
+        expected_version: state.version,
+        now: new Date(now.getTime() + 22_100),
+        package_count: 1,
+        proof_reference: 'SYNTH-PROOF-PICKUP-EARLY-B001',
+        reason_code: 'PICKUP_VERIFIED',
+        vendor_confirmed: true,
+      });
+    } catch (error) {
+      pickupBeforeConfirmationRefused = error instanceof AssignmentConflictError;
+    }
+    check(pickupBeforeConfirmationRefused, 'A claimed, unconfirmed arrival allowed a pickup');
+    let partnerCannotConfirmOwnArrival = false;
+    try {
+      await service.confirmPartnerArrival({
+        command_reference: 'SYNTH-CMD-CONFIRM-SELF-B001',
+        context: partnerTwo,
+        delivery_assignment_id: state.delivery_assignment_id,
+        expected_version: state.version,
+        now: new Date(now.getTime() + 22_200),
+        vendor_location_id: locationId,
+      });
+    } catch (error) {
+      partnerCannotConfirmOwnArrival = error instanceof AssignmentAuthorizationError;
+    }
+    check(partnerCannotConfirmOwnArrival, 'A partner confirmed their own arrival');
+    let otherStoreCannotConfirm = false;
+    try {
+      await service.confirmPartnerArrival({
+        command_reference: 'SYNTH-CMD-CONFIRM-OTHER-B001',
+        context: otherStoreStaff,
+        delivery_assignment_id: state.delivery_assignment_id,
+        expected_version: state.version,
+        now: new Date(now.getTime() + 22_300),
+        vendor_location_id: locationId,
+      });
+    } catch (error) {
+      otherStoreCannotConfirm = error instanceof AssignmentAuthorizationError;
+    }
+    check(otherStoreCannotConfirm, 'Staff of another store confirmed an arrival at this one');
+    const confirmInput = {
+      command_reference: 'SYNTH-CMD-CONFIRM-ARRIVAL-B001',
+      context: counterStaff,
+      delivery_assignment_id: state.delivery_assignment_id,
+      expected_version: state.version,
+      now: new Date(now.getTime() + 22_400),
+      vendor_location_id: locationId,
+    };
+    state = await service.confirmPartnerArrival(confirmInput);
+    const confirmedAgain = await service.confirmPartnerArrival({
+      ...confirmInput,
+      now: new Date(now.getTime() + 22_500),
+    });
+    const confirmEvent = await pool.query<{ actor_kind: string; reason_code: string }>(
+      `SELECT actor_kind, reason_code FROM marketplace.assignment_events
+        WHERE delivery_assignment_id=$1 AND event_type='AT_VENDOR'`,
+      [state.delivery_assignment_id],
+    );
+    check(
+      state.assignment_state === 'AT_VENDOR' &&
+        state.arrival_kind === 'VENDOR_CONFIRMED' &&
+        state.arrival_claim === null &&
+        confirmedAgain.version === state.version &&
+        confirmEvent.rows[0]?.actor_kind === 'vendor_staff' &&
+        confirmEvent.rows[0].reason_code === 'VENDOR_CONFIRMED_ARRIVAL',
+      `The counter's confirmation did not record the arrival exactly once (${JSON.stringify({ state, event: confirmEvent.rows[0] })})`,
+    );
     state = await service.confirmPickup({
       command_reference: 'SYNTH-CMD-PICKUP-RETURN-B001',
       context: partnerTwo,
@@ -650,6 +830,148 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
     }
     check(poolReassignRefused, 'An attempt with no partner was "reassigned"');
 
+    // 9.4 -- what the position has to be. A fix worse than the accuracy bar
+    // or outside the radius is a claim with its reason; the radius is a
+    // setting, and a fix that was out of range under the default is trusted
+    // once operations widen it.
+    const geofenced = await service.create({
+      approximate_drop_area: 'SYNTH Bapu Nagar Jaipur',
+      approximate_pickup_area: 'SYNTH Jain Stores Jaipur',
+      command_reference: 'SYNTH-CMD-CREATE-FENCE-E001',
+      context: admin,
+      handling_flags: [],
+      now: new Date(now.getTime() + 60_000),
+      package_count: 1,
+      reason_code: 'SYNTH_ASSIGNMENT_CREATED',
+      source_order_reference: 'SYNTH-ORDER-FENCE-E001',
+      vendor_location_id: locationId,
+    });
+    const fenceOffer = await service.offer({
+      command_reference: 'SYNTH-CMD-OFFER-FENCE-E001',
+      context: admin,
+      delivery_assignment_id: geofenced.delivery_assignment_id,
+      expected_version: geofenced.version,
+      expires_at: new Date(now.getTime() + 90_000),
+      now: new Date(now.getTime() + 60_000),
+      partner_user_id: partnerTwoId,
+      reason_code: 'SYNTH_OFFER_CREATED',
+    });
+    let fence = await service.accept({
+      command_reference: 'SYNTH-CMD-ACCEPT-FENCE-E001',
+      context: partnerTwo,
+      delivery_assignment_id: geofenced.delivery_assignment_id,
+      expected_version: fenceOffer.version,
+      now: new Date(now.getTime() + 61_000),
+      reason_code: 'PARTNER_ACCEPTED',
+    });
+    fence = await service.arriveAtVendor({
+      command_reference: 'SYNTH-CMD-ARRIVE-BAD-FIX-E001',
+      context: partnerTwo,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: fence.version,
+      now: new Date(now.getTime() + 62_000),
+      position: BAD_FIX,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    check(
+      fence.assignment_state === 'ASSIGNED' && fence.arrival_claim?.reason === 'POOR_ACCURACY',
+      `A 400 m fix at the store was taken as presence (${JSON.stringify(fence)})`,
+    );
+    fence = await service.arriveAtVendor({
+      command_reference: 'SYNTH-CMD-ARRIVE-FAR-E001',
+      context: partnerTwo,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: fence.version,
+      now: new Date(now.getTime() + 63_000),
+      position: ACROSS_TOWN,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    check(
+      fence.assignment_state === 'ASSIGNED' &&
+        fence.arrival_claim?.reason === 'OUT_OF_RANGE' &&
+        fence.arrival_distance_metres !== null &&
+        fence.arrival_distance_metres > 2_000,
+      `A fix across town was taken as presence (${JSON.stringify(fence)})`,
+    );
+    fence = await service.arriveAtVendor({
+      command_reference: 'SYNTH-CMD-ARRIVE-ROAD-E001',
+      context: partnerTwo,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: fence.version,
+      now: new Date(now.getTime() + 64_000),
+      position: DOWN_THE_ROAD,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    check(
+      fence.assignment_state === 'ASSIGNED' &&
+        fence.arrival_claim?.reason === 'OUT_OF_RANGE' &&
+        fence.arrival_distance_metres !== null &&
+        fence.arrival_distance_metres > 250 &&
+        fence.arrival_distance_metres < 350,
+      `A fix 300 m away was trusted under the default radius (${JSON.stringify(fence)})`,
+    );
+    const fenceProposer = createUuidV7();
+    const fenceApprover = createUuidV7();
+    for (const actorId of [fenceProposer, fenceApprover]) {
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [actorId]);
+    }
+    const fenceDraft = await createConfigurationDraft(pool, {
+      actor_id: fenceProposer,
+      configuration_key: 'assignment.arrival_radius_metres',
+      configuration_kind: 'SETTING',
+      configuration_value: 400,
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: fenceProposer,
+      configuration_version_id: fenceDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: fenceApprover,
+      configuration_version_id: fenceDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: fenceApprover,
+      configuration_version_id: fenceDraft.configuration_version_id,
+      effective_from: new Date(now.getTime() + 64_500),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: fenceApprover,
+      at: new Date(now.getTime() + 64_500),
+      configuration_version_id: fenceDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    fence = await service.arriveAtVendor({
+      command_reference: 'SYNTH-CMD-ARRIVE-ROAD-WIDER-E001',
+      context: partnerTwo,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: fence.version,
+      now: new Date(now.getTime() + 65_000),
+      position: DOWN_THE_ROAD,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    check(
+      fence.assignment_state === 'AT_VENDOR' &&
+        fence.arrival_kind === 'TRUSTED_LOCATION' &&
+        fence.arrival_claim === null,
+      `The configured arrival radius was not applied (${JSON.stringify(fence)})`,
+    );
+    // Leave nothing active: the operator takes the attempt back.
+    await service.reassign({
+      command_reference: 'SYNTH-CMD-REASSIGN-FENCE-E001',
+      compensation_minor: 0,
+      context: admin,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: fence.version,
+      now: new Date(now.getTime() + 66_000),
+      reason_code: 'OPERATOR_REASSIGNED',
+    });
+
     const activeMemberships = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM marketplace.partner_assignment_memberships
         WHERE state='ACTIVE'`,
@@ -676,6 +998,16 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       ])
       .catch(() => undefined);
     await pool
+      .query('DELETE FROM marketplace.staff_memberships WHERE user_id=ANY($1)', [
+        [counterStaffId, otherStoreStaffId],
+      ])
+      .catch(() => undefined);
+    await pool
+      .query('DELETE FROM marketplace.role_assignments WHERE user_id=ANY($1)', [
+        [counterStaffId, otherStoreStaffId],
+      ])
+      .catch(() => undefined);
+    await pool
       .query('DELETE FROM marketplace.partner_eligibilities WHERE user_id=ANY($1)', [
         [partnerOneId, partnerTwoId],
       ])
@@ -693,7 +1025,7 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       .catch(() => undefined);
     await pool
       .query('DELETE FROM marketplace.users WHERE user_id=ANY($1)', [
-        [adminId, partnerOneId, partnerTwoId],
+        [adminId, partnerOneId, partnerTwoId, counterStaffId, otherStoreStaffId],
       ])
       .catch(() => undefined);
     await pool.end();

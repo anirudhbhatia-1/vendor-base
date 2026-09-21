@@ -42,9 +42,14 @@ type Order = {
   route_source?: 'ESTIMATE' | 'MAPBOX' | null;
   delivery_otp_attempts: number;
   collection: {
+    readonly delivery_assignment_id?: string;
+    readonly assignment_version?: number;
     readonly assignment_state: string;
     readonly partner_waiting_since: string | null;
     readonly wait_state: string | null;
+    /** The rider says they are here but their phone could not place them (9.4). */
+    readonly arrival_claim?: { readonly claimed_at: string; readonly reason: string } | null;
+    readonly arrival_kind?: string | null;
   } | null;
   resolution: {
     readonly reason_code: string;
@@ -404,6 +409,38 @@ function OrderCard({
             </span>
           ) : null}
         </p>
+      ) : null}
+      {/* 9.4: an arrival the rider's phone could not vouch for is the
+          counter's to confirm. Until it does, the rider is still "on the way"
+          to the platform and cannot be handed the order. */}
+      {order.collection?.arrival_claim && order.collection.delivery_assignment_id ? (
+        <Notice live="polite" tone="warning">
+          The rider says they are at the counter
+          {order.collection.arrival_claim.reason === 'NO_LOCATION'
+            ? ' but their phone shared no location'
+            : order.collection.arrival_claim.reason === 'POOR_ACCURACY'
+              ? ' but their phone could not place them precisely'
+              : ' but their phone places them away from the store'}
+          . If they are here, confirm it so the handover can go ahead.
+          <Button
+            busy={busy}
+            onClick={() =>
+              void act(
+                'confirm-partner-arrival',
+                {
+                  command_reference: `SYNTH-CMD-CONFIRM-ARRIVAL-${Date.now().toString(36).toUpperCase()}`,
+                  delivery_assignment_id: order.collection?.delivery_assignment_id,
+                  expected_version: order.collection?.assignment_version ?? 1,
+                },
+                'rider at the counter',
+              )
+            }
+            size="medium"
+            variant="secondary"
+          >
+            The rider is here
+          </Button>
+        </Notice>
       ) : null}
       {order.collection?.wait_state && WAIT_WARNING[order.collection.wait_state] ? (
         <Notice

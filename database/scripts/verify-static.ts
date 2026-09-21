@@ -173,6 +173,7 @@ assert(
       '0098_receipt_and_support_line',
       '0099_partner_documents',
       '0100_attempt_reassignment',
+      '0101_trusted_arrival',
     ]),
   'Unexpected reviewed migrations',
 );

@@ -111,6 +111,31 @@ without touching that aggregate:
   that partner again. The partner reads their own record at `GET partner/compensations`
   (`partner.earnings.read`) and sees it beside their earnings. Until run 58 "REASSIGNED" ended
   the attempt and stranded the order with nothing owed to anybody.
+- **The job survives a lost connection (9.4, audit run 59).** The partner's app keeps the last
+  server-confirmed assignments on the device with the time they were confirmed
+  (`active-job-cache.ts`); when nothing fresher can be had it shows the job as last confirmed,
+  says so, and holds the next step for a connection. Every command still carries the version it
+  was built against, so a stale picture is refused, never applied twice. The "Resume" dock returns
+  to the active job from anywhere. Sign-out forgets the cache.
+- **The store, in words and on the map (9.4).** Between acceptance and pickup the assigned
+  partner's record carries `pickup_location` — the store's name, landmark, description and point —
+  and nothing of it before (an offer names the area) or after (custody is the customer's leg). The
+  app shows the landmark and a written direction from the phone's last fix ("About 300 m to the
+  east") beside a map handoff to the store's coordinates; the map is never the only account of the
+  route (DLP-46).
+- **Arrival is trusted or confirmed (9.4).** `arriveAtVendor` takes the device's fix. Within
+  `assignment.arrival_radius_metres` (a SETTING, 25–1000, default `DEFAULT_ARRIVAL_RADIUS_METRES`
+  = 150) with accuracy no worse than `MAX_TRUSTED_ACCURACY_METRES` (100) it is a
+  `TRUSTED_LOCATION` arrival: `AT_VENDOR`, the distance recorded, the event's reason
+  `TRUSTED_VENDOR_ARRIVAL`. Otherwise it is a *claim* (`ARRIVAL_CLAIMED`, reason `NO_LOCATION`,
+  `POOR_ACCURACY` or `OUT_OF_RANGE`): the attempt stays `ASSIGNED`, the partner is told the store
+  has to confirm, and the store's own staff complete it with `confirmPartnerArrival`
+  (`VENDOR_CONFIRMED`). Nothing that needs the partner at the counter — the handover, the wait
+  timer — happens on a claim. Until run 59 the partner's word from anywhere moved the attempt to
+  `AT_VENDOR`. The Android shell has no device fix yet, so its arrivals are claims.
+- **Support and the emergency control travel with the job (9.4).** The field-ops panel with its
+  reports and the always-visible Emergency control sit on the active job; an open safety report
+  holds the job's next step.
 - `net_minor` is `base + distance + time + wait + return + incentive + tip +
   adjustment`, checked at the row level. A schema-enforced identity, not an
   application invariant.

@@ -1992,6 +1992,41 @@ Five requirements. Three held in substance (one offered attempt with expiry; ato
 
 **Step 9.3: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 59 (21 September 2026) — step 9.4, active-job navigation and arrival
+
+Five requirements. Two held (the resume control; support and emergency controls on the job) and three did not: nothing was cached, so a reload or an unreachable API left the partner with "Dispatch could not be loaded" and no job; heading to the store the partner had the store's *area* and a map link to `geo:0,0`, no address, no landmark, no coordinates; and "trusted arrival" was the partner's word — `arrive-vendor` from anywhere moved the attempt to `AT_VENDOR`, which is what starts the wait timer and its pay. One migration (0101); twelve connected assertions in the custody module, one in fulfilment, four unit tests; six mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Cache the active assignment and last server-confirmed state | **Not met:** React state only; a failed load showed nothing — P59-01. |
+| 2 | Resume-active-job control | Met: the "Resume" dock returns to `/active` from anywhere (DLP-20). With nothing loaded it had nothing to resume — closed by P59-01. |
+| 3 | Vendor address plus map and text/landmark fallback | **Not met:** no address or landmark existed on a store; the map handoff had no point — P59-02. |
+| 4 | Record trusted arrival or approved fallback | **Not met:** the partner's word, from anywhere — P59-03. |
+| 5 | Keep support and emergency controls available | Met: the field-ops panel and the Emergency control sit on the job; an open safety report holds it (DLP-43). |
+
+**P59-01 — the last confirmed picture.** `active-job-cache.ts` keeps the assignments the server last confirmed with the time; the workspace writes it on every successful refresh, reads it when the first load fails, shows the job with "Showing the job as the server last confirmed it, N minutes ago. Reconnect to take the next step." and a retry, and forgets it on sign-out. Commands still carry their version, so acting on a stale picture is refused, not doubled.
+
+**P59-02 — the store, in words.** 0101 gives `vendor_locations` a `landmark` (2–120 characters; the vendor's settings form has the field). Between acceptance and pickup the partner's record carries `pickup_location` — name, landmark, description, point — gated in the query by state like the customer's address is; an offer has the area only, and custody has the customer's leg only. The job card shows "Collect from", the landmark, a written direction from the phone's last fix ("About 300 m to the east"), and the map handoff opens on the store's coordinates.
+
+**P59-03 — trusted or confirmed.** `arriveAtVendor` takes the device's fix and measures it against the store in PostGIS. Within `assignment.arrival_radius_metres` (SETTING, 25–1000, default 150) with accuracy ≤ 100 m: `AT_VENDOR`, `arrival_kind = TRUSTED_LOCATION`, the distance recorded, reason `TRUSTED_VENDOR_ARRIVAL`. Otherwise an `ARRIVAL_CLAIMED` event with its reason (`NO_LOCATION` / `POOR_ACCURACY` / `OUT_OF_RANGE`), the attempt still `ASSIGNED` with the claim on it; the partner is told the store has to confirm and can retry with location. The vendor's order card shows the claim and "The rider is here" posts `confirm-partner-arrival` — staff of that store only, for a claimed arrival only — recording `VENDOR_CONFIRMED` under the vendor actor. The schema says it too: `AT_VENDOR` now requires an `arrival_kind` (NOT VALID, so rows that arrived on their word before this run stand). Pickup and the vendor handover already required `AT_VENDOR`, so a claim cannot be handed the order. The Android shell has no device fix, so its arrivals are claims — said in its own message.
+
+**Mutation results.** Six probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Any fix, or none, is an arrival (old) | *An arrival with no fix was not recorded as a claim (… "AT_VENDOR" …)* |
+| Accuracy not looked at | *A 400 m fix at the store was taken as presence* |
+| The constant radius, not the setting | *The configured arrival radius was not applied* |
+| Any store's staff confirms | *Staff of another store confirmed an arrival at this one* |
+| Store location kept into custody | *The store stayed on the record after the goods left it* |
+| A claim moves to AT_VENDOR anyway | *An arrival with no fix was not recorded as a claim* |
+
+**Forward findings.** (9.5) The wait timer starts on `AT_VENDOR`, which is now verified presence; its own thresholds, the vendor's delay reason and the revised estimate are 9.5's audit. (9.6) `arriveAtCustomer` is still the partner's word; DLP-29's "permitted location and fallback process" is 9.6's. (Android) No device geolocation in the shell: arrivals are claims. (carried) `ZONE` scopes by name; branch protection off.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 102 migration files (0000–0101), full ladder; `assignment_custody` 38 assertions (26 before), `vendor_fulfilment` 265 (264). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 575 pass / 0 fail (571 before: the cache and direction helpers, the workspace's source checks, the arrive route's fix, the confirm route's scope); `pnpm test:integration` exit 0 on a rebuilt test stack; all six probes on a rebuilt database.
+
+**Step 9.4: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

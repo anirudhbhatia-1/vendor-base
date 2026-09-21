@@ -72,6 +72,9 @@ export class VendorLocationSettingsController {
         ...(body['profile_description'] === null || typeof body['profile_description'] === 'string'
           ? { profile_description: (body['profile_description'] ?? null) as string | null }
           : {}),
+        ...(body['landmark'] === null || typeof body['landmark'] === 'string'
+          ? { landmark: (body['landmark'] ?? null) as string | null }
+          : {}),
         ...(optionalInteger(body, 'preparation_seconds') !== undefined
           ? { preparation_seconds: optionalInteger(body, 'preparation_seconds') as number }
           : {}),

@@ -107,6 +107,15 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   second time. `settleInventoryOnPickup` commits any `PROVISIONAL` reservation still attached to
   the order (none, for an order accepted since run 50), and the inventory service's own version
   guard makes that idempotent.
+- **The partner at the counter is trusted or confirmed, never merely claimed (9.4, audit run
+  59).** `PARTNER_NOT_PRESENT` refuses a handover until the attempt is `AT_VENDOR`, and since 0101
+  an attempt reaches `AT_VENDOR` only as a `TRUSTED_LOCATION` arrival (the device's fix within the
+  arrival radius) or a `VENDOR_CONFIRMED` one. A partner whose phone shared no fix, a poor one or
+  one away from the store is a *claim* on the order's collection summary (`collection.arrival_claim`:
+  when, and `NO_LOCATION` / `POOR_ACCURACY` / `OUT_OF_RANGE`); the console says so and offers "The
+  rider is here", which posts `confirm-partner-arrival` — staff of this store only, for a claimed
+  arrival only. The store also carries a `landmark` (settings, 2–120 characters) for the partner
+  heading to it: the written way to find the door.
 
 ## Deliberate scope decisions
 
@@ -206,7 +215,7 @@ collected and the self-delivered order and no partner earning for either.
 - **`vendor/locations/:vendor_location_id/orders`** (`vendor.order.fulfil`): `accept`, `decline`,
   `start-picking`, `lines/:id/found`, `lines/:id/missing`, `lines/:id/propose-substitution`,
   `lines/:id/propose-weight`, `ready`, `pickup-otp`, `complete-pickup`, `self-delivery/start`,
-  `self-delivery/complete`, `picks` (list).
+  `self-delivery/complete`, `confirm-partner-arrival`, `picks` (list).
 - **`customer/decisions/:decision_id/answer`** (`customer.order.decide`).
 - **`customer/orders`** (`customer.order.read`): list groups + vendor_orders; `receipt`; and,
   behind distinct capabilities, `rating` (`customer.order.rate`) and `support`

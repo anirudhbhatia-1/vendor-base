@@ -1175,14 +1175,20 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       stillOnTheRoad === 'PARTNER_NOT_PRESENT',
       `Handover before arrival was not refused as PARTNER_NOT_PRESENT (got ${stillOnTheRoad})`,
     );
+    // 9.4 -- arrival is trusted by the device's fix at the store.
     const atVendor = await assignments.arriveAtVendor({
       command_reference: 'SYNTH-CMD-AT-VENDOR-DELIVERY-CLOSURE',
       context: partner,
       delivery_assignment_id: created.delivery_assignment_id,
       expected_version: acceptedOffer.version,
       now: new Date(now.getTime() + 63_000),
+      position: { latitude: 26.911, longitude: 75.811, accuracy_meters: 12 },
       reason_code: 'VENDOR_LOCATION_ARRIVAL',
     });
+    check(
+      atVendor.assignment_state === 'AT_VENDOR' && atVendor.arrival_kind === 'TRUSTED_LOCATION',
+      `A fix at the store was not a trusted arrival (${JSON.stringify(atVendor)})`,
+    );
     const beforeCustody = await assignments.listActiveForPartner({
       partner_user_id: partnerId,
     });

@@ -121,12 +121,14 @@ async function takeCustody(
   order: PlacedOrder,
 ): Promise<string> {
   const accepted = await acceptOffer(partnerToken, run, order);
+  // 9.4 -- the arrival is trusted by the device's fix at the store.
   const arrived = await partnerStep(
     partnerToken,
     run,
     accepted.assignmentId,
     accepted.version,
     'arrive-vendor',
+    { latitude: run.latitude, longitude: run.longitude, accuracy_meters: 12 },
   );
   const otp = object(
     await apiCall(partnerToken, 'POST', `/partner/assignments/${accepted.assignmentId}/pickup-otp`),

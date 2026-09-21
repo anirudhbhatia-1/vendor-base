@@ -592,6 +592,8 @@ export type VendorLocationSettings = {
   vendor_location_id: string;
   location_name: string;
   profile_description: string | null;
+  /** The written way to find the store, shown to the partner heading there (9.4). */
+  landmark?: string | null;
   category: string;
   lifecycle_state: string;
   operating_timezone: string;
@@ -658,6 +660,41 @@ export type DeliveryAssignment = {
   route_seconds?: number | null;
   route_source?: RouteSource | null;
   expected_earning_minor?: number | null;
+  /** When the bag is ready to collect, and the waiting terms, on an offer (9.3). */
+  expected_ready_at?: string | null;
+  promise_at?: string | null;
+  wait_policy?: {
+    included_seconds: number;
+    per_completed_minute_minor: number;
+    cap_minor: number;
+  } | null;
+  /**
+   * The store to collect from, for the assigned partner between acceptance
+   * and pickup (9.4): name, landmark and point. Absent on an offer.
+   */
+  pickup_location?: {
+    name: string;
+    landmark: string | null;
+    description: string | null;
+    latitude: number;
+    longitude: number;
+  } | null;
+  /** How the arrival at the store was trusted, once it has been (9.4). */
+  arrival_kind?: 'TRUSTED_LOCATION' | 'VENDOR_CONFIRMED' | null;
+  arrived_at?: string | null;
+  arrival_distance_metres?: number | null;
+  /** An arrival the position could not support, waiting for the store to confirm. */
+  arrival_claim?: {
+    claimed_at: string;
+    reason: 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
+  } | null;
+};
+
+/** The device's fix, sent with an arrival (9.4); without it the arrival is a claim. */
+export type DevicePosition = {
+  latitude: number;
+  longitude: number;
+  accuracy_meters: number;
 };
 
 /**

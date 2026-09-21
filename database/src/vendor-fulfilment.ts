@@ -253,9 +253,20 @@ export interface VendorOrderSummary {
    * order; the partner's identity and position are deliberately not here.
    */
   readonly collection: {
+    readonly delivery_assignment_id: UuidV7;
+    readonly assignment_version: number;
     readonly assignment_state: string;
     readonly partner_waiting_since: Date | null;
     readonly wait_state: string | null;
+    /**
+     * A partner's arrival the device's position could not support (9.4),
+     * waiting for the counter to confirm they are there: when, and why.
+     */
+    readonly arrival_claim: {
+      readonly claimed_at: Date;
+      readonly reason: string;
+    } | null;
+    readonly arrival_kind: string | null;
   } | null;
   /**
    * Why a finished order finished, and who ended it.
@@ -904,7 +915,9 @@ const VENDOR_ORDER_SUMMARY_SQL = `
          o.pickup_otp_attempts, o.out_for_delivery_at, o.delivery_otp_expires_at,
          o.delivery_otp_attempts, o.decline_reason_code,
          method.fulfilment_method, method.route_metres, method.route_seconds, method.route_source,
+         collection.delivery_assignment_id, collection.assignment_version,
          collection.assignment_state, collection.wait_state, collection.partner_waiting_since,
+         collection.arrival_claimed_at, collection.arrival_claim_reason, collection.arrival_kind,
          resolution.reason_code AS resolution_reason_code,
          resolution.actor_kind AS resolution_actor_kind,
          resolution.occurred_at AS resolution_occurred_at
@@ -920,7 +933,9 @@ const VENDOR_ORDER_SUMMARY_SQL = `
        LIMIT 1
     ) method ON true
     LEFT JOIN LATERAL (
-      SELECT a.assignment_state, w.wait_state,
+      SELECT a.delivery_assignment_id, a.version AS assignment_version,
+             a.assignment_state, w.wait_state,
+             a.arrival_claimed_at, a.arrival_claim_reason, a.arrival_kind,
              CASE WHEN w.ended_at IS NULL THEN w.started_at END AS partner_waiting_since
         FROM marketplace.delivery_assignments a
         LEFT JOIN marketplace.partner_wait_timers w
@@ -997,9 +1012,19 @@ function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
       : null,
     collection: row['assignment_state']
       ? Object.freeze({
+          delivery_assignment_id: parseUuidV7(row['delivery_assignment_id'] as string),
+          assignment_version: row['assignment_version'] as number,
           assignment_state: row['assignment_state'] as string,
           partner_waiting_since: (row['partner_waiting_since'] as Date | null) ?? null,
           wait_state: (row['wait_state'] as string | null) ?? null,
+          arrival_claim:
+            row['arrival_claimed_at'] && row['arrival_claim_reason']
+              ? Object.freeze({
+                  claimed_at: row['arrival_claimed_at'] as Date,
+                  reason: row['arrival_claim_reason'] as string,
+                })
+              : null,
+          arrival_kind: (row['arrival_kind'] as string | null) ?? null,
         })
       : null,
   });

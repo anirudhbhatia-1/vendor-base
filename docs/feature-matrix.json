@@ -3698,7 +3698,7 @@
       "name": "Resume active job",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "PWA loads assignment from server, resumes from confirmed state",
+      "notes": "PWA loads assignment from server, resumes from confirmed state; the last server-confirmed job is kept on the device and shown as such when the API cannot be reached (audit run 59)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3720,7 +3720,7 @@
       "name": "Vendor navigation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Written destination with an external-map handoff, never the map alone",
+      "notes": "Written destination with an external-map handoff, never the map alone; once assigned, the store's name, landmark and point are on the record and the map opens on its coordinates (audit run 59)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3746,7 +3746,7 @@
       "name": "Arrival at vendor",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "POST arrive-vendor",
+      "notes": "POST arrive-vendor with the device fix: trusted within the configured radius, otherwise a claim the store confirms at the counter (audit run 59 -- until then the partner's word from anywhere)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4347,7 +4347,7 @@
       "name": "Text and landmark navigation fallback",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "The written destination is the primary account of the route; the map is an optional handoff",
+      "notes": "The written destination is the primary account of the route; the map is an optional handoff; the store's landmark and a written direction from the phone's last fix stand beside it (audit run 59)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

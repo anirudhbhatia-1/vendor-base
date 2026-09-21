@@ -50,6 +50,7 @@ const vendorRoutes = [
   'startVendorDelivery',
   'completeVendorDelivery',
   'listPicks',
+  'confirmPartnerArrival',
 ] as const;
 
 test('contains every vendor fulfilment route to vendor.order.fulfil at the owning location', () => {

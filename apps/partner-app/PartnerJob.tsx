@@ -146,14 +146,22 @@ export function PartnerJob({ accessToken = '' }: { accessToken?: string } = {}) 
             }
           : {}),
       };
-      setJob(
-        (await request(`partner/${action[1].replace('{id}', job.delivery_assignment_id)}`, {
+      const next = (await request(
+        `partner/${action[1].replace('{id}', job.delivery_assignment_id)}`,
+        {
           method: 'POST',
           body: JSON.stringify(body),
-        })) as Job,
-      );
+        },
+      )) as Job & { arrival_claim?: unknown };
+      setJob(next);
       setOtp('');
-      setMessage(`${action[0]} persisted.`);
+      // This shell has no device fix yet (see `dispatch`), so an arrival is a
+      // claim for the store to confirm (9.4), never presence on its own word.
+      setMessage(
+        job.assignment_state === 'ASSIGNED' && next.arrival_claim
+          ? 'Arrival noted. The store has to confirm you are at the counter.'
+          : `${action[0]} persisted.`,
+      );
     } catch (e) {
       setMessage(e instanceof Error ? e.message : 'Step failed.');
     }

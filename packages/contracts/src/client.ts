@@ -39,6 +39,7 @@ import type {
   SupportCaseMessage,
   SubstitutionPreference,
   PartnerAvailability,
+  DevicePosition,
   PartnerAttemptCompensation,
   PartnerEarningEntry,
   VendorOrder,
@@ -865,6 +866,7 @@ export function createApiClient(options: ApiClientOptions) {
             expected_version: number;
             location_name?: string;
             profile_description?: string | null;
+            landmark?: string | null;
             preparation_seconds?: number;
             minimum_order_minor?: number;
             operating_timezone?: string;
@@ -977,7 +979,10 @@ export function createApiClient(options: ApiClientOptions) {
             json: body,
           }),
 
-        arriveAtVendor: (assignmentId: string, body: AssignmentTransition) =>
+        arriveAtVendor: (
+          assignmentId: string,
+          body: AssignmentTransition & Partial<DevicePosition>,
+        ) =>
           r<DeliveryAssignment>(`/partner/assignments/${assignmentId}/arrive-vendor`, {
             method: 'POST',
             json: body,

@@ -121,7 +121,38 @@ export class VendorInsightsController {
 
 @Controller('vendor/locations/:vendor_location_id/orders')
 export class VendorOrderFulfilmentController {
-  constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
+  constructor(
+    @Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService,
+    @Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService,
+  ) {}
+
+  /**
+   * The counter confirms the partner is here (9.4): the approved fallback for
+   * an arrival the device's position could not support. Scoped to this
+   * store, and the service checks the assignment is this store's own.
+   */
+  @Post(':vendor_order_id/confirm-partner-arrival')
+  @vendorFulfil
+  @HttpCode(200)
+  async confirmPartnerArrival(
+    @Param('vendor_location_id') locationId: string,
+    @Param('vendor_order_id') orderId: string,
+    @Body() raw: unknown,
+  ) {
+    const body = object(raw);
+    void orderId;
+    try {
+      return await this.assignments.confirmPartnerArrival({
+        command_reference: stringField(body, 'command_reference'),
+        context: currentRequestContext(),
+        delivery_assignment_id: uuid(stringField(body, 'delivery_assignment_id')),
+        expected_version: integerField(body, 'expected_version', 1),
+        vendor_location_id: uuid(locationId),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
 
   @Get()
   @vendorFulfil

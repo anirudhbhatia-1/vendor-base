@@ -31,6 +31,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiUrl, partnerRequest } from './authenticated-api';
 import { PartnerApplicationPanel } from './application-panel';
 import { displayArea, offerDeadlineSentence, shortReference, waitPolicySentence } from './display';
+import {
+  directionSentence,
+  forgetAssignments,
+  recallAssignments,
+  rememberAssignments,
+  staleSentence,
+} from './active-job-cache';
 import { EarningsPanel } from './earnings-panel';
 import { FieldOpsPanel } from './field-ops-panel';
 import { PartnerProfilePanel } from './profile-panel';
@@ -99,6 +106,20 @@ type Assignment = {
   } | null;
   /** True while a safety report on this job is open. Decided by the server. */
   readonly open_emergency?: boolean;
+  /** The store to collect from, once the job is this partner's (9.4). */
+  readonly pickup_location?: {
+    readonly name: string;
+    readonly landmark: string | null;
+    readonly description: string | null;
+    readonly latitude: number;
+    readonly longitude: number;
+  } | null;
+  readonly arrival_kind?: 'TRUSTED_LOCATION' | 'VENDOR_CONFIRMED' | null;
+  /** An arrival the phone could not vouch for, waiting for the store to confirm. */
+  readonly arrival_claim?: {
+    readonly claimed_at: string;
+    readonly reason: 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
+  } | null;
 };
 
 type Availability = {
@@ -156,11 +177,14 @@ export function PartnerWorkspace({ view }: { view: PartnerView }) {
 function ActiveJob({
   assignment,
   busy,
+  lastFix,
   onAct,
   onRefresh,
 }: {
   readonly assignment: Assignment;
   readonly busy: boolean;
+  /** Where the phone last placed the partner, for the written route (9.4). */
+  readonly lastFix: { readonly latitude: number; readonly longitude: number } | null;
   readonly onRefresh: () => void;
   readonly onAct: (
     assignment: Assignment,
@@ -183,7 +207,11 @@ function ActiveJob({
   // underneath it, which is the platform asking somebody to carry on working
   // through the thing they just asked for help with.
   const blocked = assignment.open_emergency === true;
-  const step = blocked ? undefined : NEXT_STEP[assignment.assignment_state];
+  const step = blocked
+    ? undefined
+    : assignment.arrival_claim && assignment.assignment_state === 'ASSIGNED'
+      ? (['Try arrival again with location', 'arrive-vendor'] as const)
+      : NEXT_STEP[assignment.assignment_state];
   const arrived = deliveryProofAllowed(assignment.assignment_state, blocked);
   const atVendor = assignment.assignment_state === 'AT_VENDOR';
   // Before custody the partner is heading for the store, and only the area is
@@ -191,17 +219,27 @@ function ActiveJob({
   // an area name alone is not something anyone can deliver to. It is
   // stage-gated server-side and never reaches an offer (SEC-03).
   const dropAddress = assignment.drop_address ?? null;
-  const heading = ['ASSIGNED', 'AT_VENDOR'].includes(assignment.assignment_state)
-    ? displayArea(assignment.approximate_pickup_area)
+  const headingToStore = ['ASSIGNED', 'AT_VENDOR'].includes(assignment.assignment_state);
+  // The store itself once the job is theirs (9.4): the API sends its name,
+  // landmark and point between acceptance and pickup, and only then.
+  const store = headingToStore ? (assignment.pickup_location ?? null) : null;
+  const heading = headingToStore
+    ? store
+      ? displayArea(store.name)
+      : displayArea(assignment.approximate_pickup_area)
     : (dropAddress?.label ?? displayArea(assignment.approximate_drop_area));
-  // Coordinates beat a text query every time, and are only available for the
-  // leg where the destination is a person's home rather than a rough area.
-  const mapQuery =
-    dropAddress && !['ASSIGNED', 'AT_VENDOR'].includes(assignment.assignment_state)
+  // Coordinates beat a text query every time: the store's point on the way
+  // there, the customer's on the way back. A rough area is all an offer has.
+  const mapQuery = store
+    ? `geo:${store.latitude},${store.longitude}?q=${encodeURIComponent(
+        `${displayArea(store.name)}${store.landmark ? `, ${displayArea(store.landmark)}` : ''}`,
+      )}`
+    : dropAddress && !headingToStore
       ? `geo:${dropAddress.latitude},${dropAddress.longitude}?q=${encodeURIComponent(
           `${dropAddress.label}, ${dropAddress.pin_code}`,
         )}`
       : `geo:0,0?q=${encodeURIComponent(heading)}`;
+  const written = store ? directionSentence(lastFix, store) : null;
 
   return (
     <Card as="section" className="job-card" tone="raised">
@@ -250,6 +288,34 @@ function ActiveJob({
           <span className="ns-button__label">Open in maps</span>
         </a>
       </div>
+
+      {store ? (
+        // 9.4 / DLP-21 / DLP-46: the store, in words first. The landmark is
+        // what finds a shop in a lane; the map is the handoff, not the account.
+        <Card className="drop-address" tone="sunken">
+          <p className="ns-eyebrow">Collect from</p>
+          <strong>{displayArea(store.name)}</strong>
+          {store.landmark ? <p>Near {displayArea(store.landmark)}</p> : null}
+          {store.description ? (
+            <p className="drop-address__instructions">{store.description}</p>
+          ) : null}
+          {written ? <p>{written}</p> : null}
+        </Card>
+      ) : null}
+
+      {assignment.arrival_claim ? (
+        // 9.4: the phone could not place the partner at the store, so the
+        // arrival is the store's to confirm. Nothing is lost -- the claim is
+        // on record -- but the handover waits for the counter.
+        <Notice live="polite" tone="warning">
+          {assignment.arrival_claim.reason === 'NO_LOCATION'
+            ? 'Your phone shared no location, so the store has to confirm you are at the counter.'
+            : assignment.arrival_claim.reason === 'POOR_ACCURACY'
+              ? 'Your phone could not place you precisely, so the store has to confirm you are at the counter.'
+              : 'Your phone places you away from the store, so the store has to confirm you are at the counter.'}{' '}
+          Ask them to confirm, or try again once your location is on.
+        </Notice>
+      ) : null}
 
       {dropAddress ? (
         // DLP-21: what the partner is holding has to reach a specific door.
@@ -514,6 +580,9 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
   const proofReadSequence = useRef(0);
   const [now, setNow] = useState(() => Date.now());
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  // When the server last confirmed the assignments shown; null while live (9.4).
+  const [staleSince, setStaleSince] = useState<number | null>(null);
+  const [lastFix, setLastFix] = useState<{ latitude: number; longitude: number } | null>(null);
 
   const loadAlerts = useCallback(async () => {
     setAlertsState('loading');
@@ -553,6 +622,12 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     setAvailability(availabilityBody);
     setError(null);
     setLoading(false);
+    setStaleSince(null);
+    rememberAssignments(
+      typeof window === 'undefined' ? null : window.localStorage,
+      assignmentBody.assignments,
+      Date.now(),
+    );
   }, [loadProofQueue]);
 
   useEffect(() => {
@@ -569,6 +644,15 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     window.addEventListener('online', online);
     window.addEventListener('offline', offline);
     void refresh().catch((cause: unknown) => {
+      // Nothing fresh: show the job as the server last confirmed it (9.4),
+      // said as such, rather than an empty screen in a lane with no signal.
+      const cached = recallAssignments<Assignment>(
+        typeof window === 'undefined' ? null : window.localStorage,
+      );
+      if (cached && cached.assignments.length > 0) {
+        setAssignments(cached.assignments);
+        setStaleSince(cached.confirmed_at);
+      }
       setError(cause instanceof Error ? cause.message : 'Dispatch could not be loaded.');
       setLoading(false);
     });
@@ -615,6 +699,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
           ),
         );
       }
+      if (position) setLastFix({ latitude: position.latitude, longitude: position.longitude });
       try {
         await partnerRequest('partner/availability/heartbeat', {
           method: 'POST',
@@ -702,17 +787,35 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     setBusy(true);
     setError(null);
     try {
-      await partnerRequest(`partner/assignments/${assignment.delivery_assignment_id}/${action}`, {
-        method: 'POST',
-        body: JSON.stringify({
-          command_reference: transitionCommandReference(action, Date.now()),
-          expected_version: assignment.version,
-          reason_code: 'PARTNER_CONFIRMED',
-          ...extra,
-        }),
-      });
+      // An arrival carries the phone's fix (9.4); the server decides whether
+      // it places the partner at the store. Without one it is a claim.
+      let fix: Record<string, number> = {};
+      if (action === 'arrive-vendor') {
+        const position = await devicePosition();
+        if (position) {
+          setLastFix({ latitude: position.latitude, longitude: position.longitude });
+          fix = { ...position };
+        }
+      }
+      const outcome = await partnerRequest<Assignment>(
+        `partner/assignments/${assignment.delivery_assignment_id}/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            command_reference: transitionCommandReference(action, Date.now()),
+            expected_version: assignment.version,
+            reason_code: 'PARTNER_CONFIRMED',
+            ...fix,
+            ...extra,
+          }),
+        },
+      );
       await refresh();
-      setMessage(`${describedAs ?? action.replaceAll('-', ' ')} recorded.`);
+      if (action === 'arrive-vendor' && outcome.arrival_claim) {
+        setMessage('Arrival noted. The store has to confirm you are at the counter.');
+      } else {
+        setMessage(`${describedAs ?? action.replaceAll('-', ' ')} recorded.`);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'That step could not be recorded.');
     } finally {
@@ -785,6 +888,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     try {
       const client = getSupabase();
       if (client) await revokeAndSignOut({ apiUrl, client });
+      forgetAssignments(window.localStorage);
       router.replace('/login');
       router.refresh();
     } catch {
@@ -912,6 +1016,24 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
             <LoadingState label="Loading your delivery…" lines={4} />
           ) : activeJob ? (
             <>
+              {staleSince !== null ? (
+                // 9.4: the picture is the server's last, not a live one. The
+                // job stays readable; the next step waits for a connection.
+                <Notice live="polite" tone="warning">
+                  {staleSentence(staleSince, now)}{' '}
+                  <Button
+                    onClick={() =>
+                      void refresh().catch(() =>
+                        setError('Still no connection. The job is shown as last confirmed.'),
+                      )
+                    }
+                    size="small"
+                    variant="secondary"
+                  >
+                    Try again
+                  </Button>
+                </Notice>
+              ) : null}
               {assignments.length > 1 ? (
                 <label>
                   Choose a delivery
@@ -930,8 +1052,9 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
               ) : null}
               <ActiveJob
                 assignment={activeJob}
-                busy={busy}
+                busy={busy || staleSince !== null}
                 key={`${activeJob.delivery_assignment_id}:${activeJob.assignment_state}`}
+                lastFix={lastFix}
                 onAct={act}
                 onRefresh={() =>
                   void refresh().catch(() =>

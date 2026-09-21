@@ -15,6 +15,7 @@ import {
   AssignmentCustodyService,
   AssignmentInputError,
   AssignmentNotFoundError,
+  MAX_TRUSTED_ACCURACY_METRES,
 } from '@neighbourhood-store/database';
 import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
@@ -24,6 +25,7 @@ import {
   booleanField,
   dateField,
   integerField,
+  numberField,
   object,
   optionalString,
   stringField,
@@ -182,8 +184,26 @@ export class PartnerAssignmentController {
   @actOnAssignment
   @HttpCode(200)
   async arriveVendor(@Param('delivery_assignment_id') id: string, @Body() raw: unknown) {
+    const value = object(raw);
+    // The device's fix, when it has one (9.4). Without it the arrival is a
+    // claim for the store to confirm; the server decides which.
+    const located = typeof value['latitude'] === 'number' && typeof value['longitude'] === 'number';
     try {
-      return await this.assignments.arriveAtVendor(transition(object(raw), id));
+      return await this.assignments.arriveAtVendor({
+        ...transition(value, id),
+        ...(located
+          ? {
+              position: {
+                latitude: numberField(value, 'latitude'),
+                longitude: numberField(value, 'longitude'),
+                accuracy_meters:
+                  typeof value['accuracy_meters'] === 'number'
+                    ? numberField(value, 'accuracy_meters')
+                    : MAX_TRUSTED_ACCURACY_METRES + 1,
+              },
+            }
+          : {}),
+      });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();
       translateDomainError(error);

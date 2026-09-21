@@ -57,6 +57,8 @@ export interface VendorLocationSettingsUpdate {
   readonly expected_version: number;
   readonly location_name?: string;
   readonly profile_description?: string | null;
+  /** `null` clears it; absent leaves it. */
+  readonly landmark?: string | null;
   readonly preparation_seconds?: number;
   readonly minimum_order_minor?: number;
   readonly operating_timezone?: string;
@@ -106,6 +108,8 @@ export class VendorSettingsService {
     readonly vendor_location_id: UuidV7;
     readonly location_name: string;
     readonly profile_description: string | null;
+    /** The written way to find the store, for the partner heading there (9.4). */
+    readonly landmark: string | null;
     readonly category: string;
     readonly lifecycle_state: string;
     readonly operating_timezone: string;
@@ -126,6 +130,7 @@ export class VendorSettingsService {
         vendor_location_id: string;
         location_name: string;
         profile_description: string | null;
+        landmark: string | null;
         category: string;
         lifecycle_state: string;
         operating_timezone: string;
@@ -135,7 +140,7 @@ export class VendorSettingsService {
         version: number;
         fulfilment_modes: string[];
       }>(
-        `SELECT l.vendor_location_id, l.location_name, l.profile_description, l.category,
+        `SELECT l.vendor_location_id, l.location_name, l.profile_description, l.landmark, l.category,
                 l.lifecycle_state, l.operating_timezone, l.preparation_seconds,
                 l.minimum_order_minor::text AS minimum_order_minor, l.currency, l.version,
                 COALESCE(
@@ -165,6 +170,7 @@ export class VendorSettingsService {
         vendor_location_id: parseUuidV7(row.vendor_location_id),
         location_name: row.location_name,
         profile_description: row.profile_description,
+        landmark: row.landmark,
         category: row.category,
         lifecycle_state: row.lifecycle_state,
         operating_timezone: row.operating_timezone,
@@ -211,6 +217,12 @@ export class VendorSettingsService {
         throw new VendorSettingsInputError('location_name length must be 2..120');
       }
     }
+    if (input.landmark !== undefined && input.landmark !== null) {
+      const trimmed = input.landmark.trim();
+      if (trimmed.length < 2 || trimmed.length > 120) {
+        throw new VendorSettingsInputError('landmark length must be 2..120');
+      }
+    }
     if (input.hours !== undefined) {
       for (const h of input.hours) {
         if (h.weekday < 0 || h.weekday > 6) {
@@ -240,6 +252,7 @@ export class VendorSettingsService {
               preparation_seconds = COALESCE($5, preparation_seconds),
               minimum_order_minor = COALESCE($6, minimum_order_minor),
               operating_timezone = COALESCE($7, operating_timezone),
+              landmark = CASE WHEN $9::boolean THEN $10::text ELSE landmark END,
               version = version + 1,
               updated_at = $8
           WHERE vendor_location_id = $1 AND version = $2
@@ -253,6 +266,8 @@ export class VendorSettingsService {
           input.minimum_order_minor ?? null,
           input.operating_timezone ?? null,
           now,
+          input.landmark !== undefined,
+          input.landmark === undefined || input.landmark === null ? null : input.landmark.trim(),
         ],
       );
       if (!updated.rows[0]) {

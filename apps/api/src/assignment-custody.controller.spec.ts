@@ -90,3 +90,41 @@ test('a reassignment is routed to reassign() with its compensation, not to endBe
   });
   assert.deepEqual(calls, ['reassign:1500:PARTNER_VEHICLE_BREAKDOWN:-', 'end']);
 });
+
+test('an arrival carries the device fix when there is one, and is a bare claim when there is not (9.4)', async () => {
+  const seen: unknown[] = [];
+  const controller = new PartnerAssignmentController({
+    arriveAtVendor: async (input: { position?: unknown }) => {
+      seen.push(input.position ?? 'none');
+      return { assignment_state: 'ASSIGNED' };
+    },
+  } as never);
+  await requestContextStorage.run(createRequestContext(), async () => {
+    await controller.arriveVendor('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-ARRIVE-T1',
+      expected_version: 2,
+      reason_code: 'PARTNER_CONFIRMED',
+      latitude: 26.91,
+      longitude: 75.81,
+      accuracy_meters: 15,
+    });
+    await controller.arriveVendor('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-ARRIVE-T2',
+      expected_version: 3,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    // A fix without an accuracy is not trusted as a good one.
+    await controller.arriveVendor('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-ARRIVE-T3',
+      expected_version: 4,
+      reason_code: 'PARTNER_CONFIRMED',
+      latitude: 26.91,
+      longitude: 75.81,
+    });
+  });
+  assert.deepEqual(seen, [
+    { latitude: 26.91, longitude: 75.81, accuracy_meters: 15 },
+    'none',
+    { latitude: 26.91, longitude: 75.81, accuracy_meters: 101 },
+  ]);
+});

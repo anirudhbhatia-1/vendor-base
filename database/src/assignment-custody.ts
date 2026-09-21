@@ -13,6 +13,7 @@ import { completeVendorOrder } from './vendor-order-completion.js';
 import { Pool, type PoolClient } from 'pg';
 import { transaction } from './transaction.js';
 import { handoverCodeDigest, handoverDigestsMatch } from './handover-code.js';
+import { resolveConfiguration } from './versioned-configuration.js';
 
 export type AssignmentState =
   | 'ARRIVED'
@@ -86,6 +87,21 @@ export interface DeliveryAssignmentRecord {
    * The server decides this, so no client can route around it.
    */
   readonly open_emergency?: boolean;
+  /**
+   * Where to collect from, present for the assigned partner between
+   * acceptance and pickup (9.4). The store is a business at a public address;
+   * the offer names only its area, and the address is the accepted partner's.
+   */
+  readonly pickup_location?: PickupLocation | null;
+  /** How the arrival at the store was trusted, once it has been (9.4). */
+  readonly arrival_kind: ArrivalKind | null;
+  readonly arrived_at: string | null;
+  readonly arrival_distance_metres: number | null;
+  /** A claim the position could not support, waiting for the store to confirm. */
+  readonly arrival_claim: {
+    readonly claimed_at: string;
+    readonly reason: ArrivalClaimReason;
+  } | null;
   readonly assignment_state: AssignmentState;
   readonly custody_state: CustodyState;
   readonly delivery_assignment_id: UuidV7;
@@ -98,6 +114,35 @@ export interface DeliveryAssignmentRecord {
   readonly vendor_order_id: UuidV7 | null;
   readonly version: number;
 }
+
+export type ArrivalKind = 'TRUSTED_LOCATION' | 'VENDOR_CONFIRMED';
+export type ArrivalClaimReason = 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
+
+/** The store the assigned partner is heading for: its name, its landmark and its point. */
+export interface PickupLocation {
+  readonly name: string;
+  readonly landmark: string | null;
+  readonly description: string | null;
+  readonly latitude: number;
+  readonly longitude: number;
+}
+
+/** A device position as the partner's app reports it. */
+export interface DevicePosition {
+  readonly latitude: number;
+  readonly longitude: number;
+  readonly accuracy_meters: number;
+}
+
+/**
+ * The arrival geofence (9.4). A position within this many metres of the
+ * store, with a fix at least this good, is a trusted arrival; anything else
+ * is a claim the store confirms at the counter. The radius is a SETTING
+ * (`assignment.arrival_radius_metres`, 25–1000); the accuracy bar is fixed,
+ * since a fix worse than a city block cannot place anyone at a counter.
+ */
+export const DEFAULT_ARRIVAL_RADIUS_METRES = 150;
+export const MAX_TRUSTED_ACCURACY_METRES = 100;
 
 /** The delivery destination, disclosed for the length of custody only. */
 export interface DropAddress {
@@ -194,6 +239,11 @@ interface AssignmentRow {
   delivery_assignment_id: string;
   handling_flags: string[];
   offer_expires_at: Date | null;
+  arrival_kind: ArrivalKind | null;
+  arrival_distance_metres: number | null;
+  arrived_at: Date | null;
+  arrival_claimed_at: Date | null;
+  arrival_claim_reason: ArrivalClaimReason | null;
   package_count: number;
   partner_user_id: string | null;
   correlation_id: string;
@@ -237,6 +287,16 @@ function assignmentRecord(row: AssignmentRow): DeliveryAssignmentRecord {
     delivery_assignment_id: parseUuidV7(row.delivery_assignment_id),
     handling_flags: Object.freeze([...row.handling_flags]),
     offer_expires_at: row.offer_expires_at?.toISOString() ?? null,
+    arrival_kind: row.arrival_kind ?? null,
+    arrived_at: row.arrived_at?.toISOString() ?? null,
+    arrival_distance_metres: row.arrival_distance_metres ?? null,
+    arrival_claim:
+      row.arrival_claimed_at && row.arrival_claim_reason
+        ? Object.freeze({
+            claimed_at: row.arrival_claimed_at.toISOString(),
+            reason: row.arrival_claim_reason,
+          })
+        : null,
     package_count: row.package_count,
     partner_user_id: row.partner_user_id ? parseUuidV7(row.partner_user_id) : null,
     source_order_reference: row.source_order_reference,
@@ -244,6 +304,27 @@ function assignmentRecord(row: AssignmentRow): DeliveryAssignmentRecord {
     vendor_order_id: row.vendor_order_id ? parseUuidV7(row.vendor_order_id) : null,
     version: row.version,
   });
+}
+
+/** The states in which the assigned partner is on their way to, or at, the store. */
+const HEADING_TO_STORE_STATES: readonly AssignmentState[] = Object.freeze([
+  'ASSIGNED',
+  'AT_VENDOR',
+]);
+
+function position(value: DevicePosition | undefined): DevicePosition | null {
+  if (value === undefined) return null;
+  if (
+    !Number.isFinite(value.latitude) ||
+    !Number.isFinite(value.longitude) ||
+    Math.abs(value.latitude) > 90 ||
+    Math.abs(value.longitude) > 180 ||
+    !Number.isFinite(value.accuracy_meters) ||
+    value.accuracy_meters < 0
+  ) {
+    throw new AssignmentInputError('A position needs a latitude, a longitude and an accuracy');
+  }
+  return value;
 }
 
 function requiredRow<T>(rows: readonly T[], message: string): T {
@@ -349,7 +430,8 @@ async function replay(
   input: {
     readonly command_reference: string;
     readonly delivery_assignment_id?: UuidV7;
-    readonly event_type: string;
+    /** The intent(s) this command may have recorded; an arrival is one of two. */
+    readonly event_type: string | readonly string[];
   },
 ): Promise<DeliveryAssignmentRecord | null> {
   const result = await client.query<AssignmentRow & { event_type: string }>(
@@ -361,8 +443,9 @@ async function replay(
   );
   const row = result.rows[0];
   if (!row) return null;
+  const intents = typeof input.event_type === 'string' ? [input.event_type] : input.event_type;
   if (
-    row.event_type !== input.event_type ||
+    !intents.includes(row.event_type) ||
     (input.delivery_assignment_id !== undefined &&
       row.delivery_assignment_id !== input.delivery_assignment_id)
   ) {
@@ -630,6 +713,11 @@ export class AssignmentCustodyService {
         approximate_pickup_area: row.approximate_pickup_area,
         approximate_drop_area: row.approximate_drop_area,
         offer_expires_at: row.offer_expires_at ? row.offer_expires_at.toISOString() : null,
+        // An offer is before any arrival; the store's point is not on it.
+        arrival_kind: null,
+        arrived_at: null,
+        arrival_distance_metres: null,
+        arrival_claim: null,
         vendor_order_id: row.vendor_order_id ? parseUuidV7(row.vendor_order_id) : null,
         version: row.version,
       });
@@ -651,10 +739,25 @@ export class AssignmentCustodyService {
         drop_latitude: string | null;
         drop_longitude: string | null;
         open_emergency: boolean;
+        store_name: string | null;
+        store_landmark: string | null;
+        store_description: string | null;
+        store_latitude: string | null;
+        store_longitude: string | null;
       }
     >(
       `SELECT assignment.*,
               ${OPEN_EMERGENCY_SQL.replaceAll('$2', '$3')} AS open_emergency,
+              CASE WHEN assignment.assignment_state = ANY($4::text[])
+                   THEN store.location_name END AS store_name,
+              CASE WHEN assignment.assignment_state = ANY($4::text[])
+                   THEN store.landmark END AS store_landmark,
+              CASE WHEN assignment.assignment_state = ANY($4::text[])
+                   THEN store.profile_description END AS store_description,
+              CASE WHEN assignment.assignment_state = ANY($4::text[])
+                   THEN ST_Y(store.coordinates::geometry)::text END AS store_latitude,
+              CASE WHEN assignment.assignment_state = ANY($4::text[])
+                   THEN ST_X(store.coordinates::geometry)::text END AS store_longitude,
               CASE WHEN assignment.assignment_state = ANY($2::text[])
                    THEN address.label END AS drop_label,
               CASE WHEN assignment.assignment_state = ANY($2::text[])
@@ -668,6 +771,8 @@ export class AssignmentCustodyService {
               CASE WHEN assignment.assignment_state = ANY($2::text[])
                    THEN ST_X(address.coordinates::geometry)::text END AS drop_longitude
          FROM marketplace.delivery_assignments assignment
+         JOIN marketplace.vendor_locations store
+           ON store.vendor_location_id = assignment.vendor_location_id
          LEFT JOIN marketplace.vendor_orders orders
            ON orders.vendor_order_id = assignment.vendor_order_id
          LEFT JOIN marketplace.checkout_groups grouping
@@ -682,12 +787,28 @@ export class AssignmentCustodyService {
              'DELIVERY_FAILED','RETURN_REQUIRED','RETURN_AUTHORIZED','RETURNING')
         ORDER BY assignment.updated_at DESC, assignment.delivery_assignment_id
         LIMIT 25`,
-      [parseUuidV7(input.partner_user_id), [...CUSTODY_STATES], [...SAFETY_EXCEPTION_KINDS]],
+      [
+        parseUuidV7(input.partner_user_id),
+        [...CUSTODY_STATES],
+        [...SAFETY_EXCEPTION_KINDS],
+        [...HEADING_TO_STORE_STATES],
+      ],
     );
     return result.rows.map((row) => {
       const record = Object.freeze({
         ...assignmentRecord(row),
         open_emergency: row.open_emergency,
+        ...(row.store_name !== null && row.store_latitude !== null && row.store_longitude !== null
+          ? {
+              pickup_location: Object.freeze({
+                name: row.store_name,
+                landmark: row.store_landmark,
+                description: row.store_description,
+                latitude: Number(row.store_latitude),
+                longitude: Number(row.store_longitude),
+              }),
+            }
+          : {}),
       });
       if (row.drop_label === null || row.drop_latitude === null || row.drop_longitude === null) {
         return record;
@@ -1176,8 +1297,186 @@ export class AssignmentCustodyService {
     });
   }
 
-  async arriveAtVendor(input: TransitionInput): Promise<DeliveryAssignmentRecord> {
-    return this.#partnerTransition(input, 'ASSIGNED', 'AT_VENDOR', 'AT_VENDOR');
+  /** The arrival geofence in force at `at` (9.4). */
+  async arrivalRadiusMetres(at?: Date): Promise<number> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: 'assignment.arrival_radius_metres',
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value;
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 25 && value <= 1000
+      ? value
+      : DEFAULT_ARRIVAL_RADIUS_METRES;
+  }
+
+  /**
+   * Arrival at the store (9.4): trusted by position, or claimed for the store
+   * to confirm.
+   *
+   * With a position within the arrival radius and a fix at least as good as
+   * `MAX_TRUSTED_ACCURACY_METRES`, the attempt moves to AT_VENDOR as a
+   * TRUSTED_LOCATION arrival and the distance is recorded. Without a usable
+   * position -- none, a poor fix, or one out of range -- the attempt stays
+   * ASSIGNED with a claim on it (when, and why), and `confirmPartnerArrival`
+   * by the store's own staff completes it. Until audit run 59 the partner's
+   * word alone moved the attempt to AT_VENDOR from anywhere.
+   */
+  async arriveAtVendor(
+    input: TransitionInput & { readonly position?: DevicePosition },
+  ): Promise<DeliveryAssignmentRecord> {
+    const who = actor(input.context, ['delivery_partner']);
+    const fix = position(input.position);
+    const now = input.now ?? new Date();
+    const radius = await this.arrivalRadiusMetres(now);
+    return transaction(this.#pool, async (client) => {
+      const prior = await replay(client, {
+        command_reference: input.command_reference,
+        delivery_assignment_id: input.delivery_assignment_id,
+        event_type: ['AT_VENDOR', 'ARRIVAL_CLAIMED'],
+      });
+      if (prior) return prior;
+      const assignment = await lockAssignment(
+        client,
+        input.delivery_assignment_id,
+        input.expected_version,
+      );
+      this.#assertPartner(assignment, who.id);
+      if (assignment.assignment_state !== 'ASSIGNED') {
+        throw new AssignmentConflictError('Assignment must be ASSIGNED');
+      }
+      let distance: number | null = null;
+      if (fix) {
+        const measured = await client.query<{ metres: string }>(
+          `SELECT ST_Distance(coordinates, ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography)::integer::text AS metres
+             FROM marketplace.vendor_locations WHERE vendor_location_id=$1`,
+          [assignment.vendor_location_id, fix.longitude, fix.latitude],
+        );
+        distance = Number(requiredRow(measured.rows, 'The store was not found').metres);
+      }
+      const trusted =
+        fix !== null &&
+        fix.accuracy_meters <= MAX_TRUSTED_ACCURACY_METRES &&
+        distance !== null &&
+        distance <= radius;
+      if (trusted) {
+        await appendEvent(client, {
+          assignment,
+          command_reference: input.command_reference,
+          context: input.context,
+          event_type: 'AT_VENDOR',
+          next_custody_state: assignment.custody_state,
+          next_state: 'AT_VENDOR',
+          now,
+          reason_code: 'TRUSTED_VENDOR_ARRIVAL',
+          who,
+        });
+        const result = await client.query<AssignmentRow>(
+          `UPDATE marketplace.delivery_assignments
+              SET assignment_state='AT_VENDOR', arrival_kind='TRUSTED_LOCATION',
+                  arrived_at=$2, arrival_distance_metres=$3,
+                  arrival_claimed_at=NULL, arrival_claim_reason=NULL,
+                  version=version+1, updated_at=$2
+            WHERE delivery_assignment_id=$1 RETURNING *`,
+          [assignment.delivery_assignment_id, now, distance],
+        );
+        return assignmentRecord(requiredRow(result.rows, 'Arrived attempt was not returned'));
+      }
+      const reasonForClaim: ArrivalClaimReason =
+        fix === null
+          ? 'NO_LOCATION'
+          : fix.accuracy_meters > MAX_TRUSTED_ACCURACY_METRES
+            ? 'POOR_ACCURACY'
+            : 'OUT_OF_RANGE';
+      await appendEvent(client, {
+        assignment,
+        command_reference: input.command_reference,
+        context: input.context,
+        event_type: 'ARRIVAL_CLAIMED',
+        next_custody_state: assignment.custody_state,
+        next_state: 'ASSIGNED',
+        now,
+        reason_code: reasonForClaim,
+        who,
+      });
+      const result = await client.query<AssignmentRow>(
+        `UPDATE marketplace.delivery_assignments
+            SET arrival_claimed_at=$2, arrival_claim_reason=$3, arrival_distance_metres=$4,
+                version=version+1, updated_at=$2
+          WHERE delivery_assignment_id=$1 RETURNING *`,
+        [assignment.delivery_assignment_id, now, reasonForClaim, distance],
+      );
+      return assignmentRecord(requiredRow(result.rows, 'Claimed attempt was not returned'));
+    });
+  }
+
+  /**
+   * The store confirms the partner at its counter (9.4): the approved
+   * fallback for an arrival the position could not support. Only staff of the
+   * assignment's own store, only for a claimed arrival, never for an attempt
+   * that is not ASSIGNED.
+   */
+  async confirmPartnerArrival(input: {
+    readonly command_reference: string;
+    readonly context: RequestContext;
+    readonly delivery_assignment_id: UuidV7;
+    readonly vendor_location_id: UuidV7;
+    readonly expected_version: number;
+    readonly now?: Date;
+  }): Promise<DeliveryAssignmentRecord> {
+    const who = actor(input.context, ['vendor_staff']);
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const prior = await replay(client, {
+        command_reference: input.command_reference,
+        delivery_assignment_id: input.delivery_assignment_id,
+        event_type: 'AT_VENDOR',
+      });
+      if (prior) return prior;
+      const assignment = await lockAssignment(
+        client,
+        input.delivery_assignment_id,
+        input.expected_version,
+      );
+      if (assignment.vendor_location_id !== input.vendor_location_id) {
+        throw new AssignmentNotFoundError('Delivery assignment was not found');
+      }
+      const membership = await client.query(
+        `SELECT 1
+           FROM marketplace.role_assignments ra
+           JOIN marketplace.staff_memberships sm USING (role_assignment_id)
+          WHERE ra.user_id=$1 AND sm.vendor_location_id=$2 AND ra.state='ACTIVE'
+            AND ra.valid_from <= $3 AND (ra.valid_until IS NULL OR ra.valid_until > $3)
+          LIMIT 1`,
+        [who.id, assignment.vendor_location_id, now],
+      );
+      if (membership.rows.length === 0) {
+        throw new AssignmentAuthorizationError('Only the store’s own staff can confirm an arrival');
+      }
+      if (assignment.assignment_state !== 'ASSIGNED' || !assignment.arrival_claimed_at) {
+        throw new AssignmentConflictError('Only a claimed arrival can be confirmed');
+      }
+      await appendEvent(client, {
+        assignment,
+        command_reference: input.command_reference,
+        context: input.context,
+        event_type: 'AT_VENDOR',
+        next_custody_state: assignment.custody_state,
+        next_state: 'AT_VENDOR',
+        now,
+        reason_code: 'VENDOR_CONFIRMED_ARRIVAL',
+        who,
+      });
+      const result = await client.query<AssignmentRow>(
+        `UPDATE marketplace.delivery_assignments
+            SET assignment_state='AT_VENDOR', arrival_kind='VENDOR_CONFIRMED', arrived_at=$2,
+                arrival_claimed_at=NULL, arrival_claim_reason=NULL,
+                version=version+1, updated_at=$2
+          WHERE delivery_assignment_id=$1 RETURNING *`,
+        [assignment.delivery_assignment_id, now],
+      );
+      return assignmentRecord(requiredRow(result.rows, 'Confirmed attempt was not returned'));
+    });
   }
   async beginRoute(input: TransitionInput): Promise<DeliveryAssignmentRecord> {
     return this.#partnerTransition(input, 'PICKED_UP', 'EN_ROUTE_TO_CUSTOMER', 'EN_ROUTE');

@@ -47,6 +47,7 @@ export type {
   Storefront,
   SubstitutionPreference,
   PartnerAvailability,
+  DevicePosition,
   PartnerAttemptCompensation,
   PartnerEarningEntry,
   PartnerStatement,

@@ -61,6 +61,7 @@ export function StoreSettingsPanel({ vendorLocationId }: { readonly vendorLocati
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [landmark, setLandmark] = useState('');
   const [prepMinutes, setPrepMinutes] = useState('');
   const [minimum, setMinimum] = useState('');
   const [minimumError, setMinimumError] = useState<string | null>(null);
@@ -70,6 +71,7 @@ export function StoreSettingsPanel({ vendorLocationId }: { readonly vendorLocati
     setSettings(next);
     setName(displayName(next.location_name));
     setDescription(next.profile_description ?? '');
+    setLandmark(next.landmark ?? '');
     setPrepMinutes(
       next.preparation_seconds === null ? '' : String(Math.round(next.preparation_seconds / 60)),
     );
@@ -126,6 +128,7 @@ export function StoreSettingsPanel({ vendorLocationId }: { readonly vendorLocati
         expected_version: settings.version,
         location_name: `SYNTH ${name.trim()}`,
         profile_description: description.trim() || null,
+        landmark: landmark.trim() || null,
         minimum_order_minor: minimumMinor,
         ...(prepMinutes === '' ? {} : { preparation_seconds: prep * 60 }),
         // Every open day, so saving no longer deletes the rest of the week.
@@ -220,6 +223,15 @@ export function StoreSettingsPanel({ vendorLocationId }: { readonly vendorLocati
               Shown on your store page. Say what you are known for.
             </span>
           </label>
+          {/* 9.4: the written way to find the door, for the delivery partner
+              heading here. A map pin alone does not find a shop in a lane. */}
+          <Field
+            hint="For delivery partners finding you: “opposite the SBI ATM”, “inside Gaurav Tower, ground floor”."
+            label="Landmark"
+            maxLength={120}
+            onChange={(event) => setLandmark(event.target.value)}
+            value={landmark}
+          />
         </Card>
 
         <Card tone="sunken">

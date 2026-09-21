@@ -253,7 +253,7 @@ test('a safety report holds the job instead of asking the partner to carry on', 
     'the hold is decided by the server, not inferred on the client',
   );
   assert.ok(
-    source.includes('const step = blocked ? undefined : NEXT_STEP'),
+    source.includes('const step = blocked\n    ? undefined\n    :'),
     'no next step is offered while a safety report is open',
   );
   assert.ok(
@@ -341,5 +341,92 @@ test('an offer states when to be at the store and the waiting terms (9.3)', () =
   assert.equal(
     waitPolicySentence({ included_seconds: 300, per_completed_minute_minor: 100, cap_minor: 1000 }),
     'first 5 min waiting included, then ₹1.00/min up to ₹10.00',
+  );
+});
+
+test('the last server-confirmed job survives a reload and is labelled as such (9.4)', async () => {
+  const { rememberAssignments, recallAssignments, forgetAssignments, staleSentence } =
+    await import('./active-job-cache.js');
+  const store = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
+  };
+  const confirmedAt = Date.parse('2026-09-21T10:00:00.000Z');
+  rememberAssignments(storage, [{ delivery_assignment_id: 'a1', version: 3 }], confirmedAt);
+  assert.deepEqual(recallAssignments(storage), {
+    assignments: [{ delivery_assignment_id: 'a1', version: 3 }],
+    confirmed_at: confirmedAt,
+  });
+  assert.equal(
+    staleSentence(confirmedAt, confirmedAt + 7 * 60_000),
+    'Showing the job as the server last confirmed it, 7 minutes ago. Reconnect to take the next step.',
+  );
+  // A denied or broken store is never an error the partner sees.
+  assert.equal(recallAssignments(null), null);
+  store.set('partner.active-jobs.v1', '{not json');
+  assert.equal(recallAssignments(storage), null);
+  const throwing = {
+    getItem: () => {
+      throw new Error('denied');
+    },
+    setItem: () => {
+      throw new Error('denied');
+    },
+    removeItem: () => {
+      throw new Error('denied');
+    },
+  };
+  rememberAssignments(throwing, [], 0);
+  assert.equal(recallAssignments(throwing), null);
+  forgetAssignments(storage);
+  assert.equal(recallAssignments(storage), null);
+});
+
+test('the route to the store is written, not only mapped (9.4, DLP-46)', async () => {
+  const { directionSentence } = await import('./active-job-cache.js');
+  const store = { latitude: 26.91, longitude: 75.81 };
+  assert.equal(directionSentence(null, store), null);
+  assert.equal(
+    directionSentence({ latitude: 26.9101, longitude: 75.81 }, store),
+    'You are at the store',
+  );
+  // ~1.1 km due south of the store: the store is to the north.
+  assert.equal(
+    directionSentence({ latitude: 26.9, longitude: 75.81 }, store),
+    'About 1.1 km to the north',
+  );
+  // ~300 m west of the store: the store is to the east.
+  assert.equal(
+    directionSentence({ latitude: 26.91, longitude: 75.807 }, store),
+    'About 300 m to the east',
+  );
+});
+
+test('the store is shown in words with its landmark, and the arrival waits for the counter when the phone cannot vouch for it (9.4)', () => {
+  const source = panel('partner-workspace.tsx');
+  assert.ok(
+    source.includes('geo:${store.latitude},${store.longitude}'),
+    'the way to the store navigates to its point once the job is assigned',
+  );
+  assert.ok(
+    source.includes('Near {displayArea(store.landmark)}') &&
+      source.includes('directionSentence(lastFix, store)'),
+    'the landmark and a written direction stand beside the map',
+  );
+  assert.ok(
+    source.includes("if (action === 'arrive-vendor') {") &&
+      source.includes('const position = await devicePosition();'),
+    'an arrival carries the phone’s fix',
+  );
+  assert.ok(
+    source.includes("assignment.arrival_claim && assignment.assignment_state === 'ASSIGNED'"),
+    'a claimed arrival offers a retry with location, not the next step',
+  );
+  assert.ok(
+    source.includes('recallAssignments<Assignment>(') &&
+      source.includes('staleSentence(staleSince, now)'),
+    'the last server-confirmed job is shown, and said to be, when nothing fresher can be had',
   );
 });
