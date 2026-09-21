@@ -310,20 +310,55 @@ export class LocalNotificationService {
         ORDER BY event.occurred_at LIMIT $1`,
       [limit],
     );
+    // A decision's notice carries what the customer needs to answer it (8.4):
+    // the item as ordered, what the shop offers instead, the difference, the
+    // reason and the deadline -- and a change the shop applied under the
+    // customer's own rule (a lighter weight, a replacement at no extra cost)
+    // is told to them too. Until audit run 52 the notice said only
+    // "substitution proposed".
     const orderSignals = await this.#pool.query<{
       source_id: string;
       recipient_user_id: string;
       event_type: string;
       request_id: string;
       correlation_id: string;
+      detail: Record<string, unknown> | null;
     }>(
       `SELECT event.event_id source_id,grouping.customer_user_id recipient_user_id,event.event_type,
-              event.request_id,event.correlation_id
+              event.request_id,event.correlation_id,
+              CASE WHEN event.decision_id IS NULL THEN NULL ELSE (
+                SELECT jsonb_build_object(
+                  'decision_id', d.decision_id,
+                  'order_reference', orders.order_reference,
+                  'location_name', loc.location_name,
+                  'proposal_kind', d.proposal_kind,
+                  'ordered_title', l.product_title_snapshot,
+                  'ordered_quantity', l.quantity,
+                  'ordered_unit_price_minor', l.unit_price_minor,
+                  'offered_title', COALESCE(op.title, l.product_title_snapshot),
+                  'offered_quantity', d.proposed_quantity,
+                  'offered_unit_price_minor', d.proposed_unit_price_minor,
+                  'difference_minor', d.authorization_delta_minor,
+                  'reason_note', d.reason_note,
+                  'decision_deadline_at', d.decision_deadline_at)
+                  FROM marketplace.vendor_order_customer_decisions d
+                  JOIN marketplace.vendor_order_line_picks p ON p.pick_id = d.pick_id
+                  JOIN marketplace.vendor_order_lines l
+                    ON l.vendor_order_line_id = p.vendor_order_line_id
+                  JOIN marketplace.vendor_locations loc
+                    ON loc.vendor_location_id = orders.vendor_location_id
+                  LEFT JOIN marketplace.catalogue_product_variants ov
+                    ON ov.catalogue_variant_id = d.proposed_variant_id
+                  LEFT JOIN marketplace.catalogue_products op
+                    ON op.catalogue_product_id = ov.catalogue_product_id
+                 WHERE d.decision_id = event.decision_id) END AS detail
          FROM marketplace.vendor_order_events event
          JOIN marketplace.vendor_orders orders USING(vendor_order_id)
          JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
-        WHERE event.event_type IN ('ACCEPTED','DECLINED','TIMED_OUT','SUBSTITUTION_PROPOSED',
+        WHERE (event.event_type IN ('ACCEPTED','DECLINED','TIMED_OUT','SUBSTITUTION_PROPOSED',
           'WEIGHT_PROPOSED','READY','PICKED_UP','DELIVERED','RETURNED','SUPPORT_CASE_OPENED')
+          OR (event.event_type IN ('SUBSTITUTION_APPROVED','WEIGHT_APPROVED')
+              AND event.actor_kind='vendor_staff'))
           AND NOT EXISTS(SELECT 1 FROM marketplace.notification_intents intent
             WHERE intent.source_kind='vendor_order_event' AND intent.source_id=event.event_id)
         ORDER BY event.occurred_at LIMIT $1`,
@@ -344,7 +379,10 @@ export class LocalNotificationService {
         recipient_user_id: parseUuidV7(signal.recipient_user_id),
         notification_kind: sourceKind === 'vendor_order_event' ? 'ORDER_STATUS' : 'OPERATIONS',
         template_key: `${sourceKind}.${signal.event_type.toLowerCase()}`,
-        template_payload: { event: signal.event_type },
+        template_payload: {
+          event: signal.event_type,
+          ...(('detail' in signal && signal.detail) || {}),
+        },
         channels: ['IN_APP', 'PUSH'],
         source_kind: sourceKind,
         source_id: parseUuidV7(signal.source_id),

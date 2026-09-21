@@ -87,8 +87,8 @@ test('a delivered order settles, whoever delivered it', async () => {
   assert.deepEqual(calls, ['recordDeliveryEarnings']);
 });
 
-test('each answer to a placed order settles the group authorization', async () => {
-  for (const type of ['vendor_order.accepted', 'vendor_order.ended']) {
+test('each answer to a placed order, and each ready, settles the group authorization', async () => {
+  for (const type of ['vendor_order.accepted', 'vendor_order.ready', 'vendor_order.ended']) {
     const { calls, deps } = dependencies();
     await handleDomainEvent(deps, context, event(type));
     assert.deepEqual(calls, ['settleAuthorizationForOrder'], type);

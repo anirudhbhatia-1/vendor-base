@@ -148,11 +148,14 @@ export async function handleDomainEvent(
     });
   } else if (
     event.event_type === 'vendor_order.accepted' ||
+    event.event_type === 'vendor_order.ready' ||
     event.event_type === 'vendor_order.ended'
   ) {
     // Every shop in a checkout group shares one authorization, so the
     // decision to capture or void can only be taken once they have all
-    // answered. This runs on each answer and returns WAITING until then.
+    // answered and packed (8.4: an approved change or a missing line moves
+    // the amount until ready). This runs on each answer and each ready and
+    // returns WAITING until then.
     const outcome = await deps.orderMoney.settleAuthorizationForOrder({
       context,
       vendor_order_id: event.aggregate_id,

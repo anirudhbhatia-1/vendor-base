@@ -1,5 +1,6 @@
 import { errorMessageFor } from '@neighbourhood-store/domain-types';
 import type {
+  CustomerDecision,
   DeclineImpact,
   Address,
   AssignmentTransition,
@@ -582,19 +583,7 @@ export function createApiClient(options: ApiClientOptions) {
     },
 
     decisions: {
-      pending: () =>
-        r<{
-          decisions: {
-            decision_id: string;
-            vendor_order_id: string;
-            proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
-            proposed_quantity: number;
-            proposed_unit_price_minor: number;
-            authorization_delta_minor: number;
-            reason_note: string;
-            decision_deadline_at: string;
-          }[];
-        }>('/customer/decisions/pending'),
+      pending: () => r<{ decisions: CustomerDecision[] }>('/customer/decisions/pending'),
 
       answer: (decisionId: string, answer: 'APPROVED' | 'REJECTED') =>
         r<Record<string, unknown>>(`/customer/decisions/${decisionId}/answer`, {

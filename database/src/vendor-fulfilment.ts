@@ -17,6 +17,7 @@ import {
 } from './inventory-reservations.js';
 import { completeVendorOrder, publishVendorOrderTransition } from './vendor-order-completion.js';
 import { transaction as tx } from './transaction.js';
+import { resolveConfiguration } from './versioned-configuration.js';
 
 export class FulfilmentInputError extends Error {}
 export class FulfilmentNotFoundError extends Error {}
@@ -539,14 +540,16 @@ async function appendEvent(
     readonly resulting_state: VendorOrderState | null;
     readonly reason_code: string;
     readonly note?: string | null;
+    /** The customer decision this event is about, so a notice can carry it. */
+    readonly decision_id?: UuidV7 | null;
     readonly ids: Ids;
   },
 ): Promise<void> {
   await client.query(
     `INSERT INTO marketplace.vendor_order_events
        (event_id, vendor_order_id, event_type, actor_id, actor_kind, previous_state,
-        resulting_state, reason_code, note, request_id, correlation_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        resulting_state, reason_code, note, request_id, correlation_id, decision_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [
       createUuidV7(),
       input.vendor_order_id,
@@ -559,6 +562,118 @@ async function appendEvent(
       input.note ?? null,
       input.ids.request,
       input.ids.correlation,
+      input.decision_id ?? null,
+    ],
+  );
+}
+
+/**
+ * Moves the customer's authorisation by `delta_minor` for one order, before
+ * capture, and records why (8.4). Positive for an approved dearer replacement
+ * or heavier weight; negative for a lighter weight, a replacement under the
+ * customer's own rule, or the lines that are not in the bag at ready. The
+ * allocation moves by the same amount so capture and the vendor's settlement
+ * read the final figure. Refuses when the payment is no longer authorised or
+ * the result would be nothing at all: an order with nothing to charge is an
+ * ending, not an adjustment.
+ */
+async function adjustAuthorizationForOrder(
+  client: PoolClient,
+  input: {
+    readonly vendor_order_id: UuidV7;
+    readonly delta_minor: number;
+    readonly adjustment_kind: 'CUSTOMER_DECISION' | 'LINES_NOT_SUPPLIED';
+    readonly decision_id: UuidV7 | null;
+    readonly actor_id: UuidV7;
+    readonly actor_kind: string;
+    readonly reason_code: string;
+    readonly ids: Ids;
+    readonly now: Date;
+  },
+): Promise<void> {
+  if (input.delta_minor === 0) return;
+  const payment = await client.query<{
+    payment_transaction_id: string;
+    payment_state: string;
+    amount_minor: string;
+    source_order_reference: string;
+    version: number;
+  }>(
+    `SELECT payment.payment_transaction_id,payment.payment_state,payment.amount_minor::text,
+            orders.order_reference source_order_reference,payment.version
+       FROM marketplace.vendor_orders orders
+       JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
+       JOIN marketplace.payment_transactions payment USING(payment_transaction_id)
+      WHERE orders.vendor_order_id=$1 FOR UPDATE OF payment`,
+    [input.vendor_order_id],
+  );
+  const transaction = payment.rows[0];
+  if (!transaction || transaction.payment_state !== 'AUTHORIZED') {
+    throw new FulfilmentConflictError(
+      'A price adjustment requires an authorized, uncaptured payment',
+    );
+  }
+  const previous = Number(transaction.amount_minor);
+  const resulting = previous + input.delta_minor;
+  if (!Number.isSafeInteger(resulting) || resulting <= 0) {
+    throw new FulfilmentConflictError('The price adjustment is outside payment bounds');
+  }
+  const reference =
+    input.decision_id === null
+      ? `SYNTH-PAY-LINES-${String(input.vendor_order_id).toUpperCase()}`
+      : `SYNTH-PAY-ADJUST-${String(input.decision_id).toUpperCase()}`;
+  const inserted = await client.query(
+    `INSERT INTO marketplace.payment_authorization_adjustments
+      (payment_authorization_adjustment_id,decision_id,payment_transaction_id,vendor_order_id,
+       delta_minor,previous_authorized_minor,resulting_authorized_minor,provider_scenario,
+       provider_reference,adjustment_kind,request_id,correlation_id,created_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,'SUCCESS',$8,$9,$10,$11,$12)
+     ON CONFLICT DO NOTHING`,
+    [
+      createUuidV7({ now_ms: input.now.getTime() }),
+      input.decision_id,
+      transaction.payment_transaction_id,
+      input.vendor_order_id,
+      input.delta_minor,
+      previous,
+      resulting,
+      reference,
+      input.adjustment_kind,
+      input.ids.request,
+      input.ids.correlation,
+      input.now,
+    ],
+  );
+  // A replay finds its adjustment already recorded and moves nothing twice.
+  if (inserted.rowCount === 0) return;
+  await client.query(
+    `UPDATE marketplace.payment_allocations SET item_minor=item_minor+$3
+      WHERE payment_transaction_id=$1 AND source_order_reference=$2`,
+    [transaction.payment_transaction_id, transaction.source_order_reference, input.delta_minor],
+  );
+  await client.query(
+    `UPDATE marketplace.payment_transactions SET amount_minor=$2,version=version+1,updated_at=$3
+      WHERE payment_transaction_id=$1`,
+    [transaction.payment_transaction_id, resulting, input.now],
+  );
+  await client.query(
+    `INSERT INTO marketplace.payment_events
+      (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,
+       resulting_state,provider_result,command_reference,actor_id,actor_kind,reason_code,
+       request_id,correlation_id,occurred_at)
+     VALUES($1,$2,$3,'AUTHORIZATION_ADJUSTED','AUTHORIZED','AUTHORIZED',
+       'SYNTHETIC_ADJUSTMENT',$4,$5,$6,$7,$8,$9,$10)`,
+    [
+      createUuidV7({ now_ms: input.now.getTime() + 1 }),
+      transaction.payment_transaction_id,
+      transaction.version + 1,
+      reference.replace('SYNTH-PAY-', 'SYNTH-CMD-'),
+      input.actor_id,
+      input.actor_kind,
+      input.reason_code,
+      input.ids.request,
+      input.ids.correlation,
+      input.now,
     ],
   );
 }
@@ -822,6 +937,110 @@ function projectPick(row: Record<string, unknown>): PickRecord {
   });
 }
 
+/** A decision as the customer reads it: the old item, the new one, the money. */
+export interface CustomerDecision {
+  readonly decision_id: UuidV7;
+  readonly vendor_order_id: UuidV7;
+  readonly order_reference: string;
+  readonly location_name: string;
+  readonly proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
+  readonly ordered: {
+    readonly product_title: string;
+    readonly variant_title: string;
+    readonly quantity: number;
+    readonly unit_price_minor: number;
+    readonly total_minor: number;
+  };
+  readonly offered: {
+    readonly product_title: string;
+    readonly variant_title: string;
+    readonly quantity: number;
+    readonly unit_price_minor: number;
+    readonly total_minor: number;
+  };
+  /** Offered total minus ordered total; what approval adds to the authorisation. */
+  readonly difference_minor: number;
+  readonly reason_note: string;
+  readonly decision_deadline_at: string;
+  readonly answer: DecisionAnswer;
+  readonly answered_at: string | null;
+}
+
+interface CustomerDecisionRow {
+  decision_id: string;
+  vendor_order_id: string;
+  order_reference: string;
+  location_name: string;
+  proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
+  ordered_product_title: string;
+  ordered_variant_title: string;
+  ordered_quantity: number;
+  ordered_unit_price_minor: string;
+  offered_product_title: string | null;
+  offered_variant_title: string | null;
+  proposed_quantity: number;
+  proposed_unit_price_minor: string;
+  authorization_delta_minor: string;
+  reason_note: string;
+  decision_deadline_at: Date;
+  answer: DecisionAnswer;
+  answered_at: Date | null;
+}
+
+const CUSTOMER_DECISION_SELECT = `
+  SELECT d.decision_id, d.vendor_order_id, vo.order_reference, loc.location_name,
+         d.proposal_kind,
+         l.product_title_snapshot AS ordered_product_title,
+         l.variant_title_snapshot AS ordered_variant_title,
+         l.quantity AS ordered_quantity, l.unit_price_minor::text AS ordered_unit_price_minor,
+         offered_product.title AS offered_product_title,
+         offered_variant.variant_title AS offered_variant_title,
+         d.proposed_quantity, d.proposed_unit_price_minor::text AS proposed_unit_price_minor,
+         d.authorization_delta_minor::text AS authorization_delta_minor, d.reason_note,
+         d.decision_deadline_at, d.answer, d.answered_at
+    FROM marketplace.vendor_order_customer_decisions d
+    JOIN marketplace.vendor_orders vo ON vo.vendor_order_id = d.vendor_order_id
+    JOIN marketplace.vendor_locations loc ON loc.vendor_location_id = vo.vendor_location_id
+    JOIN marketplace.checkout_groups cg ON cg.checkout_group_id = vo.checkout_group_id
+    JOIN marketplace.vendor_order_line_picks p ON p.pick_id = d.pick_id
+    JOIN marketplace.vendor_order_lines l ON l.vendor_order_line_id = p.vendor_order_line_id
+    LEFT JOIN marketplace.catalogue_product_variants offered_variant
+      ON offered_variant.catalogue_variant_id = d.proposed_variant_id
+    LEFT JOIN marketplace.catalogue_products offered_product
+      ON offered_product.catalogue_product_id = offered_variant.catalogue_product_id`;
+
+function projectCustomerDecision(row: CustomerDecisionRow): CustomerDecision {
+  const orderedUnit = Number(row.ordered_unit_price_minor);
+  const offeredUnit = Number(row.proposed_unit_price_minor);
+  return Object.freeze({
+    decision_id: parseUuidV7(row.decision_id),
+    vendor_order_id: parseUuidV7(row.vendor_order_id),
+    order_reference: row.order_reference,
+    location_name: row.location_name,
+    proposal_kind: row.proposal_kind,
+    ordered: Object.freeze({
+      product_title: row.ordered_product_title,
+      variant_title: row.ordered_variant_title,
+      quantity: row.ordered_quantity,
+      unit_price_minor: orderedUnit,
+      total_minor: orderedUnit * row.ordered_quantity,
+    }),
+    offered: Object.freeze({
+      // A weight is the same item, weighed; a replacement is another one.
+      product_title: row.offered_product_title ?? row.ordered_product_title,
+      variant_title: row.offered_variant_title ?? row.ordered_variant_title,
+      quantity: row.proposed_quantity,
+      unit_price_minor: offeredUnit,
+      total_minor: offeredUnit * row.proposed_quantity,
+    }),
+    difference_minor: Number(row.authorization_delta_minor),
+    reason_note: row.reason_note,
+    decision_deadline_at: row.decision_deadline_at.toISOString(),
+    answer: row.answer,
+    answered_at: row.answered_at?.toISOString() ?? null,
+  });
+}
+
 function projectDecision(row: Record<string, unknown>): DecisionRecord {
   return Object.freeze({
     decision_id: parseUuidV7(row['decision_id'] as string),
@@ -869,62 +1088,26 @@ export class VendorFulfilmentService {
   }
 
   /**
-   * List customer-substitution decisions the caller (a customer) still owes an
-   * answer on. Powers the customer PWA "pending decisions" list so the
-   * customer no longer has to paste a decision id by hand.
+   * The decisions the caller (a customer) still owes an answer on, with what
+   * they need to answer (8.4): the item as ordered and what the shop offers
+   * instead -- titles, quantities, prices -- the difference, the reason, the
+   * deadline and the store. Until audit run 52 the list carried the proposed
+   * quantity and price alone, so the customer was asked to approve
+   * "a replacement item" without being told which item, or for what.
    */
-  async listPendingCustomerDecisions(input: { readonly context: RequestContext }): Promise<
-    readonly {
-      readonly decision_id: UuidV7;
-      readonly vendor_order_id: UuidV7;
-      readonly proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
-      readonly proposed_quantity: number;
-      readonly proposed_unit_price_minor: number;
-      readonly authorization_delta_minor: number;
-      readonly reason_note: string;
-      readonly decision_deadline_at: string;
-    }[]
-  > {
+  async listPendingCustomerDecisions(input: {
+    readonly context: RequestContext;
+  }): Promise<readonly CustomerDecision[]> {
     const actor = input.context.actor;
     if (!actor || actor.actor_kind !== 'customer') return [];
-    const rows = await this.#pool.query<{
-      decision_id: string;
-      vendor_order_id: string;
-      proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
-      proposed_quantity: number;
-      proposed_unit_price_minor: string;
-      authorization_delta_minor: string;
-      reason_note: string;
-      decision_deadline_at: Date;
-    }>(
-      // The customer is on the checkout group, not the vendor order. This read
-      // named `vo.customer_user_id`, which does not exist, so every call was a
-      // 500 -- the customer app polls it on each orders page, and no
-      // substitution or weight proposal ever reached a customer through it.
-      // Nothing in the ladder called it.
-      `SELECT d.decision_id, d.vendor_order_id, d.proposal_kind, d.proposed_quantity,
-              d.proposed_unit_price_minor, d.authorization_delta_minor, d.reason_note,
-              d.decision_deadline_at
-         FROM marketplace.vendor_order_customer_decisions d
-         JOIN marketplace.vendor_orders vo ON vo.vendor_order_id = d.vendor_order_id
-         JOIN marketplace.checkout_groups cg ON cg.checkout_group_id = vo.checkout_group_id
+    const rows = await this.#pool.query<CustomerDecisionRow>(
+      `${CUSTOMER_DECISION_SELECT}
         WHERE d.answer = 'PENDING' AND cg.customer_user_id = $1
         ORDER BY d.decision_deadline_at ASC
         LIMIT 25`,
       [parseUuidV7(actor.actor_id)],
     );
-    return rows.rows.map((row) =>
-      Object.freeze({
-        decision_id: parseUuidV7(row.decision_id),
-        vendor_order_id: parseUuidV7(row.vendor_order_id),
-        proposal_kind: row.proposal_kind,
-        proposed_quantity: row.proposed_quantity,
-        proposed_unit_price_minor: Number(row.proposed_unit_price_minor),
-        authorization_delta_minor: Number(row.authorization_delta_minor),
-        reason_note: row.reason_note,
-        decision_deadline_at: row.decision_deadline_at.toISOString(),
-      }),
-    );
+    return rows.rows.map(projectCustomerDecision);
   }
 
   // -----------------------------------------------------------------------
@@ -1386,7 +1569,8 @@ export class VendorFulfilmentService {
   }): Promise<{ readonly pick: PickRecord; readonly decision: DecisionRecord }> {
     if (input.reason_note.length < 1 || input.reason_note.length > 240)
       throw new FulfilmentInputError('Reason note must be between 1 and 240 characters');
-    const deadlineSeconds = input.decision_deadline_seconds ?? DEFAULT_DECISION_DEADLINE_SECONDS;
+    const deadlineSeconds =
+      input.decision_deadline_seconds ?? (await this.decisionDeadlineSeconds(input.now));
     if (deadlineSeconds < 60 || deadlineSeconds > 3600)
       throw new FulfilmentInputError('Decision deadline must be between 60s and 60 minutes');
     return this.#recordPickAndProposal({
@@ -1415,7 +1599,8 @@ export class VendorFulfilmentService {
   }): Promise<{ readonly pick: PickRecord; readonly decision: DecisionRecord }> {
     if (input.reason_note.length < 1 || input.reason_note.length > 240)
       throw new FulfilmentInputError('Reason note must be between 1 and 240 characters');
-    const deadlineSeconds = input.decision_deadline_seconds ?? DEFAULT_DECISION_DEADLINE_SECONDS;
+    const deadlineSeconds =
+      input.decision_deadline_seconds ?? (await this.decisionDeadlineSeconds(input.now));
     if (deadlineSeconds < 60 || deadlineSeconds > 3600)
       throw new FulfilmentInputError('Decision deadline must be between 60s and 60 minutes');
     return this.#recordPickAndProposal({
@@ -1433,6 +1618,23 @@ export class VendorFulfilmentService {
   // -----------------------------------------------------------------------
   // 8.4 -- customer decision
   // -----------------------------------------------------------------------
+
+  /**
+   * How long the customer has to answer: `customer.decision_seconds`
+   * (implementation.md 6.1, a SETTING resolved at the proposal), 60-3600, or
+   * the default. Until audit run 52 the default was the only value.
+   */
+  async decisionDeadlineSeconds(at?: Date): Promise<number> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: 'customer.decision_seconds',
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value;
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 60 && value <= 3600
+      ? value
+      : DEFAULT_DECISION_DEADLINE_SECONDS;
+  }
 
   async answerDecision(input: {
     readonly context: RequestContext;
@@ -1513,82 +1715,18 @@ export class VendorFulfilmentService {
           now,
         ],
       );
-      if (input.answer === 'APPROVED' && Number(row.authorization_delta_minor) !== 0) {
-        const payment = await client.query<{
-          payment_transaction_id: string;
-          payment_state: string;
-          amount_minor: string;
-          source_order_reference: string;
-          version: number;
-        }>(
-          `SELECT payment.payment_transaction_id,payment.payment_state,payment.amount_minor::text,
-                  orders.order_reference source_order_reference,payment.version
-             FROM marketplace.vendor_orders orders
-             JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
-             JOIN marketplace.payment_transactions payment USING(payment_transaction_id)
-            WHERE orders.vendor_order_id=$1 FOR UPDATE OF payment`,
-          [row.vendor_order_id],
-        );
-        const transaction = payment.rows[0];
-        if (!transaction || transaction.payment_state !== 'AUTHORIZED') {
-          throw new FulfilmentConflictError(
-            'Approved price adjustment requires an authorized, uncaptured payment',
-          );
-        }
-        const previous = Number(transaction.amount_minor);
-        const delta = Number(row.authorization_delta_minor);
-        const resulting = previous + delta;
-        if (!Number.isSafeInteger(resulting) || resulting <= 0) {
-          throw new FulfilmentConflictError('Approved price adjustment is outside payment bounds');
-        }
-        await client.query(
-          `INSERT INTO marketplace.payment_authorization_adjustments
-            (payment_authorization_adjustment_id,decision_id,payment_transaction_id,vendor_order_id,
-             delta_minor,previous_authorized_minor,resulting_authorized_minor,provider_scenario,
-             provider_reference,request_id,correlation_id,created_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,'SUCCESS',$8,$9,$10,$11)`,
-          [
-            createUuidV7({ now_ms: now.getTime() }),
-            input.decision_id,
-            transaction.payment_transaction_id,
-            row.vendor_order_id,
-            delta,
-            previous,
-            resulting,
-            `SYNTH-PAY-ADJUST-${input.decision_id.toUpperCase()}`,
-            ids.request,
-            ids.correlation,
-            now,
-          ],
-        );
-        await client.query(
-          `UPDATE marketplace.payment_allocations SET item_minor=item_minor+$3
-            WHERE payment_transaction_id=$1 AND source_order_reference=$2`,
-          [transaction.payment_transaction_id, transaction.source_order_reference, delta],
-        );
-        await client.query(
-          `UPDATE marketplace.payment_transactions SET amount_minor=$2,version=version+1,updated_at=$3
-            WHERE payment_transaction_id=$1`,
-          [transaction.payment_transaction_id, resulting, now],
-        );
-        await client.query(
-          `INSERT INTO marketplace.payment_events
-            (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,
-             resulting_state,provider_result,command_reference,actor_id,actor_kind,reason_code,
-             request_id,correlation_id,occurred_at)
-           VALUES($1,$2,$3,'AUTHORIZATION_ADJUSTED','AUTHORIZED','AUTHORIZED',
-             'SYNTHETIC_ADJUSTMENT',$4,$5,'customer','CUSTOMER_DECISION_ADJUSTED',$6,$7,$8)`,
-          [
-            createUuidV7({ now_ms: now.getTime() + 1 }),
-            transaction.payment_transaction_id,
-            transaction.version + 1,
-            `SYNTH-CMD-DECISION-${input.decision_id.toUpperCase()}`,
-            customerId,
-            ids.request,
-            ids.correlation,
-            now,
-          ],
-        );
+      if (input.answer === 'APPROVED') {
+        await adjustAuthorizationForOrder(client, {
+          vendor_order_id: parseUuidV7(row.vendor_order_id),
+          delta_minor: Number(row.authorization_delta_minor),
+          adjustment_kind: 'CUSTOMER_DECISION',
+          decision_id: input.decision_id,
+          actor_id: customerId,
+          actor_kind: 'customer',
+          reason_code: 'CUSTOMER_DECISION_ADJUSTED',
+          ids,
+          now,
+        });
       }
       await appendEvent(client, {
         vendor_order_id: parseUuidV7(row.vendor_order_id),
@@ -1605,6 +1743,7 @@ export class VendorFulfilmentService {
         previous_state: null,
         resulting_state: null,
         reason_code: input.answer === 'APPROVED' ? 'CUSTOMER_APPROVED' : 'CUSTOMER_REJECTED',
+        decision_id: input.decision_id,
         ids,
       });
       return projectDecision(updated.rows[0] as Record<string, unknown>);
@@ -1661,6 +1800,7 @@ export class VendorFulfilmentService {
           previous_state: null,
           resulting_state: null,
           reason_code: 'DECISION_DEADLINE_TIMEOUT',
+          decision_id: parseUuidV7(row.decision_id),
           ids,
         });
         timedOut.push(parseUuidV7(row.decision_id));
@@ -1749,6 +1889,53 @@ export class VendorFulfilmentService {
       });
       const version = order.version + 1;
       const ids = contextIds(input.context);
+      // The capture plan (implementation.md 6.2.4): what the bag holds is what
+      // the customer pays for. Each line's ordered total less what is in the
+      // bag -- nothing for a missing or refused line, fewer units for a short
+      // one; an approved change already moved its own delta -- comes off the
+      // authorisation in one recorded adjustment. A bag with nothing in it is
+      // not "ready"; that order has to be ended, not packed. Until audit run
+      // 52 the full order was captured whatever the picks said.
+      const supplied = await client.query<{
+        ordered_minor: string;
+        supplied_minor: string;
+        lines: string;
+        in_bag: string;
+      }>(
+        `SELECT sum(l.line_total_minor)::text AS ordered_minor,
+                sum(CASE
+                      WHEN p.pick_state = 'FOUND'
+                        THEN COALESCE(p.actual_quantity, l.quantity) * l.unit_price_minor
+                      WHEN p.pick_state IN ('SUBSTITUTION_APPROVED','WEIGHT_APPROVED')
+                        THEN l.line_total_minor
+                      ELSE 0 END)::text AS supplied_minor,
+                count(*)::text AS lines,
+                count(*) FILTER (WHERE p.pick_state IN
+                  ('FOUND','SUBSTITUTION_APPROVED','WEIGHT_APPROVED'))::text AS in_bag
+           FROM marketplace.vendor_order_lines l
+           JOIN marketplace.vendor_order_line_picks p USING (vendor_order_line_id)
+          WHERE l.vendor_order_id=$1`,
+        [input.vendor_order_id],
+      );
+      const bag = supplied.rows[0];
+      if (bag && Number(bag.lines) > 0 && Number(bag.in_bag) === 0)
+        throw new FulfilmentConflictError(
+          'Nothing is in the bag: an order with every line missing cannot be ready',
+        );
+      const shortfall = bag ? Number(bag.ordered_minor) - Number(bag.supplied_minor) : 0;
+      if (shortfall > 0) {
+        await adjustAuthorizationForOrder(client, {
+          vendor_order_id: input.vendor_order_id,
+          delta_minor: -shortfall,
+          adjustment_kind: 'LINES_NOT_SUPPLIED',
+          decision_id: null,
+          actor_id: userId,
+          actor_kind: 'vendor_staff',
+          reason_code: 'LINES_NOT_SUPPLIED',
+          ids,
+          now,
+        });
+      }
       await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='READY', ready_at=$2, package_count=$3,
@@ -1773,6 +1960,17 @@ export class VendorFulfilmentService {
         resulting_state: 'READY',
         reason_code: 'ORDER_READY',
         ids,
+      });
+      // The bag is final: the group's authorisation may now be settled once
+      // every sibling is as far along (the worker decides).
+      await publishVendorOrderTransition(client, {
+        context: input.context,
+        event_type: 'vendor_order.ready',
+        now,
+        reason_code: 'ORDER_READY',
+        source: 'vendor_fulfilment',
+        to_state: 'READY',
+        vendor_order_id: input.vendor_order_id,
       });
       return orderSummary(client, input.vendor_order_id);
     });
@@ -3556,6 +3754,20 @@ export class VendorFulfilmentService {
       const originalTotal = lineRow.unit_price_minor * lineRow.quantity;
       const proposedTotal = input.proposed_unit_price_minor * input.proposed_quantity;
       const delta = proposedTotal - originalTotal;
+      // Only a material change is a question for the customer (8.4): a total
+      // that rises. A lighter weight is recorded and the difference is not
+      // charged; a replacement at no extra cost on a line whose rule lets the
+      // store choose is applied under that rule. Until audit run 52 every
+      // weight and every replacement waited on the customer.
+      const appliedUnderRule =
+        delta <= 0 &&
+        (input.proposal_kind === 'WEIGHT' ||
+          lineRow.substitution_preference === 'ALLOW_SAME_STORE');
+      const pickState: PickState = appliedUnderRule
+        ? input.proposal_kind === 'SUBSTITUTION'
+          ? 'SUBSTITUTION_APPROVED'
+          : 'WEIGHT_APPROVED'
+        : input.pick_state;
       const pickId = createUuidV7({ now_ms: now.getTime() });
       const upserted = await client.query(
         `INSERT INTO marketplace.vendor_order_line_picks
@@ -3576,7 +3788,7 @@ export class VendorFulfilmentService {
           pickId,
           input.vendor_order_line_id,
           input.vendor_order_id,
-          input.pick_state,
+          pickState,
           input.proposed_quantity,
           input.proposed_unit_price_minor,
           input.substitution_variant_id,
@@ -3587,12 +3799,14 @@ export class VendorFulfilmentService {
       const pick = projectPick(upserted.rows[0] as Record<string, unknown>);
       const decisionId = createUuidV7({ now_ms: now.getTime() });
       const deadline = new Date(now.getTime() + input.decision_deadline_seconds * 1000);
+      // The record of the change is a decision row either way: answered by the
+      // customer's rule, or waiting on the customer.
       const inserted = await client.query(
         `INSERT INTO marketplace.vendor_order_customer_decisions
            (decision_id, vendor_order_id, pick_id, proposal_kind, proposed_variant_id,
             proposed_quantity, proposed_unit_price_minor, authorization_delta_minor,
-            reason_note, decision_deadline_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            reason_note, decision_deadline_at, answer, answered_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING decision_id, vendor_order_id, pick_id, proposal_kind, proposed_variant_id,
                    proposed_quantity, proposed_unit_price_minor::text AS proposed_unit_price_minor,
                    authorization_delta_minor::text AS authorization_delta_minor, reason_note,
@@ -3608,17 +3822,40 @@ export class VendorFulfilmentService {
           delta,
           input.reason_note,
           deadline,
+          appliedUnderRule ? 'APPROVED' : 'PENDING',
+          appliedUnderRule ? now : null,
         ],
       );
       const ids = contextIds(input.context);
+      if (appliedUnderRule) {
+        await adjustAuthorizationForOrder(client, {
+          vendor_order_id: input.vendor_order_id,
+          delta_minor: delta,
+          adjustment_kind: 'CUSTOMER_DECISION',
+          decision_id: decisionId,
+          actor_id: userId,
+          actor_kind: 'vendor_staff',
+          reason_code:
+            input.proposal_kind === 'SUBSTITUTION'
+              ? 'CUSTOMER_RULE_ALLOW_SAME_STORE'
+              : 'LIGHTER_WEIGHT_RECORDED',
+          ids,
+          now,
+        });
+      }
       await appendEvent(client, {
         vendor_order_id: input.vendor_order_id,
-        event_type: input.event_type,
+        event_type: appliedUnderRule ? pickState : input.event_type,
         actor_id: userId,
         actor_kind: 'vendor_staff',
         previous_state: null,
         resulting_state: null,
-        reason_code: input.reason_code,
+        reason_code: appliedUnderRule
+          ? input.proposal_kind === 'SUBSTITUTION'
+            ? 'CUSTOMER_RULE_ALLOW_SAME_STORE'
+            : 'LIGHTER_WEIGHT_RECORDED'
+          : input.reason_code,
+        decision_id: decisionId,
         ids,
       });
       return {

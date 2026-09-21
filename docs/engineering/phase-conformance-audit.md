@@ -1736,6 +1736,46 @@ Five requirements. One held (unresolved lines cannot reach ready, with its own c
 
 **Step 8.3: VERIFIED_LOCAL**, with the forward findings carried to 8.4–8.6.
 
+## Run 52 (21 September 2026) — step 8.4, customer decision requests
+
+Five requirements. One held (approve/reject once, with ownership and the deadline; walked since run 41), one held in its mechanism but not its inputs (the timeout), and three did not: every weight and every replacement was a question, the question said nothing about what it was, and the money behind it was captured before the question could be asked. Migration 0096; sixteen connected assertions; nine mutation probes, all caught. The run 51 forward findings on weight and `ALLOW_SAME_STORE` are closed here; the money one (capture not reduced for a missing line) too.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Substitution or *material* weight/price proposal | **Not material.** A lighter weight and a replacement at no extra cost on a line whose rule lets the store choose both waited on the customer — P52-01. |
+| 2 | Notify with old/new item, quantity, amount, reason, deadline | **Absent.** The pending list carried the proposed quantity and price alone; the notice carried the event type alone. The customer was asked to approve "A replacement item — 1 × ₹180" — P52-02. |
+| 3 | Accept approve/reject once | Met: row lock, ownership, `PENDING` only, deadline (runs 41–51). |
+| 4 | Apply configured timeout behaviour | The behaviour (reject) held; the deadline was the constant, never `customer.decision_seconds` (implementation.md 6.1) — P52-03. |
+| 5 | Update authorization/capture or a transparent refund/adjustment path | **Broken in production.** The group was captured the moment every shop had accepted, so every approved dearer change after that was refused for want of an uncaptured payment, and a missing or refused line was captured in full with no adjustment path at all — P52-04. |
+
+**P52-01 — what is a question.** `#recordPickAndProposal` computes the delta first: a total that does not rise is not a question. A lighter weight is recorded as `WEIGHT_APPROVED`; a replacement at no extra cost on an `ALLOW_SAME_STORE` line as `SUBSTITUTION_APPROVED` under that rule. Both are recorded as decisions answered `APPROVED` at once, the difference comes off the authorisation, the event says why (`LIGHTER_WEIGHT_RECORDED`, `CUSTOMER_RULE_ALLOW_SAME_STORE`), and the customer is told (the sync now carries shop-made `SUBSTITUTION_APPROVED` / `WEIGHT_APPROVED`; the inbox has the sentences). A dearer replacement on the same rule, or any dearer weight, still asks.
+
+**P52-02 — what the question is about.** `CustomerDecision` (`listPendingCustomerDecisions`, the contract, the card): the item as ordered and the item offered with titles, quantities, prices and totals, the difference, the reason, the deadline, the store and the order. The event carries its `decision_id` (0096), so `syncDomainSignals` builds the notice's payload from the history — `ordered_title … decision_deadline_at` — and the inbox sentence names the change ("Product A (1) → Product B (1), +₹30").
+
+**P52-03 — the configured deadline.** `decisionDeadlineSeconds` resolves `customer.decision_seconds` (SETTING, 60–3600) for every proposal that does not name its own; the walk activates 120 and reads it back on the deadline.
+
+**P52-04 — the capture that came too soon.** `settleAuthorizationForOrder` waited only for no order to be `PLACED`; the worker ran it on every acceptance. `answerDecision`'s adjustment requires an `AUTHORIZED` payment, so in the running system every approved dearer replacement was a 409 (the ladder never ran the worker, so it never saw it). The orchestrator now waits while any order is `PLACED`, `ACCEPTED`, `PICKING` or awaiting a decision; `markReady` publishes `vendor_order.ready`, which the worker settles on beside `accepted` and `ended`. The adjustment itself is one routine, `adjustAuthorizationForOrder` (payment and allocation by the delta, one append-only adjustment, replay-safe), used by the customer's approval, the rule-applied changes, and — new — `markReady`, which takes what is not in the bag (a missing line, a refused proposal, a short found line; an approved change already moved its own delta) off the authorisation in one `LINES_NOT_SUPPLIED` adjustment (0096; implementation.md 6.2.4's capture plan). An order with nothing in the bag is refused ready: that is an ending, not a package.
+
+**Mutation results.** Nine probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Every proposal asks (old) | *A cheaper replacement under the customer's own rule was not applied (PENDING, PROPOSED_SUBSTITUTION)* |
+| `ALLOW_SAME_STORE` applies a dearer replacement too | *A dearer replacement was applied without asking (APPROVED)* |
+| Settled once no order is PLACED (old) | *The group authorization was settled as CAPTURED while an order was still being packed* |
+| No shortfall at ready (old) | *Ready did not take the lines not in the bag off the authorisation ([{"amount":"88500","item":"87000","adjustments":null}])* |
+| Empty bag allowed ready | *An order with every line missing was marked ready* |
+| Configured deadline ignored (old) | *… not put to the customer with the configured deadline (PENDING, …:41Z)* |
+| Offered title always the ordered one | *The customer is not told what they are deciding on* |
+| Notice payload without the detail (old) | *The customer's notice does not carry the old item, the new one, the amount and the deadline ({"event":"SUBSTITUTION_PROPOSED"})* |
+| Event without its decision id | same |
+
+**Forward findings.** (8.5) The vendor console's decision tracking shows pick states; a rule-applied change reads as "approved" with nothing saying the customer was not asked. (8.6/8.7) The customer's receipt lists refunds after capture but not the pre-capture adjustments; `payment_authorization_adjustments` per order should appear on it, or the total shown should be the allocation. (8.4/8.5, carried) An approved replacement reserves no stock for the replacement variant; a short found line keeps its whole reservation. (8.5) There is no vendor cancellation after acceptance: an order the shop cannot fill at all after accepting has only the customer's cancellation or support.
+
+**Verification.** `pnpm db:verify` exit 0 — 97 migration files (0000–0096), full ladder; `vendor_fulfilment` 231 assertions (215 after run 51). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 565 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 8.4: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

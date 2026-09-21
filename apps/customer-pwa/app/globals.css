@@ -509,6 +509,11 @@ a {
 .star-rating__star.is-set {
   color: var(--warning);
 }
+.decision-reason {
+  margin: var(--space-3xs) 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
 .decision-countdown {
   margin: var(--space-3xs) 0;
   font-variant-numeric: tabular-nums;

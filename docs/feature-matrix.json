@@ -1462,7 +1462,7 @@
       "name": "Substitution decision",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/customer-pwa/app/orders-panel.tsx renders the pending-decision card and answers it",
+      "notes": "apps/customer-pwa/app/orders-panel.tsx renders the pending-decision card with the item as ordered, the item offered, quantities, prices, the difference, the reason, the deadline and the store, and answers it once (audit run 52)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1485,7 +1485,7 @@
       "name": "Variable-weight approval",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/customer-pwa/app/orders-panel.tsx handles the WEIGHT proposal branch",
+      "notes": "apps/customer-pwa/app/orders-panel.tsx handles the WEIGHT proposal branch; only a heavier weight is asked, a lighter one is recorded with the difference not charged and the customer told (audit run 52)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2739,7 +2739,7 @@
       "name": "Substitution proposal",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Substitutions are proposed from the store\u2019s own published catalogue and answered by the customer",
+      "notes": "Substitutions are proposed from the store\u2019s own published catalogue and answered by the customer; a replacement at no extra cost on an ALLOW_SAME_STORE line is applied under that rule and the customer told; the group\u2019s authorisation is captured only once every bag is final (audit run 52)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {

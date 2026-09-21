@@ -30,12 +30,23 @@ import { useLocale } from './locale';
 import { displayedOrderState, orderCodeAvailable } from './order-code-policy';
 import { StatePill } from './state-pill';
 
+type DecisionItem = {
+  product_title: string;
+  variant_title: string;
+  quantity: number;
+  unit_price_minor: number;
+  total_minor: number;
+};
+
 type PendingDecision = {
   decision_id: string;
   vendor_order_id: string;
+  order_reference: string;
+  location_name: string;
   proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
-  proposed_quantity: number;
-  proposed_unit_price_minor: number;
+  ordered: DecisionItem;
+  offered: DecisionItem;
+  difference_minor: number;
   reason_note: string;
   decision_deadline_at: string;
 };
@@ -619,11 +630,30 @@ export function OrdersPanel({
                   {decision.proposal_kind === 'SUBSTITUTION'
                     ? t('customer.decisions.substitution', 'A replacement item')
                     : t('customer.decisions.weight', 'A different weight')}
+                  {' · '}
+                  {displayLabel(decision.location_name)}
                 </strong>
+                {/* What the answer is about (8.4): the item as ordered, what is
+                    offered instead, and what it does to the amount. */}
                 <p>
-                  {decision.proposed_quantity} ×{' '}
-                  {formatMoneyMinor(decision.proposed_unit_price_minor)} · {decision.reason_note}
+                  {t('customer.decisions.ordered', 'You ordered')}{' '}
+                  <strong>{displayLabel(decision.ordered.product_title)}</strong>{' '}
+                  {decision.ordered.quantity} ×{' '}
+                  {formatMoneyMinor(decision.ordered.unit_price_minor)}
                 </p>
+                <p>
+                  {t('customer.decisions.offered', 'The shop offers')}{' '}
+                  <strong>{displayLabel(decision.offered.product_title)}</strong>{' '}
+                  {decision.offered.quantity} ×{' '}
+                  {formatMoneyMinor(decision.offered.unit_price_minor)}
+                  {' — '}
+                  {decision.difference_minor > 0
+                    ? `${formatMoneyMinor(decision.difference_minor)} ${t('customer.decisions.more', 'more than you authorised, added if you approve')}`
+                    : decision.difference_minor < 0
+                      ? `${formatMoneyMinor(-decision.difference_minor)} ${t('customer.decisions.less', 'less; the difference is not charged')}`
+                      : t('customer.decisions.same_price', 'at the same price')}
+                </p>
+                <p className="decision-reason">{decision.reason_note}</p>
                 {/* The deadline is the server's, so a wrong device clock or a
                     reopened tab still shows the real time left (CUS-48). */}
                 <p aria-live="polite" className="decision-countdown">

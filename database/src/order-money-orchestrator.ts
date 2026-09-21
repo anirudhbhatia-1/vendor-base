@@ -52,14 +52,21 @@ export class OrderMoneyOrchestrator {
 
   /**
    * Decides the fate of a checkout group's authorization once every shop in it
-   * has answered.
+   * has answered and packed.
    *
    * One authorization funds the whole group, and capture is all or nothing, so
    * this cannot run per order as each shop answers. It waits until no order is
-   * still PLACED, and by then every ending has already shrunk the authorization
-   * to what is actually being supplied (`releaseAuthorizationForEndedOrder`).
-   * What remains is therefore exactly the accepted total, and capturing it is
-   * correct rather than approximate.
+   * still being answered or picked -- PLACED, ACCEPTED, PICKING or awaiting a
+   * customer decision -- because until the picks are final the amount is not:
+   * an ending shrinks the authorization to what is being supplied
+   * (`releaseAuthorizationForEndedOrder`), an approved change moves it by its
+   * delta, and ready takes off what is not in the bag (implementation.md
+   * 6.2.4, the capture plan). Until audit run 52 this captured as soon as
+   * every shop had *accepted*, so every approved replacement or heavier
+   * weight after that point was refused for want of an uncaptured payment,
+   * and a missing line was captured in full. What remains at ready is
+   * therefore exactly what the bags hold, and capturing it is correct rather
+   * than approximate.
    *
    * Every branch is safe to replay: capture and void both return their existing
    * result for a repeated command reference.
@@ -78,7 +85,8 @@ export class OrderMoneyOrchestrator {
       supplied: string;
     }>(
       `SELECT payment.payment_transaction_id, payment.payment_state, payment.version,
-              count(*) FILTER (WHERE sibling.lifecycle_state='PLACED')::text AS placed,
+              count(*) FILTER (WHERE sibling.lifecycle_state IN
+                ('PLACED','ACCEPTED','PICKING','AWAITING_CUSTOMER_DECISION'))::text AS placed,
               count(*) FILTER (WHERE sibling.lifecycle_state NOT IN ('PLACED','CANCELLED','EXPIRED'))::text
                 AS supplied
          FROM marketplace.vendor_orders orders

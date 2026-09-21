@@ -25,6 +25,13 @@ deadline, with no read alert for it, is raised once to the location's owners as
 `vendor.order_alert_escalation` (`after_seconds` 15–600, `channels`), defaulting to 60 seconds on
 IN_APP, PUSH and SMS. Until run 49 nothing told the shop of a new order and nothing escalated.
 
+A customer decision's notice (8.4, run 52) carries what the customer needs to answer it: the
+event's `decision_id` (0096) joins the decision, its line and the offered product, so
+`vendor_order_event.substitution_proposed` / `weight_proposed` — and the shop-applied
+`substitution_approved` / `weight_approved` — carry `ordered_title`, `ordered_quantity`,
+`ordered_unit_price_minor`, `offered_title`, `offered_quantity`, `offered_unit_price_minor`,
+`difference_minor`, `reason_note`, `decision_deadline_at`, `order_reference` and `location_name`.
+
 `GET /notifications` answers `{ notifications: [...] }`, the name the contract gives it; it used to
 answer a bare array, which the reference interceptor wrapped as `data`, so every inbox that read
 `notifications` off the answer showed nothing (run 49). `GET /notifications` and

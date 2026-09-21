@@ -29,7 +29,7 @@ the vendor_order or line-snapshot invariants Phase 7 established:
 |---|---|
 | `vendor_orders` (extended) | accept_by, accepted_at, preparation_estimate_seconds, decline_reason_code, picking_started_at, ready_at, package_count, package_condition_note, pickup_otp_hash (SHA-256), pickup_otp_expires_at, pickup_otp_attempts, picked_up_at |
 | `vendor_order_line_picks` | one row per touched line: FOUND/MISSING/PROPOSED_SUBSTITUTION/PROPOSED_WEIGHT/SUBSTITUTION_APPROVED/SUBSTITUTION_REJECTED/WEIGHT_APPROVED/WEIGHT_REJECTED, actual_quantity, actual_unit_price_minor |
-| `vendor_order_customer_decisions` | proposal to the customer with decision_deadline_at, one PENDING per pick at a time, authorization_delta_minor recorded but not yet posted |
+| `vendor_order_customer_decisions` | proposal to the customer with decision_deadline_at, one PENDING per pick at a time, authorization_delta_minor; a change applied under the customer's own rule is recorded here too, answered `APPROVED` at once (8.4, audit run 52) |
 | `vendor_order_events` | append-only audit; trigger blocks UPDATE/DELETE |
 | `vendor_order_ratings` | one row per completed vendor_order |
 | `support_cases` | structured support entry, scoped to a vendor_order |
@@ -96,12 +96,28 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   intents/attempts. Inventory settlement remains transaction-owned by pickup, avoiding an
   eventually-consistent stock commit. The generic outbox remains for aggregates registered in
   `aggregate_transitions`; the domain-specific order history is itself the durable source here.
+- **Only a material change is a question for the customer (8.4, audit run 52).** A proposal whose
+  total rises waits on the customer: `PENDING`, with the deadline from `customer.decision_seconds`
+  (implementation.md 6.1; 60–3600 s, default 300) unless the call names its own. A lighter weight
+  is recorded at once as `WEIGHT_APPROVED` and the difference comes off the authorisation; a
+  replacement at no extra cost on an `ALLOW_SAME_STORE` line is applied as
+  `SUBSTITUTION_APPROVED` under that rule. Both are recorded as decisions answered `APPROVED`, and
+  the customer is told (`vendor_order_event.substitution_approved` / `weight_approved` from the
+  shop). The customer's pending list and the notice carry the item as ordered, the item offered,
+  quantities, prices, the difference, the reason, the deadline and the store — the event links
+  its decision (0096) so the notice can be built from the history.
 - **Customer decision timeout auto-answers as REJECTED**, not APPROVED — never charge for a
   substitution the customer never saw.
-- **Approved `authorization_delta_minor` is posted before capture.** The customer decision and
-  synthetic payment adjustment commit in one transaction. The payment and its order allocation
-  move by the same delta, an append-only provider-style adjustment is recorded once per decision,
-  and approval fails closed if payment is no longer authorized and uncaptured.
+- **Adjustments are posted before capture, and capture waits for the bags.** An approved change
+  moves the payment and the order's allocation by its delta in the decision's own transaction
+  (`adjustAuthorizationForOrder`, one append-only adjustment per decision). At ready, what is not
+  in the bag — a missing line, a refused proposal, a short found line — comes off in one
+  `LINES_NOT_SUPPLIED` adjustment per order (the capture plan, implementation.md 6.2.4), and an
+  order with nothing in the bag cannot be ready. The group's authorisation is captured only once
+  every order is READY or ended (`settleAuthorizationForOrder` on `vendor_order.ready` as well as
+  on each answer): until run 52 it was captured as soon as every shop had accepted, so every
+  approved dearer change after that was refused for want of an uncaptured payment and a missing
+  line was captured in full.
 - **Support cases live at `vendor_order` grain**, not at line grain. Phases.md 8.7 says "the
   smallest affected object"; today the smallest addressable object a customer support workflow
   can act on is the vendor_order. Line-level support scoping is a later refinement.

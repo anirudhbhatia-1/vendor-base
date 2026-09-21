@@ -37,6 +37,17 @@ function describe(notice: Notice, t: (key: string, fallback: string) => string):
     typeof payload['amount_minor'] === 'number' ? formatMoneyMinor(payload['amount_minor']) : null;
 
   const theStore = store ?? t('customer.notification.the_store', 'The store');
+  // A decision's notice says what it is about (8.4): the item as ordered,
+  // what is offered instead, and the difference. Without the payload it falls
+  // back to the sentence alone.
+  const offer =
+    typeof payload['ordered_title'] === 'string' && typeof payload['offered_title'] === 'string'
+      ? `${displayLabel(payload['ordered_title'])} (${String(payload['ordered_quantity'] ?? '')}) → ${displayLabel(payload['offered_title'])} (${String(payload['offered_quantity'] ?? '')})${
+          typeof payload['difference_minor'] === 'number' && payload['difference_minor'] !== 0
+            ? `, ${payload['difference_minor'] > 0 ? '+' : '−'}${formatMoneyMinor(Math.abs(payload['difference_minor']))}`
+            : ''
+        }. `
+      : '';
 
   // The domain sweep names a template after the table it read and the event it
   // found — `vendor_order_event.accepted`. Every case below used to be written
@@ -57,15 +68,25 @@ function describe(notice: Notice, t: (key: string, fallback: string) => string):
       return `${theStore} ${t('customer.notification.timed_out', 'did not answer in time, so the order was cancelled. Nothing has been charged for it.')}`;
     case 'order.customer_decision_required':
     case 'vendor_order_event.substitution_proposed':
-      return t(
+      return `${offer}${t(
         'customer.notification.decision',
         'A store needs your answer before it can pack your order.',
-      );
+      )}`;
     case 'vendor_order_event.weight_proposed':
-      return t(
+      return `${offer}${t(
         'customer.notification.weight_decision',
         'A store weighed an item and needs you to accept the final price.',
-      );
+      )}`;
+    case 'vendor_order_event.substitution_approved':
+      return `${offer}${t(
+        'customer.notification.substitution_applied',
+        'The shop replaced an item with a close match, as you allowed. You are not charged more.',
+      )}`;
+    case 'vendor_order_event.weight_approved':
+      return `${offer}${t(
+        'customer.notification.weight_applied',
+        'An item weighed lighter than ordered. You pay only for what you get.',
+      )}`;
     case 'vendor_order_event.picked_up':
       return t('customer.notification.picked_up', 'Your order has left the shop.');
     case 'delivery.completed':

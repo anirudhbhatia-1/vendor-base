@@ -77,6 +77,15 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
   });
   const assignments = new AssignmentCustodyService({ connection_string: connectionString });
   const notifications = new LocalNotificationService({ connection_string: connectionString });
+  const money = new MoneyLifecycleService({ connection_string: connectionString });
+  const completeMoney = new CompleteMoneyLifecycleService({
+    connection_string: connectionString,
+  });
+  const orderMoney = new OrderMoneyOrchestrator({
+    complete_money: completeMoney,
+    connection_string: connectionString,
+    money,
+  });
   const now = new Date();
   const customerId = createUuidV7();
   const strangerCustomerId = createUuidV7();
@@ -623,6 +632,21 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       accepted.lifecycle_state === 'ACCEPTED' && accepted.preparation_estimate_seconds === 900,
       'Accept did not persist prep estimate',
     );
+    // 8.4 -- the group's money is not captured at acceptance: until every
+    // bag is final an approved change or a missing line still moves the
+    // amount. Until audit run 52 this captured here, and every approved
+    // dearer replacement after it was refused for want of an uncaptured
+    // payment.
+    const earlySettlement = await orderMoney.settleAuthorizationForOrder({
+      context: systemContext(systemActorId),
+      now: new Date(now.getTime() + 5_500),
+      vendor_order_id: orderA.vendor_order_id,
+    });
+    check(
+      earlySettlement === 'WAITING',
+      `The group authorization was settled as ${earlySettlement} while an order was still being packed`,
+    );
+
     // 8.2 -- the acceptance is the sale: the order's holds are COMMITTED in
     // the acceptance's own transaction, recorded against it, with the shelf
     // as the hold left it (the units were taken when the hold was placed);
@@ -1975,7 +1999,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     // so no new eligibility setup is needed.
     const decisionBase = new Date(now.getTime() + 40_000);
     const decisionProducts = [];
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 7; index += 1) {
       const suffix = `${Date.now()}D${index}`;
       const product = await catalogue.createProduct({
         context: vendorContext(storeA.ownerUserId),
@@ -1998,8 +2022,8 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       });
       decisionProducts.push(product);
     }
-    // Products 0-2 become order lines; product 3 is the substitution target.
-    const substitutionTarget = decisionProducts[3];
+    // Products 0-5 become order lines; product 6 is the substitution target.
+    const substitutionTarget = decisionProducts[6];
     check(substitutionTarget !== undefined, 'Substitution target variant missing');
     const decisionCart = await carts.currentCart({
       context: customerContext(customerId),
@@ -2010,20 +2034,69 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       customer_address_id: addressId,
       now: decisionBase,
     });
-    for (let index = 0; index < 3; index += 1) {
+    // Each line carries the customer's rule for it (8.3, 8.4): lines 0, 1
+    // and 5 ask; line 2 is "refund, never replace"; lines 3 and 4 let the
+    // store choose a close match.
+    const lineRules = [
+      'ASK_CUSTOMER',
+      'ASK_CUSTOMER',
+      'NO_SUBSTITUTION',
+      'ALLOW_SAME_STORE',
+      'ALLOW_SAME_STORE',
+      'ASK_CUSTOMER',
+    ] as const;
+    for (let index = 0; index < 6; index += 1) {
       const product = decisionProducts[index];
-      check(product !== undefined, 'Decision fixture product missing');
+      const rule = lineRules[index];
+      check(product !== undefined && rule !== undefined, 'Decision fixture product missing');
       await carts.addLine({
         context: customerContext(customerId),
         vendor_location_id: storeA.locationId,
         catalogue_variant_id: product.catalogue_variant_id,
         quantity: 1,
-        // The third line is "refund, never replace": the store may weigh it
-        // but may not offer a replacement (8.3).
-        ...(index === 2 ? { substitution_preference: 'NO_SUBSTITUTION' as const } : {}),
+        substitution_preference: rule,
         now: decisionBase,
       });
     }
+    // 8.4 -- how long the customer has is configuration: an activated
+    // `customer.decision_seconds` replaces the default for every proposal
+    // that does not name its own deadline.
+    const decisionPolicyProposer = createUuidV7();
+    const decisionPolicyApprover = createUuidV7();
+    for (const actorId of [decisionPolicyProposer, decisionPolicyApprover]) {
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [actorId]);
+    }
+    const decisionPolicyDraft = await createConfigurationDraft(pool, {
+      actor_id: decisionPolicyProposer,
+      configuration_key: 'customer.decision_seconds',
+      configuration_kind: 'SETTING',
+      configuration_value: 120,
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: decisionPolicyProposer,
+      configuration_version_id: decisionPolicyDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: decisionPolicyApprover,
+      configuration_version_id: decisionPolicyDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: decisionPolicyApprover,
+      configuration_version_id: decisionPolicyDraft.configuration_version_id,
+      effective_from: new Date(now.getTime() - 1_000),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: decisionPolicyApprover,
+      at: now,
+      configuration_version_id: decisionPolicyDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
     const decisionQuote = await checkout.createQuote({
       context: customerContext(customerId),
       cart_id: decisionCart.cart_id,
@@ -2062,16 +2135,25 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_order_id: orderC.vendor_order_id,
       vendor_location_id: storeA.locationId,
     });
-    check(decisionPicks.length === 3, 'Decision order did not have three lines');
+    check(decisionPicks.length === 6, 'Decision order did not have six lines');
     const askLines = decisionPicks
       .filter((pick) => pick.substitution_preference === 'ASK_CUSTOMER')
       .map((pick) => pick.vendor_order_line_id);
-    const [line1, line2] = askLines;
+    const chooseLines = decisionPicks
+      .filter((pick) => pick.substitution_preference === 'ALLOW_SAME_STORE')
+      .map((pick) => pick.vendor_order_line_id);
+    const [line1, line2, line6] = askLines;
+    const [line4, line5] = chooseLines;
     const line3 = decisionPicks.find(
       (pick) => pick.substitution_preference === 'NO_SUBSTITUTION',
     )?.vendor_order_line_id;
     check(
-      line1 !== undefined && line2 !== undefined && line3 !== undefined,
+      line1 !== undefined &&
+        line2 !== undefined &&
+        line3 !== undefined &&
+        line4 !== undefined &&
+        line5 !== undefined &&
+        line6 !== undefined,
       `The order lines do not carry the rules the basket lines were given (${JSON.stringify(decisionPicks.map((pick) => pick.substitution_preference))})`,
     );
 
@@ -2147,6 +2229,54 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     check(
       subProposal.decision.authorization_delta_minor === 3_000,
       'Substitution authorization delta was not recorded (18000 - 15000)',
+    );
+    check(
+      subProposal.decision.answer === 'PENDING' &&
+        subProposal.decision.decision_deadline_at.getTime() ===
+          decisionBase.getTime() + 4_000 + 120_000,
+      `A dearer replacement on an "ask me" line was not put to the customer with the configured deadline (${subProposal.decision.answer}, ${subProposal.decision.decision_deadline_at.toISOString()})`,
+    );
+    // 8.4 -- what the customer is asked: the item as ordered, what is
+    // offered, the difference, the reason, the deadline, the store.
+    const asked = (
+      await fulfilment.listPendingCustomerDecisions({ context: customerContext(customerId) })
+    ).find((decision) => decision.decision_id === subProposal.decision.decision_id);
+    const line1Title = decisionPicks.find(
+      (pick) => pick.vendor_order_line_id === line1,
+    )?.product_title;
+    check(
+      asked !== undefined &&
+        asked.ordered.product_title === line1Title &&
+        asked.ordered.quantity === 1 &&
+        asked.ordered.unit_price_minor === 15_000 &&
+        asked.offered.product_title === 'SYNTH Decision Product 6' &&
+        asked.offered.quantity === 1 &&
+        asked.offered.unit_price_minor === 18_000 &&
+        asked.difference_minor === 3_000 &&
+        asked.location_name.startsWith('SYNTH Fulfilment Store') &&
+        asked.order_reference === orderC.order_reference &&
+        asked.reason_note.includes('close substitute'),
+      `The customer is not told what they are deciding on (${JSON.stringify(asked)})`,
+    );
+    await notifications.syncDomainSignals({
+      context: systemContext(systemActorId),
+      now: new Date(decisionBase.getTime() + 4_100),
+    });
+    const askedNotice = await pool.query<{ payload: Record<string, unknown> }>(
+      `SELECT template_payload AS payload FROM marketplace.notification_intents
+        WHERE recipient_user_id=$1 AND template_key='vendor_order_event.substitution_proposed'
+        ORDER BY created_at DESC LIMIT 1`,
+      [customerId],
+    );
+    const noticePayload = askedNotice.rows[0]?.payload;
+    check(
+      noticePayload !== undefined &&
+        noticePayload['ordered_title'] === line1Title &&
+        noticePayload['offered_title'] === 'SYNTH Decision Product 6' &&
+        Number(noticePayload['difference_minor']) === 3_000 &&
+        typeof noticePayload['decision_deadline_at'] === 'string' &&
+        typeof noticePayload['reason_note'] === 'string',
+      `The customer's notice does not carry the old item, the new one, the amount and the deadline (${JSON.stringify(noticePayload)})`,
     );
     // 8.3 -- while the customer decides, the line is theirs: the shop cannot
     // mark it found underneath the proposal.
@@ -2313,7 +2443,127 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       'Timed-out decision did not roll the pick to a rejected state',
     );
 
-    // All three lines are now resolved, so ready succeeds.
+    // 8.4 -- only a material change is a question. A replacement at no extra
+    // cost on a line whose rule lets the store choose is applied under that
+    // rule; a dearer one on the same rule is still asked; a lighter weight is
+    // recorded and the difference is not charged. Until audit run 52 every
+    // weight and every replacement waited on the customer.
+    const chosen = await fulfilment.proposeSubstitution({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: line4,
+      substitution_variant_id: substitutionTarget.catalogue_variant_id,
+      proposed_quantity: 1,
+      proposed_unit_price_minor: 12_000,
+      reason_note: 'SYNTH close match, cheaper, under the customer rule.',
+      expected_version: 0,
+      now: new Date(decisionBase.getTime() + 81_000),
+    });
+    check(
+      chosen.decision.answer === 'APPROVED' &&
+        chosen.decision.authorization_delta_minor === -3_000 &&
+        chosen.pick.pick_state === 'SUBSTITUTION_APPROVED',
+      `A cheaper replacement under the customer's own rule was not applied (${chosen.decision.answer}, ${chosen.pick.pick_state})`,
+    );
+    const dearer = await fulfilment.proposeSubstitution({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: line5,
+      substitution_variant_id: substitutionTarget.catalogue_variant_id,
+      proposed_quantity: 1,
+      proposed_unit_price_minor: 18_000,
+      reason_note: 'SYNTH close match, dearer, so the customer is asked.',
+      expected_version: 0,
+      now: new Date(decisionBase.getTime() + 82_000),
+    });
+    check(
+      dearer.decision.answer === 'PENDING' && dearer.pick.pick_state === 'PROPOSED_SUBSTITUTION',
+      `A dearer replacement was applied without asking (${dearer.decision.answer})`,
+    );
+    await fulfilment.answerDecision({
+      context: customerContext(customerId),
+      decision_id: dearer.decision.decision_id,
+      answer: 'REJECTED',
+      now: new Date(decisionBase.getTime() + 83_000),
+    });
+    const lighter = await fulfilment.proposeWeight({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: line6,
+      proposed_quantity: 1,
+      proposed_unit_price_minor: 12_000,
+      reason_note: 'SYNTH weighed lighter than ordered.',
+      expected_version: 0,
+      now: new Date(decisionBase.getTime() + 84_000),
+    });
+    check(
+      lighter.decision.answer === 'APPROVED' &&
+        lighter.decision.authorization_delta_minor === -3_000 &&
+        lighter.pick.pick_state === 'WEIGHT_APPROVED',
+      `A lighter weight was put to the customer instead of recorded (${lighter.decision.answer}, ${lighter.pick.pick_state})`,
+    );
+    const appliedAdjustments = await pool.query<{ delta: string; kind: string }>(
+      `SELECT delta_minor::text AS delta, adjustment_kind AS kind
+         FROM marketplace.payment_authorization_adjustments
+        WHERE decision_id IN ($1, $2) ORDER BY created_at`,
+      [chosen.decision.decision_id, lighter.decision.decision_id],
+    );
+    check(
+      appliedAdjustments.rows.length === 2 &&
+        appliedAdjustments.rows.every(
+          (row) => row.delta === '-3000' && row.kind === 'CUSTOMER_DECISION',
+        ),
+      `Changes applied under the customer's rule did not take the difference off the authorisation (${JSON.stringify(appliedAdjustments.rows)})`,
+    );
+    // The customer is told of a change made under their own rule.
+    await notifications.syncDomainSignals({
+      context: systemContext(systemActorId),
+      now: new Date(decisionBase.getTime() + 85_000),
+    });
+    const appliedNotices = await pool.query<{ template_key: string }>(
+      `SELECT template_key FROM marketplace.notification_intents
+        WHERE recipient_user_id=$1
+          AND template_key IN ('vendor_order_event.substitution_approved','vendor_order_event.weight_approved')`,
+      [customerId],
+    );
+    check(
+      appliedNotices.rows.some(
+        (row) => row.template_key === 'vendor_order_event.substitution_approved',
+      ) &&
+        appliedNotices.rows.some(
+          (row) => row.template_key === 'vendor_order_event.weight_approved',
+        ),
+      `The customer was not told of the changes applied under their rule (${JSON.stringify(appliedNotices.rows)})`,
+    );
+    // Delivered here so the notices reach the inbox and nothing is left for
+    // the notifications module's own count.
+    await notifications.deliverPending({
+      context: systemContext(systemActorId),
+      now: new Date(decisionBase.getTime() + 86_000),
+    });
+    const authorisedBeforeReady = await pool.query<{ amount: string; adjustments: string }>(
+      `SELECT payment.amount_minor::text AS amount,
+              (SELECT string_agg(a.adjustment_kind || ':' || a.delta_minor::text, ',' ORDER BY a.created_at)
+                 FROM marketplace.payment_authorization_adjustments a
+                WHERE a.vendor_order_id = orders.vendor_order_id) AS adjustments
+         FROM marketplace.vendor_orders orders
+         JOIN marketplace.checkout_groups grouping USING (checkout_group_id)
+         JOIN marketplace.payment_transactions payment USING (payment_transaction_id)
+        WHERE orders.vendor_order_id=$1`,
+      [orderC.vendor_order_id],
+    );
+    // +3000 approved, -3000 chosen, -3000 lighter on the authorisation as it
+    // stood before the first decision (items, fees and all).
+    const authorisedAtStart = Number(paymentBeforeDecision.rows[0]?.amount_minor);
+    check(
+      Number(authorisedBeforeReady.rows[0]?.amount) === authorisedAtStart - 3_000,
+      `The authorisation before ready is ${authorisedBeforeReady.rows[0]?.amount}, not ${authorisedAtStart - 3_000} (${authorisedBeforeReady.rows[0]?.adjustments})`,
+    );
+
+    // All six lines are now resolved, so ready succeeds.
     const readyC = await fulfilment.markReady({
       context: vendorContext(storeA.ownerUserId),
       vendor_order_id: orderC.vendor_order_id,
@@ -2326,12 +2576,19 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       readyC.lifecycle_state === 'READY',
       'Order with resolved decisions could not reach ready',
     );
-    // 8.3 -- none of the three ordered lines is in the bag as ordered: one
-    // was replaced (approved), two proposals were refused. Their committed
-    // units go back to the shelf when the picks become final at ready. Until
-    // audit run 51 they stayed sold to nobody.
-    const releasedC = await pool.query<{ state: string; shelf: string; reason: string | null }>(
-      `SELECT ir.reservation_state AS state, i.exact_available_quantity::text AS shelf,
+    // 8.3 -- five of the six ordered lines are not in the bag as ordered: two
+    // replaced (approved), three proposals refused. Their committed units go
+    // back to the shelf when the picks become final at ready; the lighter
+    // weight is the same item, and keeps its units. Until audit run 51 they
+    // stayed sold to nobody.
+    const releasedC = await pool.query<{
+      line: string;
+      state: string;
+      shelf: string;
+      reason: string | null;
+    }>(
+      `SELECT l.vendor_order_line_id AS line, ir.reservation_state AS state,
+              i.exact_available_quantity::text AS shelf,
               (SELECT e.reason_code FROM marketplace.inventory_events e
                 WHERE e.reservation_id = ir.reservation_id AND e.event_type='RELEASED'
                 ORDER BY e.reservation_version DESC LIMIT 1) AS reason
@@ -2342,12 +2599,41 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       [orderC.vendor_order_id],
     );
     check(
-      releasedC.rows.length === 3 &&
-        releasedC.rows.every(
-          (row) =>
-            row.state === 'RELEASED' && row.shelf === '5' && row.reason === 'LINE_NOT_SUPPLIED',
-        ),
-      `Lines that will not be in the bag kept their units at ready (${JSON.stringify(releasedC.rows)})`,
+      releasedC.rows.length === 6 &&
+        releasedC.rows
+          .filter((row) => row.line !== line6)
+          .every(
+            (row) =>
+              row.state === 'RELEASED' && row.shelf === '5' && row.reason === 'LINE_NOT_SUPPLIED',
+          ) &&
+        releasedC.rows.find((row) => row.line === line6)?.state === 'COMMITTED',
+      `Lines that will not be in the bag kept their units at ready, or the weighed one lost its (${JSON.stringify(releasedC.rows)})`,
+    );
+    // 8.4 -- the capture plan: what the bags hold is what is charged. The
+    // three refused lines come off the authorisation in one recorded
+    // adjustment; the approved changes moved their own deltas already.
+    const captured = await pool.query<{ amount: string; item: string; adjustments: string }>(
+      `SELECT payment.amount_minor::text AS amount, allocation.item_minor::text AS item,
+              (SELECT string_agg(a.adjustment_kind || ':' || a.delta_minor::text, ',' ORDER BY a.created_at)
+                 FROM marketplace.payment_authorization_adjustments a
+                WHERE a.vendor_order_id = orders.vendor_order_id
+                  AND a.adjustment_kind='LINES_NOT_SUPPLIED') AS adjustments
+         FROM marketplace.vendor_orders orders
+         JOIN marketplace.checkout_groups grouping USING (checkout_group_id)
+         JOIN marketplace.payment_transactions payment USING (payment_transaction_id)
+         JOIN marketplace.payment_allocations allocation
+           ON allocation.payment_transaction_id = payment.payment_transaction_id
+          AND allocation.source_order_reference = orders.order_reference
+        WHERE orders.vendor_order_id=$1`,
+      [orderC.vendor_order_id],
+    );
+    // Three lines of 15000 not in the bag; the items allocation is the six
+    // lines less the three, with the approved changes' deltas already in it.
+    check(
+      Number(captured.rows[0]?.amount) === authorisedAtStart - 3_000 - 45_000 &&
+        captured.rows[0]?.item === '42000' &&
+        captured.rows[0]?.adjustments === 'LINES_NOT_SUPPLIED:-45000',
+      `Ready did not take the lines not in the bag off the authorisation (${JSON.stringify(captured.rows)}, started at ${authorisedAtStart})`,
     );
     // And the found line of order A kept its commitment: it is in the bag.
     const keptA = await pool.query<{ state: string }>(
@@ -2630,10 +2916,48 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       preparation_estimate_seconds: 600,
       now: new Date(cancelBase.getTime() + 2_000),
     });
+    // 8.4 -- a bag with nothing in it is not "ready": every line missing is
+    // an order to end, not to pack and charge nothing for.
+    const pickingX = await fulfilment.startPicking({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderX.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: acceptedX.version,
+      now: new Date(cancelBase.getTime() + 2_200),
+    });
+    const lineX = (
+      await fulfilment.listPicks({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderX.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+      })
+    )[0];
+    check(lineX !== undefined, 'The cancellation order has no line');
+    await fulfilment.markLineMissing({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderX.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: lineX.vendor_order_line_id,
+      expected_version: 0,
+      now: new Date(cancelBase.getTime() + 2_400),
+    });
+    await rejects(
+      () =>
+        fulfilment.markReady({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderX.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          expected_version: pickingX.version,
+          package_count: 1,
+          now: new Date(cancelBase.getTime() + 2_600),
+        }),
+      FulfilmentConflictError,
+      'An order with every line missing was marked ready',
+    );
     const cancelledX = await fulfilment.cancelByCustomer({
       context: customerContext(customerId),
       vendor_order_id: orderX.vendor_order_id,
-      expected_version: acceptedX.version,
+      expected_version: pickingX.version,
       reason_code: 'CHANGED_MIND',
       now: new Date(cancelBase.getTime() + 3_000),
     });
@@ -2928,15 +3252,6 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       'A stranger rated somebody else’s delivery',
     );
 
-    const money = new MoneyLifecycleService({ connection_string: connectionString });
-    const completeMoney = new CompleteMoneyLifecycleService({
-      connection_string: connectionString,
-    });
-    const orderMoney = new OrderMoneyOrchestrator({
-      complete_money: completeMoney,
-      connection_string: connectionString,
-      money,
-    });
     try {
       const released = await pool.query<{
         adjustments: string;
@@ -3533,11 +3848,12 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         `Ledger does not balance: ${balance.rows[0]?.debits} debits against ${balance.rows[0]?.credits} credits`,
       );
     } finally {
-      await orderMoney.close();
-      await completeMoney.close();
-      await money.close();
+      // The money services are closed with the rest below.
     }
   } finally {
+    await orderMoney.close();
+    await completeMoney.close();
+    await money.close();
     await assignments.close();
     await fulfilment.close();
     await checkout.close();

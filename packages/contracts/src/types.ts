@@ -342,6 +342,36 @@ export type VendorOrderSummary = {
   version: number;
 };
 
+/** One side of a customer decision: the item as ordered, or as offered. */
+export type DecisionItem = {
+  product_title: string;
+  variant_title: string;
+  quantity: number;
+  unit_price_minor: number;
+  total_minor: number;
+};
+
+/**
+ * A customer decision with what the customer needs to answer it (8.4): the
+ * item as ordered, what the shop offers instead, the difference, the reason,
+ * the deadline and the store.
+ */
+export type CustomerDecision = {
+  decision_id: string;
+  vendor_order_id: string;
+  order_reference: string;
+  location_name: string;
+  proposal_kind: 'SUBSTITUTION' | 'WEIGHT';
+  ordered: DecisionItem;
+  offered: DecisionItem;
+  /** Offered total minus ordered total; what approval adds to the authorisation. */
+  difference_minor: number;
+  reason_note: string;
+  decision_deadline_at: string;
+  answer: 'PENDING' | 'APPROVED' | 'REJECTED' | 'TIMED_OUT';
+  answered_at: string | null;
+};
+
 /** What declining an order would do, read before the shop decides (8.2). */
 export type DeclineImpact = {
   vendor_order_id: string;
