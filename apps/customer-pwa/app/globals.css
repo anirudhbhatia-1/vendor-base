@@ -509,6 +509,11 @@ a {
 .star-rating__star.is-set {
   color: var(--warning);
 }
+.order-card__promise {
+  margin: var(--space-3xs) 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
 .decision-reason {
   margin: var(--space-3xs) 0;
   color: var(--text-secondary);

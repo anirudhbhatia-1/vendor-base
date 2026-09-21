@@ -75,6 +75,17 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   and the console hides the offer accordingly. A line with a proposal pending, or one the customer
   approved, takes no edit from the shop (`LINE_AWAITING_CUSTOMER`); a rejected one may be marked
   again.
+- Ready records the package (8.5, audit run 53): the count, the condition note, and the handling
+  needs (`HANDLING_FLAGS`: FRAGILE, KEEP_COLD, KEEP_FROZEN, KEEP_UPRIGHT, HEAVY, LEAK_RISK; 0097
+  puts them on the order), stamps `ready_at` on the server's clock, and makes the promise
+  (`pickup_promise_at`, read as `promise_at`): a collected order is ready from now; a delivered one
+  should arrive after the road the quote was priced on. The delivery attempt made at placement
+  carried a package count guessed from the line count — which the partner then had to type back
+  exactly at the counter — and no handling needs; ready passes the shop's own count and needs to
+  it (packaging facts, not a transition: the attempt's version stands, so a partner's open offer is
+  not made stale). The `READY` event's note carries all three. A second ready is refused for its
+  state. Until run 53 the condition was never sent, the needs had nowhere to go and the promise was
+  never set.
 - Mark-ready refuses if any line row is missing a pick or any proposal is still `PENDING`; a
   proposal must be answered (or timed-out) before its vendor_order can leave picking. Once the
   picks are final, every line that will not be in the bag as ordered -- missing, a refused

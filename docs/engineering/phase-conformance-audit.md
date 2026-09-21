@@ -1776,6 +1776,41 @@ Five requirements. One held (approve/reject once, with ownership and the deadlin
 
 **Step 8.4: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 53 (21 September 2026) — step 8.5, package and ready state
+
+Five requirements. Two held (every line and decision resolved — `PICKING_INCOMPLETE`, the pending-proposal block and run 52's empty bag; ready once, by the state gate), one held in part (the customer is told of `READY`; the delivery attempt exists from placement), and two did not: the package's condition and handling needs were not recorded, and no promise was ever made. Migration 0097; eight connected assertions; six mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | All lines and decisions resolve | Met (runs 41, 51, 52). |
+| 2 | Record package count, condition, handling needs | **Count only.** The condition note was accepted by the domain and the API and sent by no screen; handling needs had no column, no field and no route — P53-01. |
+| 3 | Server timestamp and applicable pickup/delivery promise | **Timestamp only.** `pickup_promise_at` existed since 0026, was an optional input the API never passed, and was null on every order ever readied — P53-02. |
+| 4 | Notify customer or begin delivery assignment | Met in substance: `READY` reaches the customer through the history sync; the attempt is created at placement and offered from acceptance. But the attempt carried a package count guessed from the line count, which `confirmPickup` then required the partner to type back exactly: a three-line order packed as one bag could not be handed over — P53-03. |
+| 5 | Prevent duplicate ready transitions | Met by the state gate; now walked: a second ready is refused for its state and the first timestamp and count stand. |
+
+**P53-01 — the package.** 0097 adds `vendor_orders.handling_flags` (a fixed vocabulary, `HANDLING_FLAGS`); `markReady` takes `handling_flags` (deduplicated, vocabulary-checked at 400), the route takes them, and the console's ready control has the six as checkboxes and a condition field beside the count. The `READY` event's note carries the count, the needs and the condition.
+
+**P53-02 — the promise.** Made on the server at ready: a collected order is ready from `ready_at`; a delivered one should arrive at `ready_at` plus the `route_seconds` the quote was priced on (null for a delivery whose quote carried no route). Read as `promise_at` on the vendor summary and the customer's order list; the customer's card says "Ready to collect since …" or "Expected around …" (0097 keys).
+
+**P53-03 — the count the partner had to guess.** Ready now writes the shop's `package_count` and `handling_flags` onto the order's live delivery attempt (`UNASSIGNED` … `AT_VENDOR`) — as packaging facts, without a version bump, so a partner's open offer is not made stale by the shop finishing its packing. The partner's job card and offer say the needs ("Handle with care: fragile, keep cold"). The walk creates the attempt with a guessed 3 before ready and reads 1 with the needs after, at the same version.
+
+**Mutation results.** Six probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| No promise (old) | *Ready did not record the package, its needs and the promise ({… "promise_at":null,"route_seconds":103})* |
+| The attempt not told (old) | *The delivery attempt was not told the shop's count and needs, or was made stale ([{"package_count":3,"handling_flags":[],"version":1}])* |
+| Unknown handling needs dropped silently | *A handling need outside the vocabulary was recorded* |
+| READY re-enterable | *A second ready was not refused, or changed the order (null, v5)* |
+| The attempt's version bumped | *… or was made stale ([{… "version":2}])* |
+| Promise not carried to the customer's list | *The customer's order list does not carry the promise* |
+
+**Forward findings.** (9.x) The attempt is offered from acceptance, before the bag is ready; the wait policy compensates the partner for the gap. Whether offers should wait for ready is an owner decision. (8.6) `confirmPickup` compares the partner's typed count with the attempt's; with the shop's count on the attempt that now works, but a partner handed a different number of bags than the shop recorded still cannot proceed except by typing the shop's number. (carried) The console does not say a change was applied without asking; no vendor cancellation after acceptance; the receipt omits pre-capture adjustments.
+
+**Verification.** `pnpm db:verify` exit 0 — 98 migration files (0000–0097), full ladder; `vendor_fulfilment` 237 assertions (231 after run 52). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 565 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 8.5: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

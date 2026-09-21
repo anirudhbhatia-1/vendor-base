@@ -169,6 +169,7 @@ assert(
       '0094_cancel_after_acceptance',
       '0095_picking_line_rules',
       '0096_decision_details',
+      '0097_ready_packaging',
     ]),
   'Unexpected reviewed migrations',
 );

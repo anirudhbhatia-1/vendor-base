@@ -47,6 +47,21 @@ import {
   type ProofQueueState,
 } from './proof-queue-policy';
 
+/** The shop's handling needs in the partner's words (8.5). */
+export function handlingSentence(flags: readonly string[] | undefined): string {
+  const words: Record<string, string> = {
+    FRAGILE: 'fragile',
+    KEEP_COLD: 'keep cold',
+    KEEP_FROZEN: 'keep frozen',
+    KEEP_UPRIGHT: 'keep upright',
+    HEAVY: 'heavy',
+    LEAK_RISK: 'may leak',
+  };
+  return (flags ?? [])
+    .map((flag) => words[flag] ?? flag.toLowerCase().replaceAll('_', ' '))
+    .join(', ');
+}
+
 type Assignment = {
   readonly approximate_drop_area: string;
   readonly approximate_pickup_area: string;
@@ -54,6 +69,8 @@ type Assignment = {
   readonly delivery_assignment_id: string;
   readonly offer_expires_at: string | null;
   readonly package_count: number;
+  /** What the shop said the package needs on the way (8.5). */
+  readonly handling_flags?: readonly string[];
   readonly source_order_reference: string;
   readonly version: number;
   readonly route_metres?: number | null;
@@ -187,6 +204,11 @@ function ActiveJob({
           {assignment.package_count} package{assignment.package_count === 1 ? '' : 's'}
         </span>
       </header>
+      {(assignment.handling_flags ?? []).length > 0 ? (
+        <Notice tone="warning">
+          Handle with care: {handlingSentence(assignment.handling_flags)}
+        </Notice>
+      ) : null}
 
       {/* Text and landmark first; a map is never the only account of a route
           (DLP-46, UX-12). */}
@@ -1010,6 +1032,9 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
                           ? ''
                           : ` · ${formatTravelSeconds(offer.route_seconds, offer.route_source)}`}{' '}
                         · {offer.package_count} package{offer.package_count === 1 ? '' : 's'}
+                        {(offer.handling_flags ?? []).length > 0
+                          ? ` · ${handlingSentence(offer.handling_flags)}`
+                          : ''}
                         {remaining === null ? '' : ` · ${remaining} to decide`}
                       </p>
                       <div className="ns-row">

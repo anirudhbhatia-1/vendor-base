@@ -140,6 +140,16 @@ const DECLINE_REASONS = [
   ['TECHNICAL_ISSUE', 'A technical problem at our end'],
 ] as const;
 
+/** What a package may need on the way (8.5), as the shop ticks it. */
+const HANDLING_OPTIONS = [
+  ['FRAGILE', 'Fragile'],
+  ['KEEP_COLD', 'Keep cold'],
+  ['KEEP_FROZEN', 'Keep frozen'],
+  ['KEEP_UPRIGHT', 'Keep upright'],
+  ['HEAVY', 'Heavy'],
+  ['LEAK_RISK', 'May leak'],
+] as const;
+
 /** The customer's rule for a line, as the picker reads it beside the quantity. */
 export function substitutionRuleSentence(preference: string | null | undefined): string {
   switch (preference) {
@@ -293,6 +303,8 @@ function OrderCard({
   const [substituteVariant, setSubstituteVariant] = useState('');
   const [preparationMinutes, setPreparationMinutes] = useState('15');
   const [packageCount, setPackageCount] = useState('1');
+  const [conditionNote, setConditionNote] = useState('');
+  const [handling, setHandling] = useState<readonly string[]>([]);
   const [pickupOtp, setPickupOtp] = useState<string | null>(null);
   const [otpEntry, setOtpEntry] = useState('');
   const [fallbackOpen, setFallbackOpen] = useState(false);
@@ -485,11 +497,38 @@ function OrderCard({
               className="order-card__prep"
               inputMode="numeric"
               label="Packages"
-              max={100}
+              max={40}
               min={1}
               onChange={(event) => setPackageCount(event.target.value)}
               type="number"
               value={packageCount}
+            />
+            {/* What the bag needs on the way (8.5): recorded on the order and
+                carried to the delivery partner's job. */}
+            <div className="handling-flags">
+              {HANDLING_OPTIONS.map(([flag, label]) => (
+                <label className="checkbox-row" key={flag}>
+                  <input
+                    checked={handling.includes(flag)}
+                    onChange={(event) =>
+                      setHandling(
+                        event.target.checked
+                          ? [...handling, flag]
+                          : handling.filter((other) => other !== flag),
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
+            <Field
+              hint="Anything the customer or the partner should know about the package."
+              label="Condition (optional)"
+              maxLength={240}
+              onChange={(event) => setConditionNote(event.target.value)}
+              value={conditionNote}
             />
             <Button
               busy={busy}
@@ -497,6 +536,10 @@ function OrderCard({
                 void act('ready', {
                   expected_version: order.version,
                   package_count: Math.max(1, Number(packageCount) || 1),
+                  handling_flags: handling,
+                  ...(conditionNote.trim() === ''
+                    ? {}
+                    : { package_condition_note: conditionNote.trim() }),
                 })
               }
             >

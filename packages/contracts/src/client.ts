@@ -701,7 +701,12 @@ export function createApiClient(options: ApiClientOptions) {
         markReady: (
           vendorLocationId: string,
           orderId: string,
-          body: { expected_version: number },
+          body: {
+            expected_version: number;
+            package_count: number;
+            package_condition_note?: string;
+            handling_flags?: readonly string[];
+          },
         ) =>
           r<VendorOrder>(`/vendor/locations/${vendorLocationId}/orders/${orderId}/ready`, {
             method: 'POST',

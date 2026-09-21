@@ -185,6 +185,28 @@ function OrderCard({
         </div>
       </header>
 
+      {/* The promise made at ready, on the server's clock (8.5): when a
+          collected order became ready, or when a delivery should arrive. */}
+      {order.promise_at && !TERMINAL.has(order.lifecycle_state) ? (
+        <p className="order-card__promise">
+          {order.fulfilment_method === 'CUSTOMER_PICKUP'
+            ? t('customer.order.promise.collect', 'Ready to collect since {time}.').replace(
+                '{time}',
+                new Date(order.promise_at).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                }),
+              )
+            : t('customer.order.promise.arrives', 'Expected around {time}.').replace(
+                '{time}',
+                new Date(order.promise_at).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                }),
+              )}
+        </p>
+      ) : null}
+
       {error ? <Notice tone="danger">{error}</Notice> : null}
       {message ? <Notice tone="success">{message}</Notice> : null}
 

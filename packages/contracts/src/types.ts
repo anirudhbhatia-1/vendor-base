@@ -340,6 +340,8 @@ export type VendorOrderSummary = {
   fulfilment_method: FulfilmentMethod | null;
   total_minor: number;
   version: number;
+  /** The promise made at ready (8.5): collect from, or arrives around; null before ready. */
+  promise_at?: string | null;
 };
 
 /** One side of a customer decision: the item as ordered, or as offered. */
@@ -426,6 +428,8 @@ export type CustomerOrderEntry = {
   lifecycle_state: string;
   total_minor: number;
   fulfilment_method: FulfilmentMethod | null;
+  /** The promise made at ready (8.5): collect from, or arrives around; null before ready. */
+  promise_at?: string | null;
 };
 
 export type CustomerOrderGroup = {

@@ -909,7 +909,69 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       "Another store's member read this store's pick list",
     );
 
+    // The delivery leg begins here rather than after the handover, because the
+    // handover is part of it.
+    const partnerId = createUuidV7();
+    const adminId = createUuidV7();
+    const partner = partnerContext(partnerId);
+    const partnerAdmin = createRequestContext({
+      actor: createAuthenticatedActor({
+        actor_id: adminId,
+        actor_kind: 'admin',
+        session_id: createUuidV7(),
+      }),
+    });
+    for (const userId of [partnerId, adminId]) {
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [userId]);
+    }
+    const roleId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.role_assignments
+        (role_assignment_id,user_id,role_key,state,valid_from,valid_until,
+         granted_by_user_id,request_id,correlation_id,created_at,updated_at)
+       VALUES ($1,$2,'DELIVERY_PARTNER','ACTIVE',$3,$4,$5,$6,$6,$3,$3)`,
+      [roleId, partnerId, now, new Date(now.getTime() + 86_400_000), adminId, createUuidV7()],
+    );
+    await pool.query(
+      `INSERT INTO marketplace.partner_eligibilities
+        (partner_eligibility_id,role_assignment_id,user_id,state,eligible_from,
+         eligible_until,reason_code,updated_at)
+       VALUES ($1,$2,$3,'ELIGIBLE',$4,$5,'SYNTH_PARTNER_DELIVERY',$4)`,
+      [createUuidV7(), roleId, partnerId, now, new Date(now.getTime() + 86_400_000)],
+    );
+
+    const created = await assignments.create({
+      approximate_drop_area: 'SYNTH Vaishali Nagar Jaipur',
+      approximate_pickup_area: 'SYNTH Fulfilment Store Jaipur',
+      command_reference: 'SYNTH-CMD-CREATE-DELIVERY-CLOSURE',
+      context: partnerAdmin,
+      handling_flags: [],
+      now: new Date(now.getTime() + 7_500),
+      // Placement guesses the count from the lines; ready replaces it with
+      // the shop's own (8.5).
+      package_count: 3,
+      reason_code: 'ORDER_PLACED_AUTO_DISPATCH',
+      source_order_reference: orderA.order_reference,
+      vendor_location_id: storeA.locationId,
+      vendor_order_id: orderA.vendor_order_id,
+    });
+
     // 8.5 -- ready succeeds now that every line is resolved.
+    await rejects(
+      () =>
+        fulfilment.markReady({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderA.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          expected_version: picking.version,
+          package_count: 1,
+          handling_flags: ['RADIOACTIVE'],
+          now: new Date(now.getTime() + 7_900),
+        }),
+      FulfilmentInputError,
+      'A handling need outside the vocabulary was recorded',
+    );
+    const readyAt = new Date(now.getTime() + 8_000);
     const ready = await fulfilment.markReady({
       context: vendorContext(storeA.ownerUserId),
       vendor_order_id: orderA.vendor_order_id,
@@ -917,11 +979,86 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       expected_version: picking.version,
       package_count: 1,
       package_condition_note: 'One sealed synthetic crate.',
-      now: new Date(now.getTime() + 8_000),
+      handling_flags: ['FRAGILE', 'KEEP_COLD', 'FRAGILE'],
+      now: readyAt,
     });
     check(
       ready.lifecycle_state === 'READY' && ready.package_count === 1,
       'Ready did not persist package count',
+    );
+    // 8.5 -- what ready records: the count, the condition, the handling
+    // needs (deduplicated), the server's timestamp, and the promise made from
+    // the road the quote was priced on. Until audit run 53 the condition was
+    // never sent, the needs had nowhere to go and the promise was never set.
+    check(
+      ready.ready_at?.getTime() === readyAt.getTime() &&
+        ready.package_condition_note === 'One sealed synthetic crate.' &&
+        JSON.stringify(ready.handling_flags) === JSON.stringify(['FRAGILE', 'KEEP_COLD']) &&
+        typeof ready.route_seconds === 'number' &&
+        ready.promise_at?.getTime() === readyAt.getTime() + ready.route_seconds * 1000,
+      `Ready did not record the package, its needs and the promise (${JSON.stringify({
+        ready_at: ready.ready_at,
+        note: ready.package_condition_note,
+        handling: ready.handling_flags,
+        promise_at: ready.promise_at,
+        route_seconds: ready.route_seconds,
+      })})`,
+    );
+    // The delivery attempt made at placement carried a guessed count of 3;
+    // the partner is told the shop's own count and needs.
+    const attemptAfterReady = await pool.query<{
+      package_count: number;
+      handling_flags: string[];
+      version: number;
+    }>(
+      `SELECT package_count, handling_flags, version FROM marketplace.delivery_assignments
+        WHERE delivery_assignment_id=$1`,
+      [created.delivery_assignment_id],
+    );
+    check(
+      attemptAfterReady.rows[0]?.package_count === 1 &&
+        JSON.stringify(attemptAfterReady.rows[0]?.handling_flags) ===
+          JSON.stringify(['FRAGILE', 'KEEP_COLD']) &&
+        attemptAfterReady.rows[0]?.version === created.version,
+      `The delivery attempt was not told the shop's count and needs, or was made stale (${JSON.stringify(attemptAfterReady.rows)})`,
+    );
+    // 8.5 -- ready happens once: a second ready is refused for its state,
+    // and the timestamp it set stands.
+    let secondReady: unknown = null;
+    try {
+      await fulfilment.markReady({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderA.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        expected_version: ready.version,
+        package_count: 2,
+        now: new Date(now.getTime() + 8_100),
+      });
+    } catch (error) {
+      secondReady = error;
+    }
+    const afterSecond = await fulfilment.getOrder({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderA.vendor_order_id,
+    });
+    check(
+      secondReady instanceof FulfilmentConflictError &&
+        secondReady.code === 'ORDER_STATE_CONFLICT' &&
+        afterSecond.ready_at?.getTime() === readyAt.getTime() &&
+        afterSecond.package_count === 1 &&
+        afterSecond.version === ready.version,
+      `A second ready was not refused, or changed the order (${String(secondReady)}, v${afterSecond.version})`,
+    );
+    // The customer's list carries the promise.
+    const promisedList = await fulfilment.listCustomerOrders({
+      context: customerContext(customerId),
+    });
+    const promisedEntry = promisedList
+      .flatMap((group) => group.vendor_orders)
+      .find((entry) => entry.vendor_order_id === orderA.vendor_order_id);
+    check(
+      promisedEntry?.promise_at?.getTime() === ready.promise_at?.getTime(),
+      `The customer's order list does not carry the promise (${JSON.stringify(promisedEntry)})`,
     );
 
     // 8.5b -- a platform delivery is handed to its partner, and to nobody else.
@@ -983,50 +1120,6 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       `A fallback code was issued with no partner present (got ${noPartnerFallback})`,
     );
 
-    // The delivery leg begins here rather than after the handover, because the
-    // handover is part of it.
-    const partnerId = createUuidV7();
-    const adminId = createUuidV7();
-    const partner = partnerContext(partnerId);
-    const partnerAdmin = createRequestContext({
-      actor: createAuthenticatedActor({
-        actor_id: adminId,
-        actor_kind: 'admin',
-        session_id: createUuidV7(),
-      }),
-    });
-    for (const userId of [partnerId, adminId]) {
-      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [userId]);
-    }
-    const roleId = createUuidV7();
-    await pool.query(
-      `INSERT INTO marketplace.role_assignments
-        (role_assignment_id,user_id,role_key,state,valid_from,valid_until,
-         granted_by_user_id,request_id,correlation_id,created_at,updated_at)
-       VALUES ($1,$2,'DELIVERY_PARTNER','ACTIVE',$3,$4,$5,$6,$6,$3,$3)`,
-      [roleId, partnerId, now, new Date(now.getTime() + 86_400_000), adminId, createUuidV7()],
-    );
-    await pool.query(
-      `INSERT INTO marketplace.partner_eligibilities
-        (partner_eligibility_id,role_assignment_id,user_id,state,eligible_from,
-         eligible_until,reason_code,updated_at)
-       VALUES ($1,$2,$3,'ELIGIBLE',$4,$5,'SYNTH_PARTNER_DELIVERY',$4)`,
-      [createUuidV7(), roleId, partnerId, now, new Date(now.getTime() + 86_400_000)],
-    );
-
-    const created = await assignments.create({
-      approximate_drop_area: 'SYNTH Vaishali Nagar Jaipur',
-      approximate_pickup_area: 'SYNTH Fulfilment Store Jaipur',
-      command_reference: 'SYNTH-CMD-CREATE-DELIVERY-CLOSURE',
-      context: partnerAdmin,
-      handling_flags: [],
-      now: new Date(now.getTime() + 60_000),
-      package_count: 1,
-      reason_code: 'ORDER_PLACED_AUTO_DISPATCH',
-      source_order_reference: orderA.order_reference,
-      vendor_location_id: storeA.locationId,
-      vendor_order_id: orderA.vendor_order_id,
-    });
     const offered = await assignments.offer({
       command_reference: 'SYNTH-CMD-OFFER-DELIVERY-CLOSURE',
       context: partnerAdmin,
@@ -1411,6 +1504,12 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       now: new Date(collectionBase.getTime() + 5_000),
     });
     check(readyP.lifecycle_state === 'READY', 'Collection order did not reach READY');
+    // A collected order's promise is the moment it became ready (8.5).
+    check(
+      readyP.promise_at?.getTime() === readyP.ready_at?.getTime() &&
+        readyP.handling_flags.length === 0,
+      `A collected order's promise is not the moment it was ready (${JSON.stringify({ promise_at: readyP.promise_at, ready_at: readyP.ready_at })})`,
+    );
     // While it is READY -- so that the method check, not the state check, is
     // what refuses it -- a collected order cannot be sent out with store staff.
     await rejects(

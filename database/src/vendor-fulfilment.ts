@@ -29,6 +29,20 @@ export class FulfilmentNotFoundError extends Error {}
  * and the list lived only in the console's copy. `ACCEPT_DEADLINE_TIMEOUT` is
  * the system's own reason and is not a choice.
  */
+/**
+ * What a package needs on the way (8.5): the shop's words for the partner or
+ * the customer, recorded at ready and carried onto the delivery assignment.
+ */
+export const HANDLING_FLAGS = Object.freeze([
+  'FRAGILE',
+  'KEEP_COLD',
+  'KEEP_FROZEN',
+  'KEEP_UPRIGHT',
+  'HEAVY',
+  'LEAK_RISK',
+] as const);
+export type HandlingFlag = (typeof HANDLING_FLAGS)[number];
+
 export const VENDOR_DECLINE_REASONS = Object.freeze([
   'VENDOR_CLOSED',
   'STOCK_MISMATCH',
@@ -182,6 +196,15 @@ export interface VendorOrderSummary {
   readonly picked_up_at: Date | null;
   readonly package_count: number | null;
   readonly package_condition_note: string | null;
+  /** What the package needs on the way; empty until ready (8.5). */
+  readonly handling_flags: readonly string[];
+  /**
+   * The promise made at ready, on the server's clock (8.5): for a collected
+   * order the moment it became ready; for a delivered one when it should
+   * arrive, from the route the quote was priced on. Null before ready, and
+   * for a delivery whose quote carried no route.
+   */
+  readonly promise_at: Date | null;
   readonly preparation_estimate_seconds: number | null;
   readonly pickup_otp_expires_at: Date | null;
   readonly pickup_otp_attempts: number;
@@ -251,6 +274,8 @@ export interface CustomerOrderEntry {
   readonly lifecycle_state: string;
   readonly total_minor: number;
   readonly fulfilment_method: string | null;
+  /** The promise made at ready (8.5): collect from, or arrives around. */
+  readonly promise_at: Date | null;
 }
 
 export interface PickRecord {
@@ -812,7 +837,8 @@ const VENDOR_ORDER_SUMMARY_SQL = `
   SELECT o.vendor_order_id, o.order_reference, o.lifecycle_state,
          o.total_minor::text AS total_minor,
          o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
-         o.package_condition_note, o.preparation_estimate_seconds, o.pickup_otp_expires_at,
+         o.package_condition_note, o.handling_flags, o.pickup_promise_at,
+         o.preparation_estimate_seconds, o.pickup_otp_expires_at,
          o.pickup_otp_attempts, o.out_for_delivery_at, o.delivery_otp_expires_at,
          o.delivery_otp_attempts, o.decline_reason_code,
          method.fulfilment_method, method.route_metres, method.route_seconds, method.route_source,
@@ -885,6 +911,8 @@ function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
     picked_up_at: (row['picked_up_at'] as Date | null) ?? null,
     package_count: (row['package_count'] as number | null) ?? null,
     package_condition_note: (row['package_condition_note'] as string | null) ?? null,
+    handling_flags: Object.freeze([...((row['handling_flags'] as string[] | null) ?? [])]),
+    promise_at: (row['pickup_promise_at'] as Date | null) ?? null,
     preparation_estimate_seconds: (row['preparation_estimate_seconds'] as number | null) ?? null,
     pickup_otp_expires_at: (row['pickup_otp_expires_at'] as Date | null) ?? null,
     pickup_otp_attempts: row['pickup_otp_attempts'] as number,
@@ -1820,7 +1848,8 @@ export class VendorFulfilmentService {
     readonly expected_version: number;
     readonly package_count: number;
     readonly package_condition_note?: string;
-    readonly pickup_promise_at?: Date;
+    /** What the package needs on the way; one of `HANDLING_FLAGS` each. */
+    readonly handling_flags?: readonly string[];
     readonly now?: Date;
   }): Promise<VendorOrderSummary> {
     if (
@@ -1835,6 +1864,10 @@ export class VendorFulfilmentService {
       (input.package_condition_note.length < 1 || input.package_condition_note.length > 240)
     ) {
       throw new FulfilmentInputError('Condition note must be between 1 and 240 characters');
+    }
+    const handling = Object.freeze([...new Set(input.handling_flags ?? [])]);
+    if (handling.some((flag) => !(HANDLING_FLAGS as readonly string[]).includes(flag))) {
+      throw new FulfilmentInputError(`Handling needs must be among ${HANDLING_FLAGS.join(', ')}`);
     }
     const now = input.now ?? new Date();
     return tx(this.#pool, async (client) => {
@@ -1889,6 +1922,27 @@ export class VendorFulfilmentService {
       });
       const version = order.version + 1;
       const ids = contextIds(input.context);
+      // The promise, on the server's clock (8.5): a collected order is ready
+      // from now; a delivered one should arrive after the road the quote was
+      // priced on. Until audit run 53 nothing set it.
+      const route = await client.query<{ fulfilment_method: string; route_seconds: number | null }>(
+        `SELECT cvg.fulfilment_method, cqg.route_seconds
+           FROM marketplace.checkout_groups cg
+           JOIN marketplace.checkout_quote_groups cqg
+             ON cqg.checkout_quote_id = cg.checkout_quote_id
+            AND cqg.vendor_location_id = $2
+           JOIN marketplace.cart_vendor_groups cvg USING (cart_vendor_group_id)
+          WHERE cg.checkout_group_id = $1`,
+        [order.checkout_group_id, order.vendor_location_id],
+      );
+      const method = route.rows[0]?.fulfilment_method ?? 'PLATFORM_DELIVERY';
+      const routeSeconds = route.rows[0]?.route_seconds ?? null;
+      const promiseAt =
+        method === 'CUSTOMER_PICKUP'
+          ? now
+          : routeSeconds === null
+            ? null
+            : new Date(now.getTime() + routeSeconds * 1000);
       // The capture plan (implementation.md 6.2.4): what the bag holds is what
       // the customer pays for. Each line's ordered total less what is in the
       // bag -- nothing for a missing or refused line, fewer units for a short
@@ -1939,17 +1993,31 @@ export class VendorFulfilmentService {
       await client.query(
         `UPDATE marketplace.vendor_orders
             SET lifecycle_state='READY', ready_at=$2, package_count=$3,
-                package_condition_note=$4, pickup_promise_at=$5,
-                version=$6, updated_at=$2
+                package_condition_note=$4, pickup_promise_at=$5, handling_flags=$6,
+                version=$7, updated_at=$2
           WHERE vendor_order_id=$1`,
         [
           input.vendor_order_id,
           now,
           input.package_count,
           input.package_condition_note ?? null,
-          input.pickup_promise_at ?? null,
+          promiseAt,
+          [...handling],
           version,
         ],
+      );
+      // The delivery attempt made at placement carried a package count
+      // guessed from the line count, which the partner then had to type back
+      // exactly at the counter. The shop's own count and needs replace it;
+      // these are packaging facts, not a transition, so the attempt's version
+      // stands and a partner's open offer is not made stale by them.
+      await client.query(
+        `UPDATE marketplace.delivery_assignments
+            SET package_count=$2, handling_flags=$3, updated_at=$4
+          WHERE vendor_order_id=$1
+            AND assignment_state IN ('UNASSIGNED','OFFERED','DECLINED','OFFER_EXPIRED',
+                                     'ASSIGNED','AT_VENDOR')`,
+        [input.vendor_order_id, input.package_count, [...handling], now],
       );
       await appendEvent(client, {
         vendor_order_id: input.vendor_order_id,
@@ -1959,6 +2027,9 @@ export class VendorFulfilmentService {
         previous_state: 'PICKING',
         resulting_state: 'READY',
         reason_code: 'ORDER_READY',
+        note: `${input.package_count} package${input.package_count === 1 ? '' : 's'}${
+          handling.length > 0 ? `; handling ${handling.join(', ')}` : ''
+        }${input.package_condition_note ? `; ${input.package_condition_note}` : ''}`.slice(0, 500),
         ids,
       });
       // The bag is final: the group's authorisation may now be settled once
@@ -2700,11 +2771,12 @@ export class VendorFulfilmentService {
       lifecycle_state: string | null;
       total_minor: string | null;
       fulfilment_method: string | null;
+      pickup_promise_at: Date | null;
     }>(
       `SELECT g.checkout_group_id, g.checkout_reference, g.created_at,
               g.lifecycle_state AS checkout_state, g.total_minor::text AS checkout_total_minor,
               o.vendor_order_id, o.vendor_location_id, l.location_name, o.order_reference,
-              o.lifecycle_state, o.total_minor::text AS total_minor,
+              o.lifecycle_state, o.total_minor::text AS total_minor, o.pickup_promise_at,
               cvg.fulfilment_method
          FROM marketplace.checkout_groups g
          LEFT JOIN marketplace.vendor_orders o ON o.checkout_group_id = g.checkout_group_id
@@ -2769,6 +2841,7 @@ export class VendorFulfilmentService {
           lifecycle_state: row.lifecycle_state,
           total_minor: Number(row.total_minor),
           fulfilment_method: row.fulfilment_method,
+          promise_at: row.pickup_promise_at ?? null,
         }),
       );
     }

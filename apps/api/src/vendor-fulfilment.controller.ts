@@ -13,7 +13,14 @@ import { AssignmentCustodyService, VendorFulfilmentService } from '@neighbourhoo
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ASSIGNMENT_CUSTODY, VENDOR_FULFILMENT } from './tokens.js';
-import { integerField, object, optionalString, stringField, uuid } from './request-fields.js';
+import {
+  integerField,
+  object,
+  optionalString,
+  optionalStrings,
+  stringField,
+  uuid,
+} from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const vendorFulfil = RequireAuthorization({
   capability: 'vendor.order.fulfil',
@@ -327,6 +334,9 @@ export class VendorOrderFulfilmentController {
         package_count: integerField(body, 'package_count'),
         ...(optionalString(body, 'package_condition_note') !== undefined
           ? { package_condition_note: optionalString(body, 'package_condition_note') as string }
+          : {}),
+        ...(optionalStrings(body, 'handling_flags') !== undefined
+          ? { handling_flags: optionalStrings(body, 'handling_flags') as readonly string[] }
           : {}),
       });
     } catch (error) {

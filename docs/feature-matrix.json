@@ -1604,7 +1604,7 @@
       "name": "Separate delivery expectations",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Pickup and delivery are described as different promises",
+      "notes": "Pickup and delivery are described as different promises; at ready the order carries promise_at and the customer's order card says \"Ready to collect since\" or \"Expected around\" (audit run 53)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2790,7 +2790,7 @@
       "name": "Package metadata",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "package_count + package_condition_note on mark-ready",
+      "notes": "package_count, package_condition_note and handling_flags (FRAGILE, KEEP_COLD, KEEP_FROZEN, KEEP_UPRIGHT, HEAVY, LEAK_RISK) on mark-ready; the console sends all three and the delivery attempt is told the shop's count and needs (audit run 53)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2812,7 +2812,7 @@
       "name": "Mark ready",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "After all picks resolved",
+      "notes": "After all picks resolved; ready stamps the server time and the promise (collect from, or arrives after the quoted road), once, and publishes vendor_order.ready (audit run 53)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
