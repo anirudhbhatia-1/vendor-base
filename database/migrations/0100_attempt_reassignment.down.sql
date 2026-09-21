@@ -1,0 +1,3 @@
+DROP TRIGGER partner_attempt_compensations_append_only ON marketplace.partner_attempt_compensations;
+DROP FUNCTION marketplace.protect_partner_attempt_compensations();
+DROP TABLE marketplace.partner_attempt_compensations;

@@ -21,7 +21,7 @@ import {
   MoneyNotFoundError,
   MoneyStateError,
 } from '../src/money-lifecycle.js';
-import { calculatePartnerOfferEarning } from '../src/money-policy.js';
+import { calculatePartnerOfferEarning, SYNTHETIC_FINANCIAL_POLICY } from '../src/money-policy.js';
 import { ESTIMATE_ROAD_FACTOR } from '../src/routing.js';
 import { OrderMoneyOrchestrator } from '../src/order-money-orchestrator.js';
 import { CustomerCartService } from '../src/customer-cart.js';
@@ -3069,8 +3069,13 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         'Placement did not reserve a custody attempt for the platform delivery',
       );
       const holder = async () => {
-        const row = await pool.query<{ assignment_state: string; partner_user_id: string | null }>(
-          `SELECT assignment_state, partner_user_id FROM marketplace.delivery_assignments
+        const row = await pool.query<{
+          assignment_state: string;
+          partner_user_id: string | null;
+          offer_expires_at: Date | null;
+        }>(
+          `SELECT assignment_state, partner_user_id, offer_expires_at
+             FROM marketplace.delivery_assignments
             WHERE delivery_assignment_id=$1`,
           [attempt.delivery_assignment_id],
         );
@@ -3138,6 +3143,73 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
             }).total_minor,
         `The offer does not show the road the order was priced on (${JSON.stringify({ shown, priced: pricedForOffer.rows[0] })})`,
       );
+      // 9.3 -- one offer at a time, and it expires on the configured window:
+      // thirty seconds by default (`assignment.offer_seconds`), not the five
+      // minutes the worker used to hard-code while the phase said thirty.
+      check(
+        held?.offer_expires_at?.getTime() === dispatchBase.getTime() + 1_000 + 30_000,
+        `The offer window is not the default thirty seconds (${String(held?.offer_expires_at?.toISOString())})`,
+      );
+      // 9.3 -- the offer states when the bag is ready to collect and on what
+      // waiting terms, not only what it pays and how far it is.
+      const readyRow = await pool.query<{ ready_at: Date | null; pickup_promise_at: Date | null }>(
+        `SELECT o.ready_at, o.pickup_promise_at
+           FROM marketplace.delivery_assignments a
+           JOIN marketplace.vendor_orders o ON o.vendor_order_id = a.vendor_order_id
+          WHERE a.delivery_assignment_id=$1`,
+        [attempt.delivery_assignment_id],
+      );
+      check(
+        shown?.expected_ready_at instanceof Date &&
+          readyRow.rows[0]?.ready_at instanceof Date &&
+          shown.expected_ready_at.getTime() === readyRow.rows[0].ready_at.getTime() &&
+          (shown.promise_at?.getTime() ?? null) ===
+            (readyRow.rows[0].pickup_promise_at?.getTime() ?? null) &&
+          shown.wait_policy?.included_seconds ===
+            SYNTHETIC_FINANCIAL_POLICY.wait_included_seconds &&
+          shown.wait_policy.per_completed_minute_minor ===
+            SYNTHETIC_FINANCIAL_POLICY.wait_per_completed_minute_minor &&
+          shown.wait_policy.cap_minor === SYNTHETIC_FINANCIAL_POLICY.wait_cap_minor,
+        `The offer does not state the ready time and waiting terms (${JSON.stringify({ shown, ready: readyRow.rows[0] })})`,
+      );
+      // Operations lengthen the window to forty-five seconds; the next offer
+      // is cut to the setting, not to the constant.
+      const offerWindowProposer = createUuidV7();
+      const offerWindowApprover = createUuidV7();
+      for (const actorId of [offerWindowProposer, offerWindowApprover]) {
+        await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [actorId]);
+      }
+      const offerWindowDraft = await createConfigurationDraft(pool, {
+        actor_id: offerWindowProposer,
+        configuration_key: 'assignment.offer_seconds',
+        configuration_kind: 'SETTING',
+        configuration_value: 45,
+        correlation_id: createUuidV7(),
+        request_id: createRequestId(),
+        scope: { kind: 'GLOBAL', reference: 'global' },
+      });
+      await validateConfigurationVersion(pool, {
+        actor_id: offerWindowProposer,
+        configuration_version_id: offerWindowDraft.configuration_version_id,
+        request_id: createRequestId(),
+      });
+      await approveConfigurationVersion(pool, {
+        actor_id: offerWindowApprover,
+        configuration_version_id: offerWindowDraft.configuration_version_id,
+        request_id: createRequestId(),
+      });
+      await scheduleConfigurationVersion(pool, {
+        actor_id: offerWindowApprover,
+        configuration_version_id: offerWindowDraft.configuration_version_id,
+        effective_from: new Date(dispatchBase.getTime() + 2_000),
+        request_id: createRequestId(),
+      });
+      await activateConfigurationVersion(pool, {
+        actor_id: offerWindowApprover,
+        at: new Date(dispatchBase.getTime() + 2_000),
+        configuration_version_id: offerWindowDraft.configuration_version_id,
+        request_id: createRequestId(),
+      });
 
       // They ignore it. Five minutes later the offer expires, returns to the
       // pool, and must go to the other rider -- not straight back.
@@ -3160,6 +3232,11 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       check(
         second.returned === 1 && second.offered === 1 && held?.partner_user_id === riders.far,
         `An expired offer was not rotated to the second partner (${JSON.stringify({ second, held })})`,
+      );
+      check(
+        held?.offer_expires_at?.getTime() ===
+          dispatchBase.getTime() + 1_000 + 5 * 60_000 + 1_000 + 45_000,
+        `The configured offer window was not honoured (${String(held?.offer_expires_at?.toISOString())})`,
       );
       // They ignore it too. With both on one pass each, the nearest is asked
       // again: a finite pool rotates, it does not strand the order.
@@ -3196,6 +3273,39 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       check(
         fourth.returned === 1 && fourth.offered === 1 && held?.partner_user_id === riders.far,
         `A declined attempt was re-offered to the partner who declined it (${JSON.stringify(held)})`,
+      );
+
+      // 9.3 -- an operator takes the attempt off the rider holding it, with a
+      // reason and a recorded compensation. The attempt returns to the pool;
+      // the rider it was taken from is not asked for it again; and with the
+      // other rider having declined, nobody is left to ask -- the attempt
+      // waits rather than going back to either.
+      const heldByFar = await assignments.get({
+        context: partnerContext(riders.far),
+        delivery_assignment_id: attempt.delivery_assignment_id,
+      });
+      const reassigned = await assignments.reassign({
+        command_reference: 'SYNTH-CMD-REASSIGN-ROTATION',
+        compensation_minor: 1_500,
+        context: adminContext(adminId),
+        delivery_assignment_id: attempt.delivery_assignment_id,
+        expected_version: heldByFar.version,
+        note: 'SYNTH rider reports a puncture',
+        now: new Date(dispatchBase.getTime() + 1_000 + 10 * 60_000 + 6_000),
+        reason_code: 'PARTNER_VEHICLE_BREAKDOWN',
+      });
+      check(
+        reassigned.assignment_state === 'UNASSIGNED' && reassigned.partner_user_id === null,
+        `Reassignment did not return the attempt to the pool (${JSON.stringify(reassigned)})`,
+      );
+      const fifth = await tick(
+        'T5',
+        new Date(dispatchBase.getTime() + 1_000 + 10 * 60_000 + 7_000),
+      );
+      held = await holder();
+      check(
+        fifth.offered === 0 && held?.assignment_state === 'UNASSIGNED',
+        `A reassigned attempt went back to a rider it was taken from or one who declined it (${JSON.stringify({ fifth, held })})`,
       );
     } finally {
       await dispatch.close();

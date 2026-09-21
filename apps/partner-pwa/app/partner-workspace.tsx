@@ -30,7 +30,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiUrl, partnerRequest } from './authenticated-api';
 import { PartnerApplicationPanel } from './application-panel';
-import { displayArea, shortReference } from './display';
+import { displayArea, offerDeadlineSentence, shortReference, waitPolicySentence } from './display';
 import { EarningsPanel } from './earnings-panel';
 import { FieldOpsPanel } from './field-ops-panel';
 import { PartnerProfilePanel } from './profile-panel';
@@ -77,6 +77,14 @@ type Assignment = {
   readonly route_seconds?: number | null;
   readonly route_source?: 'ESTIMATE' | 'MAPBOX' | null;
   readonly expected_earning_minor?: number | null;
+  /** When the bag is, or is expected to be, ready at the store (9.3). */
+  readonly expected_ready_at?: string | null;
+  readonly promise_at?: string | null;
+  readonly wait_policy?: {
+    readonly included_seconds: number;
+    readonly per_completed_minute_minor: number;
+    readonly cap_minor: number;
+  } | null;
   /**
    * Present only while this partner is holding the goods. The API decides that,
    * not this screen: before custody and after completion the field is absent.
@@ -1022,6 +1030,13 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
                         </strong>
                         <small>expected for this trip</small>
                       </div>
+                      {/* The rest of what an honest offer states (9.3): when
+                          the bag will be ready to collect, and the waiting
+                          terms if it is not. */}
+                      <p className="offer-card__meta">
+                        {offerDeadlineSentence(offer.expected_ready_at, now)}
+                        {offer.wait_policy ? ` · ${waitPolicySentence(offer.wait_policy)}` : ''}
+                      </p>
                       <div className="route-strip">
                         <div>
                           <p className="ns-eyebrow">Pick up near</p>

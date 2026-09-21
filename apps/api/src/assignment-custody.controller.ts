@@ -25,6 +25,7 @@ import {
   dateField,
   integerField,
   object,
+  optionalString,
   stringField,
   stringsField,
   uuid,
@@ -49,6 +50,10 @@ const manageAssignments = RequireAuthorization({
   capability: 'admin.delivery.assignment_manage',
   conceal_resource: true,
 });
+const partnerEarningsRead = RequireAuthorization({
+  capability: 'partner.earnings.read',
+  conceal_resource: true,
+});
 
 function transition(value: Record<string, unknown>, assignmentId: string) {
   return {
@@ -63,6 +68,21 @@ function transition(value: Record<string, unknown>, assignmentId: string) {
 @Controller('partner')
 export class PartnerAssignmentController {
   constructor(@Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService) {}
+
+  /** What this partner has been recorded as owed for attempts taken from them (9.3). */
+  @Get('compensations')
+  @partnerEarningsRead
+  async compensations() {
+    try {
+      return {
+        compensations: await this.assignments.listCompensationsForPartner({
+          context: currentRequestContext(),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
 
   @Get('offers')
   @offeredAssignment
@@ -351,9 +371,21 @@ export class AdminAssignmentController {
       throw new BadRequestException();
     }
     try {
+      // A reassignment puts the attempt back to the pool with the displaced
+      // partner's compensation on record (9.3); it used to end the attempt and
+      // strand the order.
+      if (resulting === 'REASSIGNED') {
+        return await this.assignments.reassign({
+          ...transition(value, id),
+          compensation_minor: integerField(value, 'compensation_minor', 0),
+          ...(optionalString(value, 'note') !== undefined
+            ? { note: optionalString(value, 'note') as string }
+            : {}),
+        });
+      }
       return await this.assignments.endBeforePickup({
         ...transition(value, id),
-        resulting_state: resulting as 'CANCELLED' | 'FAILED_PICKUP' | 'REASSIGNED',
+        resulting_state: resulting as 'CANCELLED' | 'FAILED_PICKUP',
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();

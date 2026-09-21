@@ -469,6 +469,47 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
         afterPause.some((candidate) => candidate.partner_user_id === partnerId),
       `A paused delivery network still offered work, or a revoked pause kept blocking (${underPause.length}/${afterPause.length})`,
     );
+    // 9.3 -- one offer at a time: a partner holding a live offer is not
+    // offered a second attempt; once that offer has lapsed they are.
+    const openOfferId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.delivery_assignments
+        (delivery_assignment_id, source_order_reference, vendor_location_id, partner_user_id,
+         assignment_state, custody_state, package_count, approximate_pickup_area,
+         approximate_drop_area, offer_expires_at, request_id, correlation_id,
+         created_at, updated_at)
+       VALUES ($1,$2,$3,$4,'OFFERED','NONE',1,'SYNTH Pickup','SYNTH Drop',$5,$6,$6,$7,$7)`,
+      [
+        openOfferId,
+        `SYNTH-ORDER-AV3-${Date.now()}`,
+        locationId,
+        partnerId,
+        new Date(later.getTime() + 30_000),
+        createUuidV7(),
+        later,
+      ],
+    );
+    const whileOffered = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      now: later,
+    });
+    const afterOfferLapsed = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      now: new Date(later.getTime() + 31_000),
+    });
+    check(
+      !whileOffered.some((candidate) => candidate.partner_user_id === partnerId) &&
+        afterOfferLapsed.some((candidate) => candidate.partner_user_id === partnerId),
+      `A partner with a live offer was offered a second attempt, or stayed excluded after it lapsed (${whileOffered.length}/${afterOfferLapsed.length})`,
+    );
+    await pool.query(
+      'DELETE FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1',
+      [openOfferId],
+    );
     // Account: a disabled user is offered nothing.
     await pool.query(`UPDATE marketplace.users SET state='DISABLED' WHERE user_id=$1`, [partnerId]);
     const disabled = await service.eligible({

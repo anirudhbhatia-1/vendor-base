@@ -1696,3 +1696,30 @@ export const partnerDocumentRenewals = marketplaceSchema.table(
     index('partner_document_renewals_queue').on(table.lifecycleState, table.createdAt),
   ],
 );
+
+/** What a partner displaced by a manual reassignment was owed (9.3, 0100). */
+export const partnerAttemptCompensations = marketplaceSchema.table(
+  'partner_attempt_compensations',
+  {
+    partnerAttemptCompensationId: uuid('partner_attempt_compensation_id').primaryKey(),
+    deliveryAssignmentId: uuid('delivery_assignment_id').notNull(),
+    partnerUserId: uuid('partner_user_id').notNull(),
+    decidedByUserId: uuid('decided_by_user_id').notNull(),
+    displacedFrom: text('displaced_from').notNull(),
+    amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+    currency: text('currency').notNull().default('INR'),
+    reasonCode: text('reason_code').notNull(),
+    note: text('note'),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      'partner_attempt_compensations_displaced_from_check',
+      sql`${table.displacedFrom} IN ('OFFERED', 'ASSIGNED', 'AT_VENDOR')`,
+    ),
+    index('partner_attempt_compensations_partner').on(table.partnerUserId, table.createdAt),
+    index('partner_attempt_compensations_attempt').on(table.deliveryAssignmentId),
+  ],
+);

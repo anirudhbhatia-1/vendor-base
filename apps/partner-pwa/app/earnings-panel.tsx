@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import type { PartnerStatement } from '@neighbourhood-store/contracts';
+import type { PartnerAttemptCompensation, PartnerStatement } from '@neighbourhood-store/contracts';
 import { partnerApiClient } from './authenticated-api';
+import { shortReference } from './display';
 
 /**
  * The statement as a file the partner can keep (DLP-52).
@@ -27,6 +28,7 @@ export function earningsToCsv(statement: PartnerStatement): string {
 
 export function EarningsPanel() {
   const [statement, setStatement] = useState<PartnerStatement | null>(null);
+  const [compensations, setCompensations] = useState<readonly PartnerAttemptCompensation[]>([]);
   const [message, setMessage] = useState('Load your live earnings statement after signing in.');
   const [busy, setBusy] = useState(false);
 
@@ -36,6 +38,14 @@ export function EarningsPanel() {
       const client = await partnerApiClient();
       const data = await client.partner.finance.statement();
       setStatement(data);
+      // Compensation for attempts operations took away (9.3) is the partner's
+      // to see beside their earnings; its absence must not hide the statement.
+      setCompensations(
+        await client.partner.earnings
+          .compensations()
+          .then((result) => result.compensations)
+          .catch(() => []),
+      );
       setMessage(`Statement loaded. ${data.earnings.length} earning record(s).`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Statement could not be loaded.');
@@ -139,6 +149,22 @@ export function EarningsPanel() {
               ))
             )}
           </div>
+
+          {compensations.length > 0 && (
+            <section className="earnings-ledger" aria-label="Compensation for reassigned work">
+              <h3>Compensation for reassigned work</h3>
+              {compensations.map((c) => (
+                <div key={c.partner_attempt_compensation_id}>
+                  <strong>{shortReference(c.delivery_assignment_id)}</strong>
+                  <span>
+                    taken while {c.displaced_from.toLowerCase().replace(/_/g, ' ')} ·{' '}
+                    {c.reason_code.toLowerCase().replace(/_/g, ' ')}
+                  </span>
+                  <em>{fmt(c.amount_minor)}</em>
+                </div>
+              ))}
+            </section>
+          )}
         </>
       )}
     </div>

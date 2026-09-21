@@ -406,6 +406,52 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
     }
   }
 
+  /**
+   * Manual reassignment (9.3). An operator takes an attempt off the partner
+   * holding it -- offered, accepted or at the store, nothing collected -- with
+   * a reason and the compensation decided for the partner displaced. The
+   * attempt returns to the pool; that partner is not offered it again.
+   */
+  async function reassignAssignment(entry: Record<string, unknown>) {
+    const rupees = window.prompt(
+      'Compensation for the partner this is taken from, in rupees (0 for none)?',
+      '0',
+    );
+    if (rupees === null) return;
+    const compensationMinor = Math.round(Number(rupees) * 100);
+    if (!Number.isFinite(compensationMinor) || compensationMinor < 0) {
+      setOutput('Enter the compensation in rupees.');
+      return;
+    }
+    const reason = window.prompt(
+      'Reason (PARTNER_VEHICLE_BREAKDOWN, PARTNER_UNREACHABLE, OPERATOR_REASSIGNED)?',
+      'OPERATOR_REASSIGNED',
+    );
+    if (!reason) return;
+    try {
+      await request(
+        `admin/delivery/assignments/${String(entry['delivery_assignment_id'])}/end-before-pickup`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            command_reference: `SYNTH-CMD-REASSIGN-${Date.now().toString(36).toUpperCase()}`,
+            compensation_minor: compensationMinor,
+            expected_version: Number(entry['version'] ?? 1),
+            reason_code: reason
+              .trim()
+              .toUpperCase()
+              .replace(/[^A-Z0-9]+/g, '_'),
+            resulting_state: 'REASSIGNED',
+          }),
+        },
+      );
+      setOutput('Attempt returned to the pool; the compensation is on the partner’s record.');
+      await loadOrdersMonitor();
+    } catch (error) {
+      setOutput(error instanceof Error ? error.message : 'Reassignment failed.');
+    }
+  }
+
   async function loadPayments() {
     try {
       const result = (await request('admin/finance/payments')) as {
@@ -743,6 +789,16 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
                       </button>
                       <button type="button" onClick={() => void offerAssignment(entry)}>
                         Offer to selected partner
+                      </button>
+                    </div>
+                  )}
+                {Boolean(entry['delivery_assignment_id']) &&
+                  ['OFFERED', 'ASSIGNED', 'AT_VENDOR'].includes(
+                    String(entry['assignment_state'] ?? ''),
+                  ) && (
+                    <div className="actions">
+                      <button type="button" onClick={() => void reassignAssignment(entry)}>
+                        Take off this partner and re-offer
                       </button>
                     </div>
                   )}

@@ -686,6 +686,16 @@ export type PartnerEarningEntry = {
   posted_at: string;
 };
 
+/** What a partner is owed for an attempt an operator took from them (9.3). */
+export type PartnerAttemptCompensation = {
+  partner_attempt_compensation_id: string;
+  delivery_assignment_id: string;
+  displaced_from: string;
+  amount_minor: number;
+  reason_code: string;
+  created_at: string;
+};
+
 export type PartnerStatement = {
   pending_minor: number;
   paid_minor: number;

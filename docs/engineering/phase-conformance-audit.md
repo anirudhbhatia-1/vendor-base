@@ -1953,6 +1953,45 @@ Five requirements. Two held (online/offline/paused with a server-side session an
 
 **Step 9.2: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 58 (21 September 2026) — step 9.3, immutable offer attempts
+
+Five requirements. Three held in substance (one offered attempt with expiry; atomic acceptance; decline and expiry closed by events, not deletion) and two did not: the offer stated pay, areas, road and constraints but not when to be at the store or on what waiting terms, and "manual reassignment" ended the attempt and stranded the order with nothing owed to anybody. The offer window was also a hard-coded five minutes where the phase says thirty seconds, and the 9.2 forward finding stood: a partner holding a live offer could be offered a second attempt. One migration (0100); twenty connected assertions across three modules, three unit tests; eight mutation probes, seven caught and one survived on a second guard.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | One offered attempt with expiry | One partner per attempt held; **the window was `5 * 60_000` in the dispatcher**, not a setting, and **a partner with an open offer could be offered another** — P58-01. |
+| 2 | Show pay, areas, distance/time, pickup deadline, wait/return policy, constraints | Pay, areas, road with travel time (D-17) and handling met; **no ready time or pickup promise, no waiting terms** — P58-02. |
+| 3 | Accept atomically | Met: row lock, version, state, partner and expiry checks, one ACTIVE membership by unique index. Now verified under a forced concurrent arrival. |
+| 4 | Close decline/expiry without deleting | Met: `DECLINED` and `OFFER_EXPIRED` events name the partner; `returnToPool` reopens the attempt; `offerHistory` keeps decliners off it. |
+| 5 | Manual reassignment with reason and compensation history | **Not met:** `endBeforePickup('REASSIGNED')` set a terminal state and nothing re-offered the order; no compensation existed anywhere — P58-03. |
+
+**P58-01 — the window, and one offer at a time.** `DeliveryDispatchOrchestrator.offerSeconds` reads `assignment.offer_seconds` (a SETTING, 5–300, default `DEFAULT_OFFER_SECONDS` = 30) and `offerReadyAssignments` cuts each offer to it. `PartnerAvailabilityService.eligible` passes over a partner whose current offer has not lapsed, so two offers cannot race to the same rider. The admin console's manual offer keeps its own five-minute window: that one is the operator's choice, not the dispatcher's.
+
+**P58-02 — an honest offer.** `listOffersForPartner` carries `expected_ready_at` (the order's `ready_at`, or its acceptance plus its preparation estimate), `promise_at` (`pickup_promise_at`) and `wait_policy` (included seconds, per-completed-minute rate and cap from the financial policy). The partner's offer card says "Ready to collect in about N min" and "first 5 min waiting included, then ₹1.00/min up to ₹10.00" beside the pay and the road.
+
+**P58-03 — reassignment with a record.** 0100 adds `marketplace.partner_attempt_compensations` (append-only: the attempt, the partner displaced, who decided, the state displaced from, the amount 0–100000 minor, reason, note). `AssignmentCustodyService.reassign` (admin only; OFFERED, ASSIGNED or AT_VENDOR with a partner and no custody; replay-safe) ends the membership, writes the compensation row, appends a `REASSIGNED` event naming the displaced partner, and returns the row to `UNASSIGNED` with no partner and no expiry, so the next dispatch tick re-offers it — `offerHistory` now counts an admin's `REASSIGNED` as that partner's decline, so not to them. The API's `end-before-pickup` routes `resulting_state: 'REASSIGNED'` to it with `compensation_minor` and an optional note; `GET partner/compensations` (`partner.earnings.read`) gives the partner their own record, and the earnings panel lists it under "Compensation for reassigned work". The admin console gains "Take off this partner and re-offer" on offered, accepted and at-store attempts, asking the compensation and the reason.
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Compensation row not written | *Reassignment did not record who was displaced, from what, and what they are owed (undefined)* |
+| `REASSIGNED` ignored by `offerHistory` | *A partner an operator displaced could be offered the same attempt again* |
+| Dispatcher uses the constant, not the setting | *The configured offer window was not honoured* |
+| Membership not ended on reassignment | *… ("memberships":"1", …)* |
+| Reassignment allowed from PICKED_UP | *An attempt in custody was reassigned away from its partner* |
+| Open offer not excluded from eligibility | *A partner with a live offer was offered a second attempt … (1/1)* |
+| `expected_ready_at` dropped from the offer | *The offer does not state the ready time and waiting terms* |
+| Row lock removed from `lockAssignment` | **Survived**: with the lock gone both accepts read the same version and the second is refused by the unique ACTIVE-membership index instead (*Partner already has active work*). The outcome the walk asserts — one winner, one ACCEPTED event, one membership — holds on the second guard; the lock is what makes the loser's answer "stale" rather than "busy". Kept, recorded. |
+
+**Environment note.** The laptop was awake and on power; the container VM's clock matched the host to the second, and the ladder ran locally. The first `pnpm test:integration` failed on the worker smoke's queue canary because the last probe's fulfilment walk had left outbox events for truncated orders on the test database (the worker retried `order.placed` for a vendor order that no longer existed and never reached the canary); on a rebuilt test stack it passed. Probe runs leave the test stack up; the suites need it fresh.
+
+**Forward findings.** (9.5) The wait policy is shown on the offer and applied at settlement; the live wait timer's own thresholds and choices are 9.5's audit. (9.4) The admin's manual offer window is five minutes by console choice. (carried) `ZONE` scopes match service zones by name; branch protection off.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 101 migration files (0000–0100), full ladder; `assignment_custody` 26 assertions (15 before), `vendor_fulfilment` 264 (259), `partner_availability` 26 (25). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 571 pass / 0 fail (568 before: the partner PWA's offer sentences and the API's compensation capability and reassignment routing); `pnpm test:integration` exit 0 on a rebuilt test stack; all eight probes on a rebuilt database.
+
+**Step 9.3: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

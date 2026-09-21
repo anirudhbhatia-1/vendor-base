@@ -5,6 +5,7 @@ import test from 'node:test';
 import { onlineTimeSentence } from './profile-panel.js';
 import { earningsToCsv } from './earnings-panel.js';
 import { digestOf } from './field-ops-panel.js';
+import { offerDeadlineSentence, waitPolicySentence } from './display.js';
 
 const directory = path.resolve(import.meta.dirname);
 
@@ -327,4 +328,18 @@ test('online time today is read from the history and said in hours and minutes (
   assert.equal(onlineTimeSentence(3_600 + 5 * 60), '1 h 5 min');
   assert.equal(onlineTimeSentence(45), '0 min');
   assert.equal(onlineTimeSentence(undefined), '0 min');
+});
+
+test('an offer states when to be at the store and the waiting terms (9.3)', () => {
+  const now = Date.parse('2026-09-21T10:00:00.000Z');
+  assert.equal(
+    offerDeadlineSentence('2026-09-21T10:12:00.000Z', now),
+    'Ready to collect in about 12 min',
+  );
+  assert.equal(offerDeadlineSentence('2026-09-21T09:50:00.000Z', now), 'Ready to collect now');
+  assert.equal(offerDeadlineSentence(null, now), 'Ready time not yet known');
+  assert.equal(
+    waitPolicySentence({ included_seconds: 300, per_completed_minute_minor: 100, cap_minor: 1000 }),
+    'first 5 min waiting included, then ₹1.00/min up to ₹10.00',
+  );
 });

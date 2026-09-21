@@ -47,6 +47,7 @@ export type {
   Storefront,
   SubstitutionPreference,
   PartnerAvailability,
+  PartnerAttemptCompensation,
   PartnerEarningEntry,
   PartnerStatement,
   PrimaryWorkspaceRole,

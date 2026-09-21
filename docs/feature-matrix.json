@@ -3488,7 +3488,7 @@
       "name": "Privacy-bounded job offer",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "approximate_pickup_area shown pre-custody",
+      "notes": "approximate_pickup_area shown pre-custody; the offer also states the ready time at the store, the pickup promise and the waiting terms (audit run 58)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3511,7 +3511,7 @@
       "name": "Accept or decline",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Both clients call accept. Decline in API",
+      "notes": "Both clients call accept. Decline in API; a decline or an expiry closes the attempt with an event naming the partner and returns it to the pool (audit run 58)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3534,7 +3534,7 @@
       "name": "Offer expiry",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Worker expires offers on 15s poll",
+      "notes": "Worker expires offers on 15s poll, on the configured window assignment.offer_seconds (default 30 s; until audit run 58 a hard-coded five minutes)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3557,7 +3557,7 @@
       "name": "One active job",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "An unsynced proof blocks accepting further work, and the offer says why",
+      "notes": "An unsynced proof blocks accepting further work, and the offer says why; a partner holding a live offer is not offered a second attempt (audit run 58)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3584,7 +3584,7 @@
       "name": "One active assignment per fulfilment",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Concurrency control in AssignmentCustodyService",
+      "notes": "Concurrency control in AssignmentCustodyService: two accepts arriving together settle to one winner under the row lock, verified with a forced arrival (audit run 58)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3607,7 +3607,7 @@
       "name": "Assignment history",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Assignment history is read from the server",
+      "notes": "Assignment history is read from the server; an operator's reassignment records the displaced partner, the reason and the compensation decided, append-only (audit run 58)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

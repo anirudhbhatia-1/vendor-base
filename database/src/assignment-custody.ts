@@ -8,7 +8,7 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { randomInt } from 'node:crypto';
-import { calculatePartnerOfferEarning } from './money-policy.js';
+import { calculatePartnerOfferEarning, SYNTHETIC_FINANCIAL_POLICY } from './money-policy.js';
 import { completeVendorOrder } from './vendor-order-completion.js';
 import { Pool, type PoolClient } from 'pg';
 import { transaction } from './transaction.js';
@@ -50,6 +50,20 @@ export interface DeliveryAssignmentRecord {
   readonly route_seconds?: number | null;
   readonly route_source?: 'ESTIMATE' | 'MAPBOX' | null;
   readonly expected_earning_minor?: number | null;
+  /**
+   * When the bag is, or is expected to be, ready at the store (9.3): the
+   * shop's ready time, or its acceptance plus the estimate it gave. Null on
+   * an assignment read that does not compute it.
+   */
+  readonly expected_ready_at?: Date | null;
+  /** When the order is promised to the customer, once the shop has made the promise. */
+  readonly promise_at?: Date | null;
+  /** The waiting policy the partner is paid under, from the financial policy in force. */
+  readonly wait_policy?: {
+    readonly included_seconds: number;
+    readonly per_completed_minute_minor: number;
+    readonly cap_minor: number;
+  } | null;
   readonly approximate_pickup_area: string;
   /**
    * Where the goods are actually going, present only while the partner is
@@ -537,11 +551,15 @@ export class AssignmentCustodyService {
       route_metres: string | null;
       route_seconds: string | null;
       route_source: 'ESTIMATE' | 'MAPBOX' | null;
+      expected_ready_at: Date | null;
+      promise_at: Date | null;
     }>(
       // The route is the one the quote priced the order on -- the road from
       // the vendor to the customer's address (0085) -- so the distance a
       // partner is shown is the distance the order was actually priced on. A
       // quote older than routing carries none and falls back to the line.
+      // The pickup deadline (9.3) is the shop's ready time, or its acceptance
+      // plus the estimate it gave; the promise is the one made at ready.
       `SELECT a.delivery_assignment_id, a.source_order_reference, a.vendor_location_id,
               a.partner_user_id, a.assignment_state, a.custody_state, a.package_count,
               a.handling_flags, a.approximate_pickup_area, a.approximate_drop_area,
@@ -549,7 +567,11 @@ export class AssignmentCustodyService {
               COALESCE(quote_group.route_metres::bigint,
                        ST_Distance(location.coordinates, address.coordinates)::bigint)::text AS route_metres,
               quote_group.route_seconds::text AS route_seconds,
-              quote_group.route_source
+              quote_group.route_source,
+              COALESCE(o.ready_at,
+                       o.accepted_at + make_interval(secs => COALESCE(o.preparation_estimate_seconds, 0)))
+                AS expected_ready_at,
+              o.pickup_promise_at AS promise_at
          FROM marketplace.delivery_assignments a
          JOIN marketplace.vendor_locations location
            ON location.vendor_location_id = a.vendor_location_id
@@ -590,6 +612,13 @@ export class AssignmentCustodyService {
         route_seconds: row.route_seconds === null ? null : Number(row.route_seconds),
         route_source: row.route_source,
         expected_earning_minor: expectedEarning,
+        expected_ready_at: row.expected_ready_at ?? null,
+        promise_at: row.promise_at ?? null,
+        wait_policy: Object.freeze({
+          included_seconds: SYNTHETIC_FINANCIAL_POLICY.wait_included_seconds,
+          per_completed_minute_minor: SYNTHETIC_FINANCIAL_POLICY.wait_per_completed_minute_minor,
+          cap_minor: SYNTHETIC_FINANCIAL_POLICY.wait_cap_minor,
+        }),
         delivery_assignment_id: parseUuidV7(row.delivery_assignment_id),
         source_order_reference: row.source_order_reference,
         vendor_location_id: parseUuidV7(row.vendor_location_id),
@@ -880,6 +909,147 @@ export class AssignmentCustodyService {
   }
 
   /**
+   * An operator takes the attempt from its partner and puts it back to the
+   * pool (9.3): from OFFERED, ASSIGNED or AT_VENDOR, before custody. The
+   * REASSIGNED event names the displaced partner (who is not offered it
+   * again), the reason is theirs to read, and what they are owed for the road
+   * already travelled is recorded -- zero is a decision too. Until audit run
+   * 58 ending an attempt as REASSIGNED left the order with no attempt at all
+   * and nothing on record for the partner.
+   */
+  async reassign(input: {
+    readonly command_reference: string;
+    readonly context: RequestContext;
+    readonly delivery_assignment_id: UuidV7;
+    readonly expected_version: number;
+    readonly reason_code: string;
+    readonly compensation_minor: number;
+    readonly note?: string;
+    readonly now?: Date;
+  }): Promise<DeliveryAssignmentRecord> {
+    const who = actor(input.context, ['admin']);
+    if (
+      !Number.isSafeInteger(input.compensation_minor) ||
+      input.compensation_minor < 0 ||
+      input.compensation_minor > 100_000
+    ) {
+      throw new AssignmentInputError('Compensation must be a whole amount between 0 and 100000');
+    }
+    if (input.note !== undefined && (input.note.length < 1 || input.note.length > 500)) {
+      throw new AssignmentInputError('A note must be between 1 and 500 characters');
+    }
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const prior = await replay(client, {
+        command_reference: input.command_reference,
+        delivery_assignment_id: input.delivery_assignment_id,
+        event_type: 'REASSIGNED',
+      });
+      if (prior) return prior;
+      const assignment = await lockAssignment(
+        client,
+        input.delivery_assignment_id,
+        input.expected_version,
+      );
+      if (
+        !['OFFERED', 'ASSIGNED', 'AT_VENDOR'].includes(assignment.assignment_state) ||
+        assignment.custody_state !== 'NONE' ||
+        !assignment.partner_user_id
+      ) {
+        throw new AssignmentConflictError(
+          'Only an attempt with a partner and no custody can be reassigned',
+        );
+      }
+      const displaced = parseUuidV7(assignment.partner_user_id);
+      await endMembership(client, assignment, now, input.reason_code);
+      const contextIds = ids(input.context);
+      await client.query(
+        `INSERT INTO marketplace.partner_attempt_compensations
+           (partner_attempt_compensation_id, delivery_assignment_id, partner_user_id,
+            decided_by_user_id, displaced_from, amount_minor, reason_code, note,
+            request_id, correlation_id, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [
+          createUuidV7({ now_ms: now.getTime() }),
+          assignment.delivery_assignment_id,
+          displaced,
+          who.id,
+          assignment.assignment_state,
+          input.compensation_minor,
+          reason(input.reason_code),
+          input.note ?? null,
+          contextIds.requestId,
+          contextIds.correlationId,
+          now,
+        ],
+      );
+      await appendEvent(client, {
+        assignment,
+        command_reference: input.command_reference,
+        context: input.context,
+        event_type: 'REASSIGNED',
+        next_custody_state: 'NONE',
+        next_state: 'UNASSIGNED',
+        now,
+        partner_user_id: displaced,
+        reason_code: input.reason_code,
+        who,
+      });
+      const result = await client.query<AssignmentRow>(
+        `UPDATE marketplace.delivery_assignments
+            SET assignment_state='UNASSIGNED', partner_user_id=NULL, offer_expires_at=NULL,
+                custody_state='NONE', version=version+1, updated_at=$2
+          WHERE delivery_assignment_id=$1 RETURNING *`,
+        [assignment.delivery_assignment_id, now],
+      );
+      return assignmentRecord(requiredRow(result.rows, 'Reassigned attempt was not returned'));
+    });
+  }
+
+  /** What a partner has been recorded as owed for attempts taken from them (9.3). */
+  async listCompensationsForPartner(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+  }): Promise<
+    readonly {
+      readonly partner_attempt_compensation_id: UuidV7;
+      readonly delivery_assignment_id: UuidV7;
+      readonly displaced_from: string;
+      readonly amount_minor: number;
+      readonly reason_code: string;
+      readonly created_at: string;
+    }[]
+  > {
+    const who = actor(input.context, ['delivery_partner']);
+    const rows = await this.#pool.query<{
+      partner_attempt_compensation_id: string;
+      delivery_assignment_id: string;
+      displaced_from: string;
+      amount_minor: string;
+      reason_code: string;
+      created_at: Date;
+    }>(
+      `SELECT partner_attempt_compensation_id, delivery_assignment_id, displaced_from,
+              amount_minor::text AS amount_minor, reason_code, created_at
+         FROM marketplace.partner_attempt_compensations
+        WHERE partner_user_id=$1 ORDER BY created_at DESC LIMIT 50`,
+      [who.id],
+    );
+    return Object.freeze(
+      rows.rows.map((row) =>
+        Object.freeze({
+          partner_attempt_compensation_id: parseUuidV7(row.partner_attempt_compensation_id),
+          delivery_assignment_id: parseUuidV7(row.delivery_assignment_id),
+          displaced_from: row.displaced_from,
+          amount_minor: Number(row.amount_minor),
+          reason_code: row.reason_code,
+          created_at: row.created_at.toISOString(),
+        }),
+      ),
+    );
+  }
+
+  /**
    * What each partner has already done with this attempt.
    *
    * `declined` are excluded from re-offer outright: asking again is the
@@ -898,10 +1068,13 @@ export class AssignmentCustodyService {
       actor_id: string;
       partner_user_id: string | null;
     }>(
+      // A partner an operator took the attempt from (REASSIGNED by an admin,
+      // 9.3) is not offered it again either.
       `SELECT event_type, actor_id, partner_user_id FROM marketplace.assignment_events
         WHERE delivery_assignment_id=$1
           AND ((event_type='DECLINED' AND actor_kind='delivery_partner')
-               OR (event_type='OFFER_EXPIRED' AND partner_user_id IS NOT NULL))`,
+               OR (event_type='OFFER_EXPIRED' AND partner_user_id IS NOT NULL)
+               OR (event_type='REASSIGNED' AND actor_kind='admin' AND partner_user_id IS NOT NULL))`,
       [input.delivery_assignment_id],
     );
     const declined = new Set<UuidV7>();
@@ -909,6 +1082,8 @@ export class AssignmentCustodyService {
     for (const row of rows.rows) {
       if (row.event_type === 'DECLINED') {
         declined.add(parseUuidV7(row.actor_id));
+      } else if (row.event_type === 'REASSIGNED' && row.partner_user_id) {
+        declined.add(parseUuidV7(row.partner_user_id));
       } else if (row.partner_user_id) {
         const partner = parseUuidV7(row.partner_user_id);
         passes.set(partner, (passes.get(partner) ?? 0) + 1);

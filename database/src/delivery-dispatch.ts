@@ -2,6 +2,7 @@ import { createDatabasePool } from './database-pool.js';
 import type { RequestContext, UuidV7 } from '@neighbourhood-store/domain-types';
 import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
+import { resolveConfiguration } from './versioned-configuration.js';
 import {
   AssignmentConflictError,
   AssignmentVersionError,
@@ -13,7 +14,13 @@ import type { PartnerAvailabilityService } from './partner-availability.js';
 export class DeliveryDispatchUnavailableError extends Error {}
 
 /** How long a partner has to answer an offer before it is re-dispatched. */
-const OFFER_WINDOW_MS = 5 * 60 * 1_000;
+/**
+ * How long an offer stands before it lapses and the next partner is asked:
+ * `assignment.offer_seconds` (implementation.md 6.1; 30 s by default),
+ * within the custody module's 5-300 s boundary. Until audit run 58 this was
+ * a five-minute constant.
+ */
+export const DEFAULT_OFFER_SECONDS = 30;
 
 type OrderDispatchRow = {
   readonly approximate_drop_area: string;
@@ -108,6 +115,19 @@ export class DeliveryDispatchOrchestrator {
     });
   }
 
+  /** The offer window in force: `assignment.offer_seconds`, 5-300, or the default. */
+  async offerSeconds(at?: Date): Promise<number> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: 'assignment.offer_seconds',
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value;
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 5 && value <= 300
+      ? value
+      : DEFAULT_OFFER_SECONDS;
+  }
+
   /**
    * Offers every unassigned attempt whose vendor order is being prepared, and
    * returns declined or expired attempts to the pool first so they are picked
@@ -183,6 +203,7 @@ export class DeliveryDispatchOrchestrator {
       [limit],
     );
 
+    const offerSeconds = await this.offerSeconds(now);
     let offered = 0;
     let waiting = 0;
     for (const row of pending.rows) {
@@ -221,7 +242,7 @@ export class DeliveryDispatchOrchestrator {
           context: input.context,
           delivery_assignment_id: assignmentId,
           expected_version: row.version,
-          expires_at: new Date(now.getTime() + OFFER_WINDOW_MS),
+          expires_at: new Date(now.getTime() + offerSeconds * 1000),
           partner_user_id: partner.partner_user_id,
           reason_code: 'WORKER_AUTO_DISPATCH',
           now,

@@ -39,6 +39,7 @@ import type {
   SupportCaseMessage,
   SubstitutionPreference,
   PartnerAvailability,
+  PartnerAttemptCompensation,
   PartnerEarningEntry,
   VendorOrder,
 } from './types.js';
@@ -1052,6 +1053,9 @@ export function createApiClient(options: ApiClientOptions) {
 
       earnings: {
         list: () => r<{ earnings: PartnerEarningEntry[] }>('/partner/earnings'),
+
+        compensations: () =>
+          r<{ compensations: PartnerAttemptCompensation[] }>('/partner/compensations'),
 
         raiseDispute: (body: {
           partner_earnings_record_id: string;

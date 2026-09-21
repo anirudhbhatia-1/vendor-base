@@ -7,10 +7,12 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import {
+  AssignmentAuthorizationError,
   AssignmentConflictError,
   AssignmentCustodyService,
   AssignmentInputError,
   AssignmentNotFoundError,
+  AssignmentVersionError,
 } from '../src/assignment-custody.js';
 import { handoverCodeDigest } from '../src/handover-code.js';
 import { check } from './verify-support.js';
@@ -324,6 +326,25 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       reason_code: 'PICKUP_VERIFIED',
       vendor_confirmed: true,
     });
+    // 9.3 -- reassignment is for attempts nobody has collected yet. Once the
+    // bag is in a partner's hands the way out is the custody path, not a
+    // return to the pool.
+    let custodyReassignRefused = false;
+    try {
+      await service.reassign({
+        command_reference: 'SYNTH-CMD-REASSIGN-IN-CUSTODY-B001',
+        compensation_minor: 0,
+        context: admin,
+        delivery_assignment_id: state.delivery_assignment_id,
+        expected_version: state.version,
+        now: new Date(now.getTime() + 23_500),
+        reason_code: 'OPERATOR_REASSIGNED',
+      });
+    } catch (error) {
+      custodyReassignRefused = error instanceof AssignmentConflictError;
+    }
+    check(custodyReassignRefused, 'An attempt in custody was reassigned away from its partner');
+
     state = await service.failDelivery({
       command_reference: 'SYNTH-CMD-FAIL-RETURN-B001',
       context: partnerTwo,
@@ -424,6 +445,210 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       now: new Date(now.getTime() + 41_000),
     });
     check(expiredCount === 1, 'Server-time offer expiry did not close exactly one offer');
+
+    // 9.3 -- acceptance is atomic. Two accepts of the same offer arriving
+    // together (a double tap that produced two command references) are held
+    // on the row lock; one wins and the other sees a stale version. The
+    // arrival is forced by holding the row from a third session until both
+    // are queued, since an unforced race passes with any implementation.
+    const contested = await service.create({
+      approximate_drop_area: 'SYNTH Malviya Nagar Jaipur',
+      approximate_pickup_area: 'SYNTH Jain Stores Jaipur',
+      command_reference: 'SYNTH-CMD-CREATE-CONTEST-D001',
+      context: admin,
+      handling_flags: [],
+      now: new Date(now.getTime() + 50_000),
+      package_count: 1,
+      reason_code: 'SYNTH_ASSIGNMENT_CREATED',
+      source_order_reference: 'SYNTH-ORDER-CONTEST-D001',
+      vendor_location_id: locationId,
+    });
+    const contestedOffer = await service.offer({
+      command_reference: 'SYNTH-CMD-OFFER-CONTEST-D001',
+      context: admin,
+      delivery_assignment_id: contested.delivery_assignment_id,
+      expected_version: contested.version,
+      expires_at: new Date(now.getTime() + 80_000),
+      now: new Date(now.getTime() + 50_000),
+      partner_user_id: partnerOneId,
+      reason_code: 'SYNTH_OFFER_CREATED',
+    });
+    const blocker = await pool.connect();
+    let raced: readonly PromiseSettledResult<unknown>[] = [];
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(
+        'SELECT 1 FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1 FOR UPDATE',
+        [contested.delivery_assignment_id],
+      );
+      const attempts = ['SYNTH-CMD-ACCEPT-CONTEST-D001', 'SYNTH-CMD-ACCEPT-CONTEST-D002'].map(
+        (commandReference) =>
+          service.accept({
+            command_reference: commandReference,
+            context: partnerOne,
+            delivery_assignment_id: contested.delivery_assignment_id,
+            expected_version: contestedOffer.version,
+            now: new Date(now.getTime() + 51_000),
+            reason_code: 'PARTNER_ACCEPTED',
+          }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await blocker.query('COMMIT');
+      raced = await Promise.allSettled(attempts);
+    } finally {
+      blocker.release();
+    }
+    const won = raced.filter((result) => result.status === 'fulfilled');
+    const lost = raced.filter(
+      (result): result is PromiseRejectedResult =>
+        result.status === 'rejected' &&
+        (result.reason instanceof AssignmentVersionError ||
+          result.reason instanceof AssignmentConflictError),
+    );
+    check(
+      won.length === 1 && lost.length === 1,
+      `A contested accept did not settle to exactly one winner (${JSON.stringify(raced.map((r) => (r.status === 'rejected' ? String(r.reason) : 'ok')))})`,
+    );
+    const contestedTrail = await pool.query<{ accepted: string; memberships: string }>(
+      `SELECT (SELECT count(*) FROM marketplace.assignment_events
+                WHERE delivery_assignment_id=$1 AND event_type='ACCEPTED')::text AS accepted,
+              (SELECT count(*) FROM marketplace.partner_assignment_memberships
+                WHERE delivery_assignment_id=$1 AND state='ACTIVE')::text AS memberships`,
+      [contested.delivery_assignment_id],
+    );
+    check(
+      contestedTrail.rows[0]?.accepted === '1' && contestedTrail.rows[0]?.memberships === '1',
+      `A contested accept left ${JSON.stringify(contestedTrail.rows[0])}`,
+    );
+
+    // 9.3 -- an operator can take an accepted attempt off its partner: the
+    // reason and the compensation decided are recorded against the partner,
+    // the attempt goes back to the pool, and that partner is not offered it
+    // again. Until audit run 58 "REASSIGNED" only stranded the order.
+    const contestedWinner = (won[0] as PromiseFulfilledResult<{ version: number }>).value;
+    let partnerCannotReassign = false;
+    try {
+      await service.reassign({
+        command_reference: 'SYNTH-CMD-REASSIGN-BY-PARTNER-D001',
+        compensation_minor: 500,
+        context: partnerTwo,
+        delivery_assignment_id: contested.delivery_assignment_id,
+        expected_version: contestedWinner.version,
+        now: new Date(now.getTime() + 52_000),
+        reason_code: 'OPERATOR_REASSIGNED',
+      });
+    } catch (error) {
+      partnerCannotReassign = error instanceof AssignmentAuthorizationError;
+    }
+    check(partnerCannotReassign, 'A partner reassigned another partner’s attempt');
+    let amountBounded = false;
+    try {
+      await service.reassign({
+        command_reference: 'SYNTH-CMD-REASSIGN-TOO-MUCH-D001',
+        compensation_minor: 100_001,
+        context: admin,
+        delivery_assignment_id: contested.delivery_assignment_id,
+        expected_version: contestedWinner.version,
+        now: new Date(now.getTime() + 52_000),
+        reason_code: 'OPERATOR_REASSIGNED',
+      });
+    } catch (error) {
+      amountBounded = error instanceof AssignmentInputError;
+    }
+    check(amountBounded, 'An unbounded compensation was accepted');
+    const reassignInput = {
+      command_reference: 'SYNTH-CMD-REASSIGN-D001',
+      compensation_minor: 2_500,
+      context: admin,
+      delivery_assignment_id: contested.delivery_assignment_id,
+      expected_version: contestedWinner.version,
+      note: 'SYNTH partner reports a puncture; attempt moved on',
+      now: new Date(now.getTime() + 53_000),
+      reason_code: 'PARTNER_VEHICLE_BREAKDOWN',
+    } as const;
+    const reassigned = await service.reassign(reassignInput);
+    const reassignedReplay = await service.reassign({
+      ...reassignInput,
+      now: new Date(now.getTime() + 54_000),
+    });
+    check(
+      reassigned.assignment_state === 'UNASSIGNED' &&
+        reassigned.partner_user_id === null &&
+        reassigned.custody_state === 'NONE' &&
+        reassigned.offer_expires_at === null &&
+        reassignedReplay.version === reassigned.version,
+      `Reassignment did not return the attempt to the pool exactly once (${JSON.stringify({ reassigned, reassignedReplay })})`,
+    );
+    const reassignTrail = await pool.query<{
+      event_partner: string | null;
+      memberships: string;
+      compensations: string;
+      amount_minor: string | null;
+      displaced_from: string | null;
+      decided_by_user_id: string | null;
+      note: string | null;
+    }>(
+      `SELECT
+         (SELECT partner_user_id FROM marketplace.assignment_events
+           WHERE delivery_assignment_id=$1 AND event_type='REASSIGNED') AS event_partner,
+         (SELECT count(*) FROM marketplace.partner_assignment_memberships
+           WHERE delivery_assignment_id=$1 AND state='ACTIVE')::text AS memberships,
+         (SELECT count(*) FROM marketplace.partner_attempt_compensations
+           WHERE delivery_assignment_id=$1)::text AS compensations,
+         c.amount_minor::text, c.displaced_from, c.decided_by_user_id, c.note
+         FROM marketplace.partner_attempt_compensations c
+        WHERE c.delivery_assignment_id=$1 AND c.partner_user_id=$2`,
+      [contested.delivery_assignment_id, partnerOneId],
+    );
+    const trail = reassignTrail.rows[0];
+    check(
+      trail?.event_partner === partnerOneId &&
+        trail.memberships === '0' &&
+        trail.compensations === '1' &&
+        trail.amount_minor === '2500' &&
+        trail.displaced_from === 'ASSIGNED' &&
+        trail.decided_by_user_id === adminId &&
+        trail.note === reassignInput.note,
+      `Reassignment did not record who was displaced, from what, and what they are owed (${JSON.stringify(trail)})`,
+    );
+    const history = await service.offerHistory({
+      delivery_assignment_id: contested.delivery_assignment_id,
+    });
+    check(
+      history.declined.includes(partnerOneId),
+      'A partner an operator displaced could be offered the same attempt again',
+    );
+    const owedToOne = await service.listCompensationsForPartner({ context: partnerOne });
+    const owedToTwo = await service.listCompensationsForPartner({ context: partnerTwo });
+    check(
+      owedToOne.length === 1 &&
+        owedToOne[0]?.amount_minor === 2_500 &&
+        owedToOne[0].delivery_assignment_id === contested.delivery_assignment_id &&
+        owedToTwo.length === 0,
+      `Compensation history is not the displaced partner’s own (${JSON.stringify({ owedToOne, owedToTwo })})`,
+    );
+    let compensationProtected = false;
+    try {
+      await pool.query('UPDATE marketplace.partner_attempt_compensations SET amount_minor=0');
+    } catch {
+      compensationProtected = true;
+    }
+    check(compensationProtected, 'Compensation history was not append-only');
+    let poolReassignRefused = false;
+    try {
+      await service.reassign({
+        command_reference: 'SYNTH-CMD-REASSIGN-POOLED-D001',
+        compensation_minor: 0,
+        context: admin,
+        delivery_assignment_id: contested.delivery_assignment_id,
+        expected_version: reassigned.version,
+        now: new Date(now.getTime() + 55_000),
+        reason_code: 'OPERATOR_REASSIGNED',
+      });
+    } catch (error) {
+      poolReassignRefused = error instanceof AssignmentConflictError;
+    }
+    check(poolReassignRefused, 'An attempt with no partner was "reassigned"');
 
     const activeMemberships = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM marketplace.partner_assignment_memberships

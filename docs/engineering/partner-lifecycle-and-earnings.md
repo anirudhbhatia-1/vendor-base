@@ -87,6 +87,30 @@ without touching that aggregate:
   `ZONE` (`PartnerAvailabilityService.eligible`). Until run 56 a restriction restricted nothing.
   A delivery already in custody is never ended by a restriction or a lapse: custody obligations
   stand, and an appeal is offered on every restriction in force.
+- **One offer at a time, on the configured window (9.3, audit run 58).** Dispatch offers an
+  attempt to one partner for `assignment.offer_seconds` (a SETTING, 5–300 s, default
+  `DEFAULT_OFFER_SECONDS` = 30) — not the five minutes the worker hard-coded until run 58 — and
+  a partner holding a live offer is not offered a second attempt on top of it
+  (`PartnerAvailabilityService.eligible`). The offer states the expected earning, the
+  approximate areas, the road it was priced on with its travel time, when the bag is ready to
+  collect (`expected_ready_at`: the store's ready time, or its acceptance plus its estimate) and
+  the pickup promise, the waiting terms (`wait_policy`: included minutes, the per-minute rate and
+  the cap, from the financial policy) and the handling needs.
+- **Acceptance is atomic (9.3).** `accept` locks the attempt row, checks the version, the state,
+  the partner and the expiry, then inserts the one ACTIVE membership; two accepts arriving
+  together settle to exactly one winner and one ACCEPTED event, the other refused as stale. A
+  decline and an expiry each close the attempt with an event naming the partner — nothing is
+  deleted — and return it to the pool; `offerHistory` keeps that partner off it.
+- **Manual reassignment with reason and compensation (9.3).** An admin with
+  `admin.delivery.assignment_manage` posts `end-before-pickup` with `resulting_state:
+  'REASSIGNED'`, a reason, a `compensation_minor` (0–100000) and an optional note; only an attempt
+  that has a partner and no custody (OFFERED, ASSIGNED, AT_VENDOR) can be taken. The membership
+  ends, a `REASSIGNED` event names the displaced partner, an append-only
+  `partner_attempt_compensations` row (0100) records what they are owed, from which state, by
+  whom and why, and the attempt returns to `UNASSIGNED` for dispatch — which does not offer it to
+  that partner again. The partner reads their own record at `GET partner/compensations`
+  (`partner.earnings.read`) and sees it beside their earnings. Until run 58 "REASSIGNED" ended
+  the attempt and stranded the order with nothing owed to anybody.
 - `net_minor` is `base + distance + time + wait + return + incentive + tip +
   adjustment`, checked at the row level. A schema-enforced identity, not an
   application invariant.
