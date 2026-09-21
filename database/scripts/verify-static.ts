@@ -179,6 +179,7 @@ assert(
       '0104_held_proof_completion',
       '0105_exception_direction',
       '0106_return_receipt',
+      '0107_earning_adjustments',
     ]),
   'Unexpected reviewed migrations',
 );

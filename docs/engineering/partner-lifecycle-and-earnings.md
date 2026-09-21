@@ -228,6 +228,22 @@ without touching that aggregate:
   a return trip is unpriced, DLP-49/9.10). Until run 64 the destination was an unreadable
   reference, completion recorded an invented proof reference and nothing else, and a closed store
   had no path.
+- **The statement is the line, and a dispute's outcome is money (9.10, audit run 65).** The
+  partner's statement carries every component of each line — base, distance, time, waiting,
+  return, incentive, tip, adjustment, net — with its outcome, its payout state and paid date, and
+  the partner's day and week (Asia/Kolkata) it belongs to, rolled up (`days`, `weeks`: trips, net,
+  paid) so the totals reconcile to the lines; the CSV carries the same columns. A dispute names one
+  component of one line with the amount expected and why (`partner/earnings/disputes` to open and
+  to read back: what was said, who resolved it, when it is due, how it ended). An operator's
+  resolution at a different amount writes a `partner_earning_adjustments` row (0107, append-only:
+  the dispute, the delta, who decided) and moves the earning's `adjustment_minor` and `net_minor`
+  by the delta in the same transaction; the money service posts the delta to the ledger once
+  (`postEarningAdjustment`, platform clearing against partner payable), the resolving request
+  first and the worker's pass for anything left, and the partner sees it under
+  `partner/earnings/adjustments`. A withdrawal, or a resolution at the recorded amount, moves
+  nothing. Until run 65 the app disputed a component the server did not know, so every query was
+  refused; the statement carried a total and nothing else; no rollup existed; and a resolved
+  dispute recorded a decided amount that changed nothing.
 - **Support and the emergency control travel with the job (9.4).** The field-ops panel with its
   reports and the always-visible Emergency control sit on the active job; an open safety report
   holds the job's next step.

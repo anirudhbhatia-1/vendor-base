@@ -20,6 +20,7 @@ import {
   PartnerAvailabilityService,
 } from '../src/partner-availability.js';
 import { check, rejects, adminContext, partnerContext, systemContext } from './verify-support.js';
+import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
 
 export async function verifyPartnerLifecycle(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, max: 4 });
@@ -987,10 +988,13 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     check(immutable, 'exception history mutable');
 
     // 9.10 -- earnings + disputes
+    // Posted at 00:30 IST on 28 August: the partner's day is the 28th, UTC's
+    // date the 27th (9.10, DLP-50).
     const earnings = await lifecycle.recordEarnings({
       context: systemContext(systemActorId),
       delivery_assignment_id: deliveryAssignmentId,
       partner_user_id: applicantId,
+      now: new Date('2026-08-27T19:00:00.000Z'),
       outcome: 'DELIVERED',
       base_minor: 4000,
       distance_minor: 1500,
@@ -1065,6 +1069,113 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     });
     check(resolved.lifecycle_state === 'RESOLVED', 'dispute not resolved');
     check(resolved.resolved_amount_minor === 2000, 'resolved amount not recorded');
+    // 9.10 -- the outcome is money on the line: the decided difference
+    // (2000 - 1500) lands on the earning as an adjustment attributable to
+    // this dispute, the net moves with it, and the ledger carries it once.
+    const adjusted = await pool.query<{
+      adjustment_minor: string;
+      net_minor: string;
+      delta_minor: string | null;
+      posted: boolean | null;
+    }>(
+      `SELECT e.adjustment_minor::text, e.net_minor::text, a.delta_minor::text,
+              (a.ledger_transaction_id IS NOT NULL) AS posted
+         FROM marketplace.partner_earnings_records e
+         LEFT JOIN marketplace.partner_earning_adjustments a
+           ON a.partner_earnings_record_id = e.partner_earnings_record_id
+          AND a.partner_dispute_case_id = $2
+        WHERE e.partner_earnings_record_id=$1`,
+      [earnings.partner_earnings_record_id, dispute.partner_dispute_case_id],
+    );
+    check(
+      adjusted.rows[0]?.adjustment_minor === '500' &&
+        adjusted.rows[0].net_minor === String(earnings.net_minor + 500) &&
+        adjusted.rows[0].delta_minor === '500' &&
+        adjusted.rows[0].posted === false,
+      `A resolved dispute did not move the money on the line (${JSON.stringify(adjusted.rows[0])})`,
+    );
+    const money = new CompleteMoneyLifecycleService({ connection_string: connectionString });
+    try {
+      const posted = await money.postPendingEarningAdjustments({
+        context: systemContext(systemActorId),
+      });
+      const postedAgain = await money.postPendingEarningAdjustments({
+        context: systemContext(systemActorId),
+      });
+      const ledger = await pool.query<{ debits: string; credits: string; entries: string }>(
+        `SELECT COALESCE(sum(entry.debit_minor), 0)::text AS debits,
+                COALESCE(sum(entry.credit_minor), 0)::text AS credits,
+                count(*)::text AS entries
+           FROM marketplace.partner_earning_adjustments a
+           JOIN marketplace.ledger_entries entry USING (ledger_transaction_id)
+          WHERE a.partner_dispute_case_id = $1`,
+        [dispute.partner_dispute_case_id],
+      );
+      check(
+        posted === 1 &&
+          postedAgain === 0 &&
+          ledger.rows[0]?.entries === '2' &&
+          ledger.rows[0].debits === '500' &&
+          ledger.rows[0].credits === '500',
+        `The dispute's outcome did not reach the ledger exactly once (${JSON.stringify({ posted, postedAgain, ledger: ledger.rows[0] })})`,
+      );
+    } finally {
+      await money.close();
+    }
+    // The posting itself is once: a direct replay on the same adjustment
+    // finds it posted and writes no second transaction.
+    const moneyAgain = new CompleteMoneyLifecycleService({ connection_string: connectionString });
+    try {
+      const firstAdjustment = (
+        await lifecycle.listEarningAdjustments({ context: partnerContext(applicantId) })
+      )[0];
+      check(firstAdjustment !== undefined, 'The adjustment is not listed for the partner');
+      const replayed = await moneyAgain.postEarningAdjustment({
+        context: systemContext(systemActorId),
+        partner_earning_adjustment_id: firstAdjustment.partner_earning_adjustment_id,
+      });
+      const transactions = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM marketplace.ledger_transactions
+          WHERE source_reference LIKE 'SYNTH-ADJUSTMENT-DISPUTE-%'`,
+      );
+      check(
+        replayed.posted === false &&
+          replayed.replayed === true &&
+          transactions.rows[0]?.count === '1',
+        `A replayed posting wrote a second ledger transaction (${JSON.stringify({ replayed, transactions: transactions.rows[0] })})`,
+      );
+      // The statement's day is the partner's: the 28th, not UTC's 27th.
+      const statement = await moneyAgain.partnerStatement({ context: partnerContext(applicantId) });
+      check(
+        statement.earnings[0]?.day === '2026-08-28' &&
+          statement.days[0]?.period === '2026-08-28' &&
+          statement.earnings[0].adjustment_minor === 500,
+        `The statement's day is not the partner's, or the adjustment is not on the line (${JSON.stringify({ line: statement.earnings[0], days: statement.days })})`,
+      );
+    } finally {
+      await moneyAgain.close();
+    }
+    const adjustmentsSeen = await lifecycle.listEarningAdjustments({
+      context: partnerContext(applicantId),
+    });
+    check(
+      adjustmentsSeen.length === 1 &&
+        adjustmentsSeen[0]?.delta_minor === 500 &&
+        adjustmentsSeen[0].posted === true &&
+        adjustmentsSeen[0].partner_dispute_case_id === dispute.partner_dispute_case_id,
+      `The partner cannot see what the dispute changed (${JSON.stringify(adjustmentsSeen)})`,
+    );
+    // The partner reads the dispute back: what was said, when it is due, how it ended.
+    const disputesSeen = await lifecycle.listDisputes({ context: partnerContext(applicantId) });
+    check(
+      disputesSeen.length === 1 &&
+        disputesSeen[0]?.lifecycle_state === 'RESOLVED' &&
+        disputesSeen[0].resolved_amount_minor === 2000 &&
+        disputesSeen[0].resolution_reason_code === 'ODOMETER_MATCHES' &&
+        disputesSeen[0].resolver_user_id === adminId &&
+        disputesSeen[0].deadline_at instanceof Date,
+      `The partner's own dispute did not read back with its outcome (${JSON.stringify(disputesSeen[0])})`,
+    );
 
     // A new dispute on a different component now works
     const secondDispute = await lifecycle.openDispute({
@@ -1081,6 +1192,39 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       resolution: 'WITHDRAWN',
     });
     check(withdrawn.lifecycle_state === 'WITHDRAWN', 'withdraw did not succeed');
+    // A withdrawal moves nothing.
+    const afterWithdraw = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM marketplace.partner_earning_adjustments
+        WHERE partner_dispute_case_id=$1`,
+      [secondDispute.partner_dispute_case_id],
+    );
+    check(afterWithdraw.rows[0]?.count === '0', 'A withdrawn dispute adjusted the earning');
+    // A resolution at the recorded amount moves nothing either.
+    const thirdDispute = await lifecycle.openDispute({
+      context: partnerContext(applicantId),
+      partner_earnings_record_id: earnings.partner_earnings_record_id,
+      disputed_component: 'WAIT',
+      proposed_amount_minor: 400,
+      evidence_note: 'SYNTH -- waited longer.',
+    });
+    await lifecycle.resolveDispute({
+      context: adminContext(adminId),
+      partner_dispute_case_id: thirdDispute.partner_dispute_case_id,
+      resolution: 'RESOLVED',
+      resolution_reason_code: 'WAIT_AS_RECORDED',
+      resolved_amount_minor: 200,
+    });
+    const afterUpheld = await pool.query<{ count: string; adjustment_minor: string }>(
+      `SELECT (SELECT count(*) FROM marketplace.partner_earning_adjustments
+                WHERE partner_dispute_case_id=$2)::text AS count,
+              adjustment_minor::text
+         FROM marketplace.partner_earnings_records WHERE partner_earnings_record_id=$1`,
+      [earnings.partner_earnings_record_id, thirdDispute.partner_dispute_case_id],
+    );
+    check(
+      afterUpheld.rows[0]?.count === '0' && afterUpheld.rows[0].adjustment_minor === '500',
+      `A dispute resolved at the recorded amount moved money (${JSON.stringify(afterUpheld.rows[0])})`,
+    );
 
     // Earnings listing filtered to caller
     const list = await lifecycle.listEarnings({ context: partnerContext(applicantId) });

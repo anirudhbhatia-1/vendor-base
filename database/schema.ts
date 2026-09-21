@@ -1738,3 +1738,24 @@ export const partnerAttemptCompensations = marketplaceSchema.table(
     index('partner_attempt_compensations_attempt').on(table.deliveryAssignmentId),
   ],
 );
+
+export const partnerEarningAdjustments = marketplaceSchema.table(
+  'partner_earning_adjustments',
+  {
+    partnerEarningAdjustmentId: uuid('partner_earning_adjustment_id').primaryKey(),
+    partnerEarningsRecordId: uuid('partner_earnings_record_id').notNull(),
+    partnerUserId: uuid('partner_user_id').notNull(),
+    partnerDisputeCaseId: uuid('partner_dispute_case_id').notNull().unique(),
+    deltaMinor: bigint('delta_minor', { mode: 'number' }).notNull(),
+    reasonCode: text('reason_code').notNull(),
+    decidedByUserId: uuid('decided_by_user_id').notNull(),
+    ledgerTransactionId: uuid('ledger_transaction_id'),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    postedAt: timestamp('posted_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('partner_earning_adjustments_partner').on(table.partnerUserId, table.createdAt),
+  ],
+);

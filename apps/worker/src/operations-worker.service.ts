@@ -392,6 +392,13 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           }),
         [],
       );
+      // A dispute's outcome reaches the ledger (9.10) even when the resolving
+      // request's own posting failed.
+      const earningAdjustments = await pass(
+        'completeMoney.postPendingEarningAdjustments',
+        () => this.#completeMoney.postPendingEarningAdjustments({ context, now }),
+        0,
+      );
       const controls = await pass(
         'adminControl.expireOperationalControls',
         () => this.#adminControl.expireOperationalControls({ context, now }),
@@ -481,6 +488,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         offers +
         documents +
         offlineProofs.length +
+        earningAdjustments +
         controls.trust +
         controls.incidents +
         waitTimers +
@@ -498,6 +506,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           lapsed_documents: lapsedDocuments.length,
           documents,
           offline_proofs: offlineProofs.length,
+          earning_adjustments: earningAdjustments,
           trust_controls: controls.trust,
           incident_controls: controls.incidents,
           wait_timers: waitTimers,

@@ -41,6 +41,7 @@ import type {
   PartnerAvailability,
   DevicePosition,
   PartnerAttemptCompensation,
+  PartnerDisputeCase,
   PartnerEarningEntry,
   VendorOrder,
 } from './types.js';
@@ -1097,6 +1098,9 @@ export function createApiClient(options: ApiClientOptions) {
 
         compensations: () =>
           r<{ compensations: PartnerAttemptCompensation[] }>('/partner/compensations'),
+
+        /** The partner's own disputes (9.10). */
+        disputes: () => r<{ disputes: PartnerDisputeCase[] }>('/partner/earnings/disputes'),
 
         raiseDispute: (body: {
           partner_earnings_record_id: string;

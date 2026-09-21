@@ -620,6 +620,109 @@ export class CompleteMoneyLifecycleService {
     });
   }
 
+  /**
+   * Posts a dispute's outcome to the ledger (9.10): the delta an operator
+   * decided moves between the platform's clearing account and the partner's
+   * payable, once, and the adjustment row is stamped with the transaction.
+   */
+  async postEarningAdjustment(input: {
+    readonly context: RequestContext;
+    readonly partner_earning_adjustment_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<{
+        partner_earning_adjustment_id: string;
+        partner_user_id: string;
+        delta_minor: string;
+        ledger_transaction_id: string | null;
+      }>(
+        `SELECT partner_earning_adjustment_id, partner_user_id, delta_minor::text, ledger_transaction_id
+           FROM marketplace.partner_earning_adjustments
+          WHERE partner_earning_adjustment_id=$1 FOR UPDATE`,
+        [input.partner_earning_adjustment_id],
+      );
+      const adjustment = found.rows[0];
+      if (!adjustment) throw new MoneyNotFoundError('Partner earning adjustment not found');
+      if (adjustment.ledger_transaction_id) return { posted: false as const, replayed: true };
+      const delta = Number(adjustment.delta_minor);
+      const magnitude = Math.abs(delta);
+      const partner = { partner_user_id: parseUuidV7(adjustment.partner_user_id) };
+      const ledgerId = await this.#postEntries(client, {
+        context: input.context,
+        entries:
+          delta > 0
+            ? [
+                {
+                  account_reference: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+                  component: 'ADJUSTMENT',
+                  debit_minor: magnitude,
+                  credit_minor: 0,
+                },
+                {
+                  account_reference: 'SYNTH-ACCOUNT-PARTNER-PAYABLE',
+                  component: 'ADJUSTMENT',
+                  debit_minor: 0,
+                  credit_minor: magnitude,
+                  ...partner,
+                },
+              ]
+            : [
+                {
+                  account_reference: 'SYNTH-ACCOUNT-PARTNER-PAYABLE',
+                  component: 'ADJUSTMENT',
+                  debit_minor: magnitude,
+                  credit_minor: 0,
+                  ...partner,
+                },
+                {
+                  account_reference: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+                  component: 'ADJUSTMENT',
+                  debit_minor: 0,
+                  credit_minor: magnitude,
+                },
+              ],
+        kind: 'ADJUSTMENT',
+        now,
+        source_reference: `SYNTH-ADJUSTMENT-DISPUTE-${String(input.partner_earning_adjustment_id).replaceAll('-', '').toUpperCase()}`,
+      });
+      await client.query(
+        `UPDATE marketplace.partner_earning_adjustments
+            SET ledger_transaction_id=$2, posted_at=$3
+          WHERE partner_earning_adjustment_id=$1`,
+        [input.partner_earning_adjustment_id, ledgerId, now],
+      );
+      return { posted: true as const, replayed: false, ledger_transaction_id: ledgerId };
+    });
+  }
+
+  /** The worker's pass: every adjustment not yet in the ledger. */
+  async postPendingEarningAdjustments(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+    readonly limit?: number;
+  }) {
+    financeAutomation(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const pending = await this.#pool.query<{ partner_earning_adjustment_id: string }>(
+      `SELECT partner_earning_adjustment_id FROM marketplace.partner_earning_adjustments
+        WHERE ledger_transaction_id IS NULL ORDER BY created_at LIMIT $1`,
+      [limit],
+    );
+    let posted = 0;
+    for (const row of pending.rows) {
+      const outcome = await this.postEarningAdjustment({
+        context: input.context,
+        partner_earning_adjustment_id: parseUuidV7(row.partner_earning_adjustment_id),
+        ...(input.now ? { now: input.now } : {}),
+      });
+      if (outcome.posted) posted += 1;
+    }
+    return posted;
+  }
+
   async customerReceipt(input: {
     readonly checkout_group_id: UuidV7;
     readonly context: RequestContext;
@@ -730,18 +833,38 @@ export class CompleteMoneyLifecycleService {
     const result = await this.#pool.query<{
       partner_earnings_record_id: string;
       source_order_reference: string;
+      outcome: string;
+      base_minor: string;
+      distance_minor: string;
+      time_minor: string;
+      wait_minor: string;
+      return_minor: string;
+      incentive_minor: string;
+      tip_minor: string;
+      adjustment_minor: string;
       net_minor: string;
       created_at: Date;
+      day: string;
+      week: string;
       payout_state: string | null;
+      paid_at: Date | null;
     }>(
-      `SELECT e.partner_earnings_record_id, a.source_order_reference, e.net_minor::text,
-              e.created_at, payout.payout_state
+      // The partner's day and week are Asia/Kolkata's (9.2), so a trip at
+      // 23:30 IST rolls into that day, not UTC's next one.
+      `SELECT e.partner_earnings_record_id, a.source_order_reference, e.outcome,
+              e.base_minor::text, e.distance_minor::text, e.time_minor::text, e.wait_minor::text,
+              e.return_minor::text, e.incentive_minor::text, e.tip_minor::text,
+              e.adjustment_minor::text, e.net_minor::text,
+              e.created_at,
+              to_char(e.created_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS day,
+              to_char(date_trunc('week', e.created_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD') AS week,
+              payout.payout_state, payout.paid_at
          FROM marketplace.partner_earnings_records e
          JOIN marketplace.delivery_assignments a USING (delivery_assignment_id)
          LEFT JOIN marketplace.settlements s
            ON s.source_order_reference = a.source_order_reference
          LEFT JOIN LATERAL (
-           SELECT p.payout_state FROM marketplace.payouts p
+           SELECT p.payout_state, p.paid_at FROM marketplace.payouts p
             WHERE p.settlement_id = s.settlement_id AND p.beneficiary_kind = 'PARTNER'
             ORDER BY p.created_at DESC LIMIT 1
          ) payout ON true
@@ -753,22 +876,54 @@ export class CompleteMoneyLifecycleService {
       Object.freeze({
         partner_earnings_record_id: row.partner_earnings_record_id,
         reference: row.source_order_reference,
+        outcome: row.outcome,
         // What has happened to the money, in the payout's own words; before a
         // payout exists the amount is earned and nothing more.
         lifecycle_state: row.payout_state ?? 'EARNED',
+        paid_at: row.paid_at?.toISOString() ?? null,
+        // Every component the line is made of (9.10, DLP-49).
+        base_minor: Number(row.base_minor),
+        distance_minor: Number(row.distance_minor),
+        time_minor: Number(row.time_minor),
+        wait_minor: Number(row.wait_minor),
+        return_minor: Number(row.return_minor),
+        incentive_minor: Number(row.incentive_minor),
+        tip_minor: Number(row.tip_minor),
+        adjustment_minor: Number(row.adjustment_minor),
         total_minor: Number(row.net_minor),
         posted_at: row.created_at.toISOString(),
+        day: row.day,
+        week: row.week,
       }),
     );
     const total = earnings.reduce((sum, entry) => sum + entry.total_minor, 0);
     const paid = earnings
       .filter((entry) => entry.lifecycle_state === 'PAID')
       .reduce((sum, entry) => sum + entry.total_minor, 0);
+    // Rollups by the partner's day and week (DLP-50): the trips and the money
+    // that reconcile to the lines above.
+    const rollup = (key: 'day' | 'week') => {
+      const buckets = new Map<string, { trips: number; net_minor: number; paid_minor: number }>();
+      for (const entry of earnings) {
+        const bucket = buckets.get(entry[key]) ?? { trips: 0, net_minor: 0, paid_minor: 0 };
+        bucket.trips += 1;
+        bucket.net_minor += entry.total_minor;
+        if (entry.lifecycle_state === 'PAID') bucket.paid_minor += entry.total_minor;
+        buckets.set(entry[key], bucket);
+      }
+      return Object.freeze(
+        [...buckets.entries()]
+          .sort(([a], [b]) => (a < b ? 1 : a > b ? -1 : 0))
+          .map(([period, bucket]) => Object.freeze({ period, ...bucket })),
+      );
+    };
     return Object.freeze({
       pending_minor: total - paid,
       paid_minor: paid,
       total_earned_minor: total,
       earnings: Object.freeze(earnings),
+      days: rollup('day'),
+      weeks: rollup('week'),
     });
   }
 

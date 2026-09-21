@@ -728,9 +728,48 @@ export type PartnerAvailability = {
 export type PartnerEarningEntry = {
   partner_earnings_record_id: string;
   reference: string;
+  /** DELIVERED, RETURNED or CANCELLED_POST_PICKUP. */
+  outcome?: string;
   lifecycle_state: string;
+  paid_at?: string | null;
+  /** Every component the line is made of (9.10, DLP-49). */
+  base_minor?: number;
+  distance_minor?: number;
+  time_minor?: number;
+  wait_minor?: number;
+  return_minor?: number;
+  incentive_minor?: number;
+  tip_minor?: number;
+  adjustment_minor?: number;
   total_minor: number;
   posted_at: string;
+  /** The partner's day and week (Asia/Kolkata) the line belongs to. */
+  day?: string;
+  week?: string;
+};
+
+/** Trips and money by the partner's day or week (9.10, DLP-50). */
+export type PartnerEarningRollup = {
+  period: string;
+  trips: number;
+  net_minor: number;
+  paid_minor: number;
+};
+
+/** A dispute on one earning line: what was said, who owns it, when it is due, how it ended. */
+export type PartnerDisputeCase = {
+  partner_dispute_case_id: string;
+  partner_earnings_record_id: string;
+  disputed_component: string;
+  disputed_amount_minor: number;
+  proposed_amount_minor: number;
+  evidence_note: string;
+  lifecycle_state: 'OPEN' | 'RESOLVED' | 'WITHDRAWN';
+  resolver_user_id: string | null;
+  resolution_reason_code: string | null;
+  resolved_amount_minor: number | null;
+  deadline_at: string;
+  resolved_at: string | null;
 };
 
 /** What a partner is owed for an attempt an operator took from them (9.3). */
@@ -748,6 +787,8 @@ export type PartnerStatement = {
   paid_minor: number;
   total_earned_minor: number;
   earnings: readonly PartnerEarningEntry[];
+  days?: readonly PartnerEarningRollup[];
+  weeks?: readonly PartnerEarningRollup[];
 };
 
 // ─── Authentication context ────────────────────────────────────────────────────

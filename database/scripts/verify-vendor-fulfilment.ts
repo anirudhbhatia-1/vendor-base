@@ -4243,6 +4243,31 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           partnerMoney.paid_minor === 0,
         'The partner statement totals do not follow from its earnings',
       );
+      // 9.10 -- the line is made of its components, and the day and week it
+      // belongs to reconcile to it (the partner's day, Asia/Kolkata).
+      const istDay = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date(ownEarning.posted_at));
+      check(
+        ownEarning.wait_minor === 200 &&
+          ownEarning.base_minor +
+            ownEarning.distance_minor +
+            ownEarning.wait_minor +
+            ownEarning.tip_minor ===
+            ownEarning.total_minor &&
+          ownEarning.outcome === 'DELIVERED' &&
+          ownEarning.day === istDay &&
+          partnerMoney.days.length === 1 &&
+          partnerMoney.days[0]?.period === istDay &&
+          partnerMoney.days[0].trips === 1 &&
+          partnerMoney.days[0].net_minor === ownEarning.total_minor &&
+          partnerMoney.weeks.length === 1 &&
+          partnerMoney.weeks[0]?.net_minor === ownEarning.total_minor,
+        `The statement does not break the line down or roll it up by the partner's day (${JSON.stringify({ line: ownEarning, days: partnerMoney.days, weeks: partnerMoney.weeks })})`,
+      );
       const strangerEarnings = await completeMoney.partnerStatement({
         context: partnerContext(createUuidV7()),
       });

@@ -64,7 +64,7 @@ test('the application captures references instead of inventing them', () => {
   assert.ok(source.includes('bankReference.trim()'));
 });
 
-test('earnings download as CSV with the ledger figures', () => {
+test('earnings download as CSV with every component of the line (9.10)', () => {
   const csv = earningsToCsv({
     pending_minor: 0,
     paid_minor: 12500,
@@ -73,13 +73,72 @@ test('earnings download as CSV with the ledger figures', () => {
       {
         partner_earnings_record_id: 'r-1',
         reference: 'TRIP-1',
+        outcome: 'DELIVERED',
         lifecycle_state: 'PAID',
         total_minor: 12500,
+        base_minor: 2000,
+        distance_minor: 9000,
+        time_minor: 0,
+        wait_minor: 200,
+        return_minor: 0,
+        incentive_minor: 0,
+        tip_minor: 800,
+        adjustment_minor: 500,
         posted_at: '2026-08-30T00:00:00.000Z',
+        day: '2026-08-30',
       },
     ],
   });
-  assert.equal(csv.split('\n')[1], 'TRIP-1,PAID,2026-08-30T00:00:00.000Z,125.00');
+  assert.equal(
+    csv.split('\n')[1],
+    'TRIP-1,DELIVERED,PAID,2026-08-30T00:00:00.000Z,2026-08-30,20.00,90.00,0.00,2.00,0.00,0.00,8.00,5.00,125.00',
+  );
+});
+
+test('a dispute reads with what was said, who has it, when it is due and how it ended (9.10)', async () => {
+  const { disputeSentence, LINE_COMPONENTS } = await import('./earnings-panel.js');
+  const now = Date.parse('2026-09-21T10:00:00.000Z');
+  const base = {
+    partner_dispute_case_id: 'd1',
+    partner_earnings_record_id: 'r1',
+    disputed_component: 'WAIT',
+    disputed_amount_minor: 200,
+    proposed_amount_minor: 400,
+    evidence_note: 'waited longer',
+    resolver_user_id: null,
+    resolution_reason_code: null,
+    resolved_amount_minor: null,
+    deadline_at: '2026-09-28T10:00:00.000Z',
+    resolved_at: null,
+  } as const;
+  assert.equal(
+    disputeSentence({ ...base, lifecycle_state: 'OPEN' }, now),
+    'wait: recorded ₹2.00, you say ₹4.00 — with operations, answer due in 7 days.',
+  );
+  assert.equal(
+    disputeSentence(
+      {
+        ...base,
+        lifecycle_state: 'RESOLVED',
+        resolved_amount_minor: 300,
+        resolution_reason_code: 'WAIT_PARTLY_UPHELD',
+        resolver_user_id: 'a1',
+        resolved_at: '2026-09-22T10:00:00.000Z',
+      },
+      now,
+    ),
+    'wait: recorded ₹2.00, you say ₹4.00 — operations decided ₹3.00 (wait partly upheld).',
+  );
+  assert.equal(
+    disputeSentence({ ...base, lifecycle_state: 'WITHDRAWN' }, now),
+    'wait: recorded ₹2.00, you say ₹4.00 — withdrawn.',
+  );
+  // Every component the server knows, and no 'TOTAL' the server refuses.
+  assert.deepEqual(
+    LINE_COMPONENTS.map(([, , key]) => key),
+    ['BASE', 'DISTANCE', 'TIME', 'WAIT', 'RETURN', 'INCENTIVE', 'TIP', 'ADJUSTMENT'],
+  );
+  assert.ok(!panel('earnings-panel.tsx').includes("'TOTAL'"), 'no unknown component is sent');
 });
 
 test('the profile reads verification and history from the server', () => {

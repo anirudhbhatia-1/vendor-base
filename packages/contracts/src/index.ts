@@ -49,6 +49,8 @@ export type {
   PartnerAvailability,
   DevicePosition,
   PartnerAttemptCompensation,
+  PartnerDisputeCase,
+  PartnerEarningRollup,
   PartnerEarningEntry,
   PartnerStatement,
   PrimaryWorkspaceRole,

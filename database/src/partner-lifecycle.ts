@@ -1207,8 +1207,8 @@ export class PartnerLifecycleService {
            (partner_earnings_record_id, delivery_assignment_id, partner_user_id, outcome,
             base_minor, distance_minor, time_minor, wait_minor, return_minor,
             incentive_minor, tip_minor, adjustment_minor, net_minor,
-            request_id, correlation_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            request_id, correlation_id, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
          RETURNING *`,
         [
           recordId,
@@ -1226,6 +1226,7 @@ export class PartnerLifecycleService {
           net,
           ids.request,
           ids.correlation,
+          now,
         ],
       );
     } catch (error) {
@@ -1387,8 +1388,88 @@ export class PartnerLifecycleService {
           now,
         ],
       );
+      // The outcome is money (9.10): the difference between what the line
+      // paid and what was decided lands on the earning as an adjustment
+      // attributable to this dispute, and the net moves with it. The ledger
+      // posting is the money service's, keyed to this row. Until audit run 65
+      // the decided amount was written on the case and nothing else moved.
+      if (input.resolution === 'RESOLVED') {
+        const delta =
+          (input.resolved_amount_minor ?? 0) - Number(row['disputed_amount_minor'] ?? 0);
+        if (delta !== 0) {
+          const ids = contextIds(input.context);
+          await client.query(
+            `INSERT INTO marketplace.partner_earning_adjustments
+               (partner_earning_adjustment_id, partner_earnings_record_id, partner_user_id,
+                partner_dispute_case_id, delta_minor, reason_code, decided_by_user_id,
+                request_id, correlation_id, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+            [
+              createUuidV7({ now_ms: now.getTime() }),
+              row['partner_earnings_record_id'],
+              row['partner_user_id'],
+              input.partner_dispute_case_id,
+              delta,
+              input.resolution_reason_code,
+              resolverId,
+              ids.request,
+              ids.correlation,
+              now,
+            ],
+          );
+          await client.query(
+            `UPDATE marketplace.partner_earnings_records
+                SET adjustment_minor = adjustment_minor + $2, net_minor = net_minor + $2, updated_at=$3
+              WHERE partner_earnings_record_id=$1`,
+            [row['partner_earnings_record_id'], delta, now],
+          );
+        }
+      }
       return projectDispute(updated.rows[0] as Record<string, unknown>);
     });
+  }
+
+  /** What a partner's disputes have changed on their earnings (9.10). */
+  async listEarningAdjustments(input: { readonly context: RequestContext }): Promise<
+    readonly {
+      readonly partner_earning_adjustment_id: UuidV7;
+      readonly partner_earnings_record_id: UuidV7;
+      readonly partner_dispute_case_id: UuidV7;
+      readonly delta_minor: number;
+      readonly reason_code: string;
+      readonly posted: boolean;
+      readonly created_at: Date;
+    }[]
+  > {
+    const partnerId = requirePartner(input.context);
+    const result = await this.#pool.query<{
+      partner_earning_adjustment_id: string;
+      partner_earnings_record_id: string;
+      partner_dispute_case_id: string;
+      delta_minor: string;
+      reason_code: string;
+      ledger_transaction_id: string | null;
+      created_at: Date;
+    }>(
+      `SELECT partner_earning_adjustment_id, partner_earnings_record_id, partner_dispute_case_id,
+              delta_minor::text, reason_code, ledger_transaction_id, created_at
+         FROM marketplace.partner_earning_adjustments
+        WHERE partner_user_id=$1 ORDER BY created_at DESC LIMIT 100`,
+      [partnerId],
+    );
+    return Object.freeze(
+      result.rows.map((row) =>
+        Object.freeze({
+          partner_earning_adjustment_id: parseUuidV7(row.partner_earning_adjustment_id),
+          partner_earnings_record_id: parseUuidV7(row.partner_earnings_record_id),
+          partner_dispute_case_id: parseUuidV7(row.partner_dispute_case_id),
+          delta_minor: Number(row.delta_minor),
+          reason_code: row.reason_code,
+          posted: row.ledger_transaction_id !== null,
+          created_at: row.created_at,
+        }),
+      ),
+    );
   }
 
   async listDisputes(input: {

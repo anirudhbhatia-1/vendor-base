@@ -2200,6 +2200,42 @@ Five requirements. Two held (custody preserved through the return; custody close
 
 **Step 9.9: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 65 (21 September 2026) — step 9.10, earnings and disputes
+
+Five requirements. One held (the CSV export) and four did not: the statement carried a total and a state per line and none of the eight components the record holds; the panel rendered no daily or weekly rollup (the matrix said it did); the app's "Query this amount" sent `disputed_component: 'TOTAL'`, a component the server refuses, so every dispute a partner ever raised from the app was refused as input; the partner could not read their disputes back at all — no route existed — and an operator's resolution at a different amount recorded the decided figure on the case and changed nothing on the earning or in the ledger. One migration (0107); fourteen connected assertions, three unit tests; five mutation probes, three caught by the walk and two by the schema.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Show trip base, distance/time, wait, return, incentive, tip, adjustment, and net | **Not met:** the statement had `total_minor` and nothing else — P65-01. |
+| 2 | Show daily/weekly rollups and payout status | Payout state met; **no rollups existed** — P65-01. |
+| 3 | Export statements | Met (CSV); now with every component. |
+| 4 | Open a dispute on an exact line | **Refused every time:** the app named a component the server does not have — P65-02. |
+| 5 | Show original/new amount, evidence, owner, deadline, and outcome | **Not met:** no read route, nothing rendered, and the outcome was a number on the case that moved no money — P65-02, P65-03. |
+
+**P65-01 — the line and its days.** `partnerStatement` carries the eight components, the outcome, the payout's state and paid date, and the partner's day and week (Asia/Kolkata, as 9.2 counts the day) for each line, and rolls them up (`days`, `weeks`: trips, net, paid) so the totals reconcile to the lines. The panel shows the breakdown under each line, the rollups beneath, the paid date on the state; the CSV carries every column.
+
+**P65-02 — the exact line.** The panel's query names one of the eight components (the server's own set; no `TOTAL`), the amount expected and why, and sends the recorded figure with it. `GET partner/earnings/disputes` reads them back — what was said, who resolved it, when it is due, how it ended — rendered in a sentence per dispute with a withdrawal while open.
+
+**P65-03 — the outcome is money.** 0107 adds `partner_earning_adjustments` (append-only but for the posting stamp: the dispute, the delta, who decided). `resolveDispute` at an amount other than the recorded one writes the row and moves the earning's `adjustment_minor` and `net_minor` by the delta in the same transaction — the schema's net-shape check holds them together; a withdrawal, or a resolution at the recorded amount, moves nothing. `CompleteMoneyLifecycleService.postEarningAdjustment` posts the delta between platform clearing and the partner's payable once, keyed to the row; the resolving request posts pending adjustments and the worker's operations pass posts anything left. `GET partner/earnings/adjustments` shows the partner what changed. Paying out an adjustment after the original payout has gone is Phase 10's.
+
+**Mutation results.** Five probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| A resolved dispute moves nothing (old) | *A resolved dispute did not move the money on the line ({"adjustment_minor":"0", …})* |
+| The adjustment lands but the net stays | **The schema**: `partner_earnings_net_shape` refuses the row before any assertion runs |
+| The posting is not idempotent | **The schema**: the append-only trigger refuses a second stamp, and the transaction with its second ledger entry rolls back — after the walk gained a direct replay of the posting; the sweep alone had let it pass |
+| The statement drops the wait component | *The statement does not break the line down or roll it up by the partner's day* |
+| The day is UTC's, not the partner's | *The statement's day is not the partner's …* — after the earning was posted at 00:30 IST; at the fulfilment walk's real hour UTC and IST share a date |
+
+**Forward findings.** (10.x) An adjustment decided after the original payout was paid is on the ledger and the record but reaches no payout yet. (DLP-49) `return_minor` and `time_minor` are always zero: the return trip and time are unpriced by the policy. (DLP-54) Performance transparency is the profile's counts; coaching before restriction is 11.x's. (carried) `ZONE` scopes by name; branch protection off; Android arrivals are claims and its shell holds nothing offline.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 108 migration files (0000–0107), full ladder; `partner_lifecycle` 86 assertions (77 before), `vendor_fulfilment` 277 (276), `money_lifecycle` 25. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 588 pass / 0 fail (587 before: the CSV's columns, the dispute sentence and the component set, the read routes' scope); `pnpm test:integration` exit 0 on a rebuilt test stack; all five probes on a rebuilt database.
+
+**Step 9.10: VERIFIED_LOCAL**, with the forward findings carried.
+
+**Phase 9 exit gate.** Offer expiry and reassignment (run 58), one active assignment (57, 58), waiting (60), pickup (55, 59), delivery (61), offline proof (62), post-pickup cancellation (58 — refused with goods in hand, directed as a return in 63), return (64), safety (63) and the earning dispute (65) each pass in the ladder's walks; customer detail is joined only in custody states (33, 61). **Phase 9 is VERIFIED_LOCAL** on every step, with the carried findings above.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

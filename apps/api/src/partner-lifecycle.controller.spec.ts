@@ -106,6 +106,8 @@ test('document renewal review is an admin partner-application review, and the pa
 
 test('separates earnings read from dispute open and withdrawal', () => {
   assert.equal(earningsAuth('list')?.capability, 'partner.earnings.read');
+  assert.equal(earningsAuth('listDisputes')?.capability, 'partner.earnings.read');
+  assert.equal(earningsAuth('listAdjustments')?.capability, 'partner.earnings.read');
   assert.equal(earningsAuth('openDispute')?.capability, 'partner.earnings.dispute');
   assert.equal(earningsAuth('withdraw')?.capability, 'partner.earnings.dispute');
 });

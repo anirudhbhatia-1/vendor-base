@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import {
   AssignmentCustodyService,
+  CompleteMoneyLifecycleService,
   PartnerFieldOpsService,
   PartnerLifecycleService,
   type DisputeComponent,
@@ -22,7 +23,12 @@ import {
 } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
-import { ASSIGNMENT_CUSTODY, PARTNER_FIELD_OPS, PARTNER_LIFECYCLE } from './tokens.js';
+import {
+  ASSIGNMENT_CUSTODY,
+  COMPLETE_MONEY_LIFECYCLE,
+  PARTNER_FIELD_OPS,
+  PARTNER_LIFECYCLE,
+} from './tokens.js';
 import {
   dateField,
   integerField,
@@ -358,6 +364,32 @@ export class PartnerEarningsController {
     }
   }
 
+  /** The partner's own disputes: what was said, who owns it, when it is due, how it ended (9.10). */
+  @Get('disputes')
+  @partnerEarningsRead
+  async listDisputes() {
+    try {
+      return { disputes: await this.lifecycle.listDisputes({ context: currentRequestContext() }) };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  /** What disputes have changed on the partner's earnings (9.10). */
+  @Get('adjustments')
+  @partnerEarningsRead
+  async listAdjustments() {
+    try {
+      return {
+        adjustments: await this.lifecycle.listEarningAdjustments({
+          context: currentRequestContext(),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
   @Post('disputes')
   @partnerEarningsDispute
   async openDispute(@Body() raw: unknown) {
@@ -392,20 +424,32 @@ export class PartnerEarningsController {
 
 @Controller('admin/partner-disputes')
 export class AdminPartnerDisputeController {
-  constructor(@Inject(PARTNER_LIFECYCLE) private readonly lifecycle: PartnerLifecycleService) {}
+  constructor(
+    @Inject(PARTNER_LIFECYCLE) private readonly lifecycle: PartnerLifecycleService,
+    @Inject(COMPLETE_MONEY_LIFECYCLE) private readonly money: CompleteMoneyLifecycleService,
+  ) {}
 
+  /**
+   * Resolves a dispute and posts its outcome (9.10): the decided difference
+   * lands on the earning as an attributable adjustment in the resolution's
+   * own transaction, and is posted to the ledger here; a posting that fails
+   * is picked up by the worker's pass.
+   */
   @Post(':partner_dispute_case_id/resolve')
   @adminResolveDispute
   async resolve(@Param('partner_dispute_case_id') id: string, @Body() raw: unknown) {
     const body = object(raw);
     try {
-      return await this.lifecycle.resolveDispute({
-        context: currentRequestContext(),
+      const context = currentRequestContext();
+      const resolved = await this.lifecycle.resolveDispute({
+        context,
         partner_dispute_case_id: uuid(id),
         resolution: 'RESOLVED',
         resolution_reason_code: stringField(body, 'resolution_reason_code'),
         resolved_amount_minor: integerField(body, 'resolved_amount_minor'),
       });
+      await this.money.postPendingEarningAdjustments({ context }).catch(() => undefined);
+      return resolved;
     } catch (error) {
       translateDomainError(error);
     }

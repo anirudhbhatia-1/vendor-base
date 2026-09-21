@@ -1,0 +1,3 @@
+DROP TRIGGER partner_earning_adjustments_append_only ON marketplace.partner_earning_adjustments;
+DROP FUNCTION marketplace.protect_partner_earning_adjustments();
+DROP TABLE marketplace.partner_earning_adjustments;

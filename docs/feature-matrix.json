@@ -4427,7 +4427,7 @@
       "name": "Trip earnings breakdown",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "total_minor and lifecycle_state from earnings API",
+      "notes": "Every component of the line -- base, distance, time, waiting, return, incentive, tip, adjustment, net -- with its outcome and payout state, on the statement and in the CSV (audit run 65 -- until then a total and a state)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4449,7 +4449,7 @@
       "name": "Daily and weekly rollups",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/partner-pwa/app/earnings-panel.tsx renders daily and weekly rollups",
+      "notes": "apps/partner-pwa/app/earnings-panel.tsx renders daily and weekly rollups from the statement's own days and weeks, in the partner's day (Asia/Kolkata), reconciling to the lines (audit run 65 -- until then the panel rendered none)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4471,7 +4471,7 @@
       "name": "Payout history",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/partner-pwa/app/earnings-panel.tsx renders payout history",
+      "notes": "apps/partner-pwa/app/earnings-panel.tsx renders payout state and paid date per line, and paid totals per day and week (audit run 65)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4493,7 +4493,7 @@
       "name": "Downloadable earnings statement",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Earnings statement downloads as CSV",
+      "notes": "Earnings statement downloads as CSV with every component of each line (audit run 65)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4519,7 +4519,7 @@
       "name": "Line-level earning dispute",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "A single earning line can be queried with the expected amount",
+      "notes": "A single component of one earning line is queried with the amount expected and why; a resolution at a different amount adjusts the earning and the ledger, attributable to the dispute (audit run 65 -- until then the app sent a component the server refused, and a resolution changed nothing)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
