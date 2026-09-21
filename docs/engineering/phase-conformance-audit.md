@@ -2236,6 +2236,16 @@ Five requirements. One held (the CSV export) and four did not: the statement car
 
 **Phase 9 exit gate.** Offer expiry and reassignment (run 58), one active assignment (57, 58), waiting (60), pickup (55, 59), delivery (61), offline proof (62), post-pickup cancellation (58 — refused with goods in hand, directed as a return in 63), return (64), safety (63) and the earning dispute (65) each pass in the ladder's walks; customer detail is joined only in custody states (33, 61). **Phase 9 is VERIFIED_LOCAL** on every step, with the carried findings above.
 
+## Android hand-off (21 September 2026) — between Phase 9 and Phase 10
+
+Not an audit step. The owner asked for the four Android apps to be installable before Phase 10 so the roles can be tested on a phone. Each of the four `apps/*-app` Expo projects now hosts its role's deployed PWA in a native shell (`packages/app-shell`, `HostedWorkspace`): the shell owns the WebView, the safe area, the back button, the offline banner, the retry, the deep link (`neighbourhood-<role>://…`) and — for the partner — the foreground location permission; everything the role does is the PWA's, so the matrix's Android claims other than CUS-02 remain as they were (`unverified` / `false`) and the earlier native screens are deleted rather than left as a second, diverging implementation. `packages/app-auth` is now unused and kept for the moment.
+
+**Build.** `pnpm --filter @neighbourhood-store/<role>-app build:apk` → `tooling/scripts/build-android-apk.mjs` (`expo prebuild --clean`, `gradlew assembleRelease`, arm64-v8a only) → `artifacts/android/<slug>-<release>.apk`, stamped with the commit it was built from. The `android/` and `ios/` trees are generated and ignored; so is `artifacts/`. Signed with the generated debug keystore: company-test installs only, never a store artefact. See `docs/engineering/android-apps.md`.
+
+**Verified on this machine.** All four APKs built from `6debd37`, installed in a headless Android 16 emulator (`nbhd-test`, Pixel 7 profile) and launched: customer reaches the shop home (the container app can take 20–30 s on a cold start); vendor, partner and admin reach their sign-in; the partner asks for location first. The header sits below the status bar and the tab bar above the gesture handle after moving to `react-native-safe-area-context` (React Native's own `SafeAreaView` applies no top inset on Android). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm check:boundaries` (`app-shell` → `ui-tokens` only) and `pnpm test:unit` exit 0 with the shell's tests added.
+
+**Carried.** Android arrivals are still claims (Phase 9); the shell holds nothing offline beyond what the PWA caches; no store listing, signing key or crash reporting exists.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.
