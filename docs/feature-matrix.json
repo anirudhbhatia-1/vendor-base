@@ -4217,7 +4217,7 @@
       "name": "Return to origin",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "require/begin/complete/authorize-return endpoints",
+      "notes": "require/begin/complete/authorize-return endpoints; the destination is on the partner's record (the store with its point, or a safe point in words), custody holds throughout, and completion records who received it, how many came back and in what condition (audit run 64)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4239,7 +4239,7 @@
       "name": "Return-location fallback",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "A partner reports; operations authorise the return destination and its proof rules -- now as the effect of their direction, not a separate step (audit run 63)",
+      "notes": "A partner reports a closed or refusing store as RETURN_REFUSED; operations redirect a return under way to a safe point named in words; the receipt closes custody and the case decides the money (audit run 64)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

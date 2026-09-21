@@ -204,3 +204,40 @@ test('a held completion carries when it was captured and the proof it consumes (
   assert.equal(seen[0]?.['offline_proof_id'], '01a0c40b-070f-7393-8216-0df916eb8540');
   assert.ok(!('held_since' in (seen[1] ?? {})) && !('offline_proof_id' in (seen[1] ?? {})));
 });
+
+test('a completed return carries its receipt (9.9)', async () => {
+  const seen: Record<string, unknown>[] = [];
+  const controller = new PartnerAssignmentController(
+    {
+      completeReturn: async (input: Record<string, unknown>) => {
+        seen.push(input);
+        return { assignment_state: 'RETURNED' };
+      },
+    } as never,
+    {} as never,
+  );
+  await requestContextStorage.run(createRequestContext(), async () => {
+    await controller.completeReturn('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-COMPLETE-RETURN-T1',
+      expected_version: 11,
+      reason_code: 'RETURN_COMPLETED',
+      proof_reference: 'SYNTH-PROOF-RETURN-T1',
+      received_by: 'SYNTH counter, Jain Stores',
+      package_count: 2,
+      condition_note: 'SYNTH one bag torn',
+    });
+    await assert.rejects(
+      controller.completeReturn('01a0c40b-070f-7393-8216-0df916eb851f', {
+        command_reference: 'SYNTH-CMD-COMPLETE-RETURN-T2',
+        expected_version: 11,
+        reason_code: 'RETURN_COMPLETED',
+        proof_reference: 'SYNTH-PROOF-RETURN-T2',
+      }),
+      /Bad Request/,
+    );
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.['received_by'], 'SYNTH counter, Jain Stores');
+  assert.equal(seen[0]?.['package_count'], 2);
+  assert.equal(seen[0]?.['condition_note'], 'SYNTH one bag torn');
+});

@@ -472,6 +472,9 @@ export class AdminPartnerExceptionsController {
           ...(optionalString(body, 'destination_reference') !== undefined
             ? { destination_reference: optionalString(body, 'destination_reference') as string }
             : {}),
+          ...(optionalString(body, 'destination_note') !== undefined
+            ? { destination_note: optionalString(body, 'destination_note') as string }
+            : {}),
           ...(optionalInteger(body, 'compensation_minor') !== undefined
             ? { compensation_minor: optionalInteger(body, 'compensation_minor') as number }
             : {}),

@@ -674,16 +674,117 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       now: new Date(now.getTime() + 27_000),
       reason_code: 'RETURN_ROUTE_STARTED',
     });
+    // 9.9 -- the partner carrying the return is told where: the store, with
+    // its point, until operations name another safe point in words.
+    const returningToStore = (
+      await service.listActiveForPartner({ partner_user_id: partnerTwoId })
+    ).find((job) => job.delivery_assignment_id === state.delivery_assignment_id);
+    check(
+      returningToStore?.return_destination?.reference === 'SYNTH-RETURN-JAIN-STORES-B001' &&
+        returningToStore.return_destination.is_store === true &&
+        returningToStore.pickup_location?.name === 'SYNTH Assignment Store' &&
+        returningToStore.custody_state === 'IN_CUSTODY',
+      `The returning partner was not told where to go (${JSON.stringify({ destination: returningToStore?.return_destination, store: returningToStore?.pickup_location })})`,
+    );
+    // The store is closed: the partner reports it; operations redirect the
+    // return to another safe point while it is under way, in words.
+    await fieldOps.raiseException({
+      context: partnerTwo,
+      delivery_assignment_id: state.delivery_assignment_id,
+      exception_kind: 'RETURN_REFUSED',
+      evidence_note: 'SYNTH shutters down, nobody answering',
+      reason_code: 'STORE_CLOSED',
+      now: new Date(now.getTime() + 27_200),
+    });
+    const redirected = await service.direct({
+      command_reference: 'SYNTH-CMD-REDIRECT-RETURN-B001',
+      context: admin,
+      delivery_assignment_id: state.delivery_assignment_id,
+      destination_note: 'SYNTH Hub locker at Vaishali Nagar depot, ask for the night clerk',
+      destination_reference: 'SYNTH-RETURN-VAISHALI-DEPOT-B001',
+      direction: 'RETURN_TO_VENDOR',
+      now: new Date(now.getTime() + 27_400),
+      reason_code: 'STORE_CLOSED_ALTERNATE_POINT',
+    });
+    const redirectedView = (
+      await service.listActiveForPartner({ partner_user_id: partnerTwoId })
+    ).find((job) => job.delivery_assignment_id === state.delivery_assignment_id);
+    check(
+      redirected.assignment_state === 'RETURNING' &&
+        redirected.version === state.version + 1 &&
+        redirectedView?.return_destination?.reference === 'SYNTH-RETURN-VAISHALI-DEPOT-B001' &&
+        redirectedView.return_destination.note ===
+          'SYNTH Hub locker at Vaishali Nagar depot, ask for the night clerk' &&
+        redirectedView.return_destination.is_store === false &&
+        redirectedView.pickup_location === undefined,
+      `A closed store did not redirect the return to a named safe point (${JSON.stringify({ redirected, view: redirectedView?.return_destination, store: redirectedView?.pickup_location })})`,
+    );
+    state = redirected;
+    // The receipt: who took it, how many, in what condition, and the proof.
+    let receiptRequired = false;
+    try {
+      await service.completeReturn({
+        command_reference: 'SYNTH-CMD-COMPLETE-RETURN-NOBODY-B001',
+        context: partnerTwo,
+        delivery_assignment_id: state.delivery_assignment_id,
+        expected_version: state.version,
+        now: new Date(now.getTime() + 28_000),
+        package_count: 1,
+        proof_reference: 'SYNTH-PROOF-RETURN-B001',
+        reason_code: 'RETURN_PROOF_VERIFIED',
+        received_by: ' ',
+      });
+    } catch (error) {
+      receiptRequired = error instanceof AssignmentInputError;
+    }
+    check(receiptRequired, 'A return completed with nobody recorded as receiving it');
     state = await service.completeReturn({
       command_reference: 'SYNTH-CMD-COMPLETE-RETURN-B001',
+      condition_note: 'SYNTH bag intact, one item warm',
       context: partnerTwo,
       delivery_assignment_id: state.delivery_assignment_id,
       expected_version: state.version,
       now: new Date(now.getTime() + 28_000),
+      package_count: 1,
       proof_reference: 'SYNTH-PROOF-RETURN-B001',
       reason_code: 'RETURN_PROOF_VERIFIED',
+      received_by: 'SYNTH night clerk, depot',
     });
     check(state.custody_state === 'RETURNED', 'Controlled return did not close custody');
+    const receipt = await pool.query<{
+      received_by: string | null;
+      returned_package_count: number | null;
+      condition_note: string | null;
+      returned_at: Date | null;
+      destination_reference: string | null;
+      closure_count: number | null;
+    }>(
+      `SELECT task.received_by, task.returned_package_count, task.condition_note, task.returned_at,
+              task.destination_reference,
+              (SELECT package_count FROM marketplace.custody_events
+                WHERE delivery_assignment_id=$1 AND custody_state='RETURNED') AS closure_count
+         FROM marketplace.return_tasks task WHERE task.delivery_assignment_id=$1`,
+      [state.delivery_assignment_id],
+    );
+    check(
+      receipt.rows[0]?.received_by === 'SYNTH night clerk, depot' &&
+        receipt.rows[0].returned_package_count === 1 &&
+        receipt.rows[0].condition_note === 'SYNTH bag intact, one item warm' &&
+        receipt.rows[0].returned_at?.getTime() === now.getTime() + 28_000 &&
+        receipt.rows[0].destination_reference === 'SYNTH-RETURN-VAISHALI-DEPOT-B001' &&
+        receipt.rows[0].closure_count === 1,
+      `The return did not record its receipt (${JSON.stringify(receipt.rows[0])})`,
+    );
+    // Custody closed; nothing of the money moved from here.
+    const moneyUntouched = await pool.query<{ earnings: string }>(
+      `SELECT (SELECT count(*) FROM marketplace.partner_earnings_records
+                WHERE delivery_assignment_id=$1)::text AS earnings`,
+      [state.delivery_assignment_id],
+    );
+    check(
+      moneyUntouched.rows[0]?.earnings === '0',
+      'A return moved money on its own instead of leaving it to the case',
+    );
 
     // A command reference the schema would refuse is refused here first, as
     // input. The domain's check was wider than `assignment_event_command_shape`
@@ -1626,10 +1727,24 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       delivery_assignment_id: directedJob.delivery_assignment_id,
       expected_version: directedJob.version,
       now: new Date(now.getTime() + 3_007_000),
+      package_count: 1,
       proof_reference: 'SYNTH-PROOF-RETURN-DIRECT-H001',
       reason_code: 'RETURN_PROOF_VERIFIED',
+      received_by: 'SYNTH Jain Stores counter',
     });
-    check(directedJob.custody_state === 'RETURNED', 'A directed return did not close custody');
+    const shortReturn = await pool.query<{ reason_code: string; returned: number | null }>(
+      `SELECT (SELECT reason_code FROM marketplace.assignment_events
+                WHERE delivery_assignment_id=$1 AND event_type='RETURNED') AS reason_code,
+              task.returned_package_count AS returned
+         FROM marketplace.return_tasks task WHERE task.delivery_assignment_id=$1`,
+      [directedJob.delivery_assignment_id],
+    );
+    check(
+      directedJob.custody_state === 'RETURNED' &&
+        shortReturn.rows[0]?.reason_code === 'RETURN_SHORT_OF_PACKAGES' &&
+        shortReturn.rows[0].returned === 1,
+      `A return short of its two packages was not said so (${JSON.stringify(shortReturn.rows[0])})`,
+    );
     // Nothing in hand: a cancellation ends the attempt; a reassignment takes it back.
     const pooledSeed = await service.create({
       approximate_drop_area: 'SYNTH Sanganer Jaipur',

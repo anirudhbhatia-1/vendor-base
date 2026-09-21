@@ -400,9 +400,15 @@ export class PartnerAssignmentController {
   async completeReturn(@Param('delivery_assignment_id') id: string, @Body() raw: unknown) {
     const value = object(raw);
     try {
+      // The receipt (9.9): who took it, how many came back, in what condition.
       return await this.assignments.completeReturn({
         ...transition(value, id),
         proof_reference: stringField(value, 'proof_reference'),
+        received_by: stringField(value, 'received_by'),
+        package_count: integerField(value, 'package_count', 0),
+        ...(optionalString(value, 'condition_note') !== undefined
+          ? { condition_note: optionalString(value, 'condition_note') as string }
+          : {}),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();
@@ -463,6 +469,9 @@ export class AdminAssignmentController {
       return await this.assignments.authorizeReturn({
         ...transition(value, id),
         destination_reference: stringField(value, 'destination_reference'),
+        ...(optionalString(value, 'destination_note') !== undefined
+          ? { destination_note: optionalString(value, 'destination_note') as string }
+          : {}),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();

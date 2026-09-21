@@ -1078,7 +1078,13 @@ export function createApiClient(options: ApiClientOptions) {
 
         completeReturn: (
           assignmentId: string,
-          body: AssignmentTransition & { proof_reference: string },
+          body: AssignmentTransition & {
+            proof_reference: string;
+            /** The receipt (9.9): who took it, how many came back, in what condition. */
+            received_by: string;
+            package_count: number;
+            condition_note?: string;
+          },
         ) =>
           r<DeliveryAssignment>(`/partner/assignments/${assignmentId}/complete-return`, {
             method: 'POST',

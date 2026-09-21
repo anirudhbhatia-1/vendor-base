@@ -26,7 +26,8 @@ export type ExceptionKind =
   | 'THREAT'
   | 'VEHICLE_FAILURE'
   | 'PROHIBITED_GOODS'
-  | 'PROOF_SYNC_FAILED';
+  | 'PROOF_SYNC_FAILED'
+  | 'RETURN_REFUSED';
 
 type ExceptionEvent = {
   readonly partner_exception_event_id: string;
@@ -115,6 +116,7 @@ const ON_THE_ROAD: ReadonlyArray<readonly [ExceptionKind, string]> = [
   ['UNSAFE_LOCATION', 'This place feels unsafe'],
   ['VEHICLE_FAILURE', 'My vehicle has a problem'],
   ['PROHIBITED_GOODS', 'I think this should not be carried'],
+  ['RETURN_REFUSED', 'The store is closed or will not take it back'],
 ];
 
 /**

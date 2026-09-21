@@ -143,6 +143,12 @@ type Assignment = {
     readonly claimed_at: string;
     readonly reason: 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
   } | null;
+  /** Where a return goes (9.9): the store, or a safe point named in words. */
+  readonly return_destination?: {
+    readonly reference: string;
+    readonly note: string | null;
+    readonly is_store: boolean;
+  } | null;
   /** How the arrival at the customer's door was trusted (9.6). */
   readonly customer_arrival_kind?: 'TRUSTED_LOCATION' | 'UNVERIFIED' | 'CUSTOMER_CONFIRMED' | null;
   readonly customer_arrival_claim_reason?: string | null;
@@ -232,6 +238,10 @@ function ActiveJob({
     readonly expiresAt: string;
   } | null>(null);
   const [pickupCodeError, setPickupCodeError] = useState<string | null>(null);
+  // The return's receipt (9.9).
+  const [receivedBy, setReceivedBy] = useState('');
+  const [returnedCount, setReturnedCount] = useState(String(assignment.package_count));
+  const [conditionNote, setConditionNote] = useState('');
   const [mintingCode, setMintingCode] = useState(false);
   // A job with an open safety report does not move. The partner reported an
   // accident and the app kept offering "pick up" and "record the delivery"
@@ -250,15 +260,21 @@ function ActiveJob({
   // an area name alone is not something anyone can deliver to. It is
   // stage-gated server-side and never reaches an offer (SEC-03).
   const dropAddress = assignment.drop_address ?? null;
-  const headingToStore = ['ASSIGNED', 'AT_VENDOR'].includes(assignment.assignment_state);
-  // The store itself once the job is theirs (9.4): the API sends its name,
-  // landmark and point between acceptance and pickup, and only then.
+  const returning = ['RETURN_AUTHORIZED', 'RETURNING'].includes(assignment.assignment_state);
+  const headingToStore =
+    ['ASSIGNED', 'AT_VENDOR'].includes(assignment.assignment_state) ||
+    (returning && assignment.return_destination?.is_store === true);
+  // The store itself once the job is theirs (9.4), and again when the goods
+  // go back to it (9.9): the API sends its name, landmark and point then.
   const store = headingToStore ? (assignment.pickup_location ?? null) : null;
-  const heading = headingToStore
-    ? store
-      ? displayArea(store.name)
-      : displayArea(assignment.approximate_pickup_area)
-    : (dropAddress?.label ?? displayArea(assignment.approximate_drop_area));
+  const heading =
+    returning && assignment.return_destination && !assignment.return_destination.is_store
+      ? displayArea(assignment.return_destination.note ?? assignment.return_destination.reference)
+      : headingToStore
+        ? store
+          ? displayArea(store.name)
+          : displayArea(assignment.approximate_pickup_area)
+        : (dropAddress?.label ?? displayArea(assignment.approximate_drop_area));
   // Coordinates beat a text query every time: the store's point on the way
   // there, the customer's on the way back. A rough area is all an offer has.
   const mapQuery = store
@@ -324,13 +340,25 @@ function ActiveJob({
         // 9.4 / DLP-21 / DLP-46: the store, in words first. The landmark is
         // what finds a shop in a lane; the map is the handoff, not the account.
         <Card className="drop-address" tone="sunken">
-          <p className="ns-eyebrow">Collect from</p>
+          <p className="ns-eyebrow">{returning ? 'Return to' : 'Collect from'}</p>
           <strong>{displayArea(store.name)}</strong>
           {store.landmark ? <p>Near {displayArea(store.landmark)}</p> : null}
           {store.description ? (
             <p className="drop-address__instructions">{store.description}</p>
           ) : null}
           {written ? <p>{written}</p> : null}
+        </Card>
+      ) : null}
+
+      {returning && assignment.return_destination && !assignment.return_destination.is_store ? (
+        // 9.9: operations named another safe point, in words -- the store was
+        // closed or refused the goods. The words are the destination.
+        <Card className="drop-address" tone="sunken">
+          <p className="ns-eyebrow">Return to</p>
+          <strong>{displayArea(assignment.return_destination.note ?? '')}</strong>
+          <p className="ns-field__hint">
+            Named by operations. The goods stay in your custody until they are received.
+          </p>
         </Card>
       ) : null}
 
@@ -605,22 +633,55 @@ function ActiveJob({
             </Button>
           ) : null}
           {assignment.assignment_state === 'RETURNING' ? (
-            <Button
-              busy={busy}
-              onClick={() =>
-                void onAct(
-                  assignment,
-                  'complete-return',
-                  {
-                    reason_code: 'RETURN_COMPLETED',
-                    proof_reference: `SYNTH-PROOF-RETURN-${Date.now().toString(36).toUpperCase()}`,
-                  },
-                  'return completed',
-                )
-              }
-            >
-              Complete the return
-            </Button>
+            // 9.9: the receipt -- who took it, how many came back, in what
+            // condition -- is what closes custody, not a button.
+            <Card className="package-check" tone="sunken">
+              <p className="ns-eyebrow">Handing it back</p>
+              <Field
+                hint="Their name or role at the counter."
+                label="Who received it"
+                maxLength={120}
+                onChange={(event) => setReceivedBy(event.target.value)}
+                value={receivedBy}
+              />
+              <Field
+                hint={`You carried ${assignment.package_count}.`}
+                inputMode="numeric"
+                label="Packages handed back"
+                min={0}
+                onChange={(event) => setReturnedCount(event.target.value)}
+                type="number"
+                value={returnedCount}
+              />
+              <Field
+                hint="Anything about the goods, if there is."
+                label="Condition (optional)"
+                maxLength={240}
+                onChange={(event) => setConditionNote(event.target.value)}
+                value={conditionNote}
+              />
+              <Button
+                block
+                busy={busy}
+                disabled={receivedBy.trim().length < 2 || !(Number(returnedCount) >= 0)}
+                onClick={() =>
+                  void onAct(
+                    assignment,
+                    'complete-return',
+                    {
+                      reason_code: 'RETURN_COMPLETED',
+                      proof_reference: `SYNTH-PROOF-RETURN-${Date.now().toString(36).toUpperCase()}`,
+                      received_by: receivedBy.trim(),
+                      package_count: Math.max(0, Math.round(Number(returnedCount) || 0)),
+                      ...(conditionNote.trim() ? { condition_note: conditionNote.trim() } : {}),
+                    },
+                    'return completed',
+                  )
+                }
+              >
+                Complete the return
+              </Button>
+            </Card>
           ) : null}
         </div>
       ) : null}

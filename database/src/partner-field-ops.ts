@@ -37,7 +37,9 @@ export type ExceptionKind =
   | 'VEHICLE_FAILURE'
   | 'PROHIBITED_GOODS'
   /** A completion held offline that the server refused on replay (9.7, DLP-34). */
-  | 'PROOF_SYNC_FAILED';
+  | 'PROOF_SYNC_FAILED'
+  /** The store was closed, or would not take the goods back (9.9, DLP-42). */
+  | 'RETURN_REFUSED';
 
 /**
  * Each guided exception ends in a named resolution rather than a free-text
@@ -106,6 +108,7 @@ const exceptionKinds: ReadonlySet<ExceptionKind> = new Set([
   'VEHICLE_FAILURE',
   'PROHIBITED_GOODS',
   'PROOF_SYNC_FAILED',
+  'RETURN_REFUSED',
 ]);
 /**
  * Resolutions a partner may record themselves.

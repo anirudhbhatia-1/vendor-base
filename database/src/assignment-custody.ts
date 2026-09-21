@@ -106,6 +106,16 @@ export interface DeliveryAssignmentRecord {
     readonly claimed_at: string;
     readonly reason: ArrivalClaimReason;
   } | null;
+  /**
+   * Where a return goes (9.9), for the partner carrying it: the store by
+   * default (then `pickup_location` is on the record too), or an alternate
+   * safe point operations named in words.
+   */
+  readonly return_destination?: {
+    readonly reference: string;
+    readonly note: string | null;
+    readonly is_store: boolean;
+  } | null;
   /** How the arrival at the customer's door was trusted (9.6), once recorded. */
   readonly customer_arrival_kind: CustomerArrivalKind | null;
   readonly customer_arrived_at: string | null;
@@ -411,6 +421,15 @@ function orderReference(value: string): string {
   }
   return value;
 }
+function destinationNote(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed.length < 2 || trimmed.length > 240) {
+    throw new AssignmentInputError('A destination note is between 2 and 240 characters');
+  }
+  return trimmed;
+}
+
 function returnReference(value: string): string {
   if (!RETURN_REFERENCE.test(value)) {
     throw new AssignmentInputError('Return destination reference is invalid');
@@ -799,10 +818,16 @@ export class AssignmentCustodyService {
         store_longitude: string | null;
         expected_ready_at: Date | null;
         delay_reason_code: string | null;
+        return_reference: string | null;
+        return_note: string | null;
       }
     >(
       `SELECT assignment.*,
               ${OPEN_EMERGENCY_SQL.replaceAll('$2', '$3')} AS open_emergency,
+              CASE WHEN assignment.assignment_state IN ('RETURN_AUTHORIZED', 'RETURNING')
+                   THEN task.destination_reference END AS return_reference,
+              CASE WHEN assignment.assignment_state IN ('RETURN_AUTHORIZED', 'RETURNING')
+                   THEN task.destination_note END AS return_note,
               CASE WHEN assignment.assignment_state = ANY($4::text[])
                    THEN COALESCE(orders.ready_at,
                                  orders.accepted_at
@@ -810,15 +835,15 @@ export class AssignmentCustodyService {
                    END AS expected_ready_at,
               CASE WHEN assignment.assignment_state = ANY($4::text[])
                    THEN orders.delay_reason_code END AS delay_reason_code,
-              CASE WHEN assignment.assignment_state = ANY($4::text[])
+              CASE WHEN assignment.assignment_state = ANY($4::text[]) OR returning_to_store.yes
                    THEN store.location_name END AS store_name,
-              CASE WHEN assignment.assignment_state = ANY($4::text[])
+              CASE WHEN assignment.assignment_state = ANY($4::text[]) OR returning_to_store.yes
                    THEN store.landmark END AS store_landmark,
-              CASE WHEN assignment.assignment_state = ANY($4::text[])
+              CASE WHEN assignment.assignment_state = ANY($4::text[]) OR returning_to_store.yes
                    THEN store.profile_description END AS store_description,
-              CASE WHEN assignment.assignment_state = ANY($4::text[])
+              CASE WHEN assignment.assignment_state = ANY($4::text[]) OR returning_to_store.yes
                    THEN ST_Y(store.coordinates::geometry)::text END AS store_latitude,
-              CASE WHEN assignment.assignment_state = ANY($4::text[])
+              CASE WHEN assignment.assignment_state = ANY($4::text[]) OR returning_to_store.yes
                    THEN ST_X(store.coordinates::geometry)::text END AS store_longitude,
               CASE WHEN assignment.assignment_state = ANY($2::text[])
                    THEN address.label END AS drop_label,
@@ -835,6 +860,14 @@ export class AssignmentCustodyService {
          FROM marketplace.delivery_assignments assignment
          JOIN marketplace.vendor_locations store
            ON store.vendor_location_id = assignment.vendor_location_id
+         LEFT JOIN marketplace.return_tasks task
+           ON task.delivery_assignment_id = assignment.delivery_assignment_id
+         -- Returning to the store itself (9.9): the store's point is the
+         -- destination unless operations named another safe point in words.
+         LEFT JOIN LATERAL (
+           SELECT assignment.assignment_state IN ('RETURN_AUTHORIZED', 'RETURNING')
+                  AND task.destination_note IS NULL AS yes
+         ) returning_to_store ON true
          LEFT JOIN marketplace.vendor_orders orders
            ON orders.vendor_order_id = assignment.vendor_order_id
          LEFT JOIN marketplace.checkout_groups grouping
@@ -862,6 +895,15 @@ export class AssignmentCustodyService {
         open_emergency: row.open_emergency,
         ...(row.expected_ready_at !== null
           ? { expected_ready_at: row.expected_ready_at, delay_reason_code: row.delay_reason_code }
+          : {}),
+        ...(row.return_reference !== null
+          ? {
+              return_destination: Object.freeze({
+                reference: row.return_reference,
+                note: row.return_note,
+                is_store: row.return_note === null,
+              }),
+            }
           : {}),
         ...(row.store_name !== null && row.store_latitude !== null && row.store_longitude !== null
           ? {
@@ -2189,12 +2231,15 @@ export class AssignmentCustodyService {
     readonly direction: 'RETURN_TO_VENDOR' | 'REASSIGN' | 'CANCEL';
     readonly reason_code: string;
     readonly destination_reference?: string;
+    /** An alternate safe point in words (9.9); given while returning, it redirects the return. */
+    readonly destination_note?: string;
     readonly compensation_minor?: number;
     readonly now?: Date;
   }): Promise<DeliveryAssignmentRecord> {
     const who = actor(input.context, ['admin']);
     const now = input.now ?? new Date();
     command(input.command_reference);
+    const note = destinationNote(input.destination_note);
     const current = await this.get({
       context: input.context,
       delivery_assignment_id: input.delivery_assignment_id,
@@ -2251,8 +2296,40 @@ export class AssignmentCustodyService {
           'Delivery assignment was not found',
         );
       let assignment = await lock();
-      if (['RETURN_AUTHORIZED', 'RETURNING', 'RETURNED'].includes(assignment.assignment_state)) {
-        return assignmentRecord(assignment);
+      if (assignment.assignment_state === 'RETURNED') return assignmentRecord(assignment);
+      if (['RETURN_AUTHORIZED', 'RETURNING'].includes(assignment.assignment_state)) {
+        // Already authorised: a new destination redirects the return (the
+        // store closed, or refused it); nothing new is a no-op.
+        if (input.destination_reference === undefined && note === null) {
+          return assignmentRecord(assignment);
+        }
+        const redirected = await client.query(
+          `UPDATE marketplace.return_tasks
+              SET destination_reference=COALESCE($2, destination_reference), destination_note=$3,
+                  authorized_by_user_id=$4, version=version+1, updated_at=$5
+            WHERE delivery_assignment_id=$1 AND return_state IN ('AUTHORIZED','RETURNING')
+            RETURNING return_task_id`,
+          [
+            assignment.delivery_assignment_id,
+            input.destination_reference === undefined
+              ? null
+              : returnReference(input.destination_reference),
+            note,
+            who.id,
+            now,
+          ],
+        );
+        requiredRow(redirected.rows, 'Return task was not found');
+        return updateAssignment(client, {
+          assignment,
+          command_reference: input.command_reference,
+          context: input.context,
+          event_type: 'RETURN_AUTHORIZED',
+          next_state: assignment.assignment_state,
+          now,
+          reason_code: input.reason_code,
+          who,
+        });
       }
       if (
         ![
@@ -2309,10 +2386,10 @@ export class AssignmentCustodyService {
         `SYNTH-RETURN-${assignment.vendor_location_id.replaceAll('-', '').slice(0, 12).toUpperCase()}`;
       await client.query(
         `UPDATE marketplace.return_tasks
-            SET return_state='AUTHORIZED', destination_reference=$2,
+            SET return_state='AUTHORIZED', destination_reference=$2, destination_note=$5,
                 authorized_by_user_id=$3, version=version+1, updated_at=$4
           WHERE delivery_assignment_id=$1 AND return_state='REQUIRED'`,
-        [assignment.delivery_assignment_id, returnReference(destination), who.id, now],
+        [assignment.delivery_assignment_id, returnReference(destination), who.id, now, note],
       );
       return updateAssignment(client, {
         assignment,
@@ -2407,8 +2484,11 @@ export class AssignmentCustodyService {
   async authorizeReturn(
     input: TransitionInput & {
       readonly destination_reference: string;
+      /** An alternate safe point, in words the partner can find (9.9). */
+      readonly destination_note?: string;
     },
   ): Promise<DeliveryAssignmentRecord> {
+    const note = destinationNote(input.destination_note);
     const who = actor(input.context, ['admin']);
     const now = input.now ?? new Date();
     return transaction(this.#pool, async (client) => {
@@ -2428,7 +2508,7 @@ export class AssignmentCustodyService {
       }
       const result = await client.query(
         `UPDATE marketplace.return_tasks
-            SET return_state='AUTHORIZED', destination_reference=$2,
+            SET return_state='AUTHORIZED', destination_reference=$2, destination_note=$5,
                 authorized_by_user_id=$3, version=version+1, updated_at=$4
           WHERE delivery_assignment_id=$1 AND return_state='REQUIRED' RETURNING return_task_id`,
         [
@@ -2436,6 +2516,7 @@ export class AssignmentCustodyService {
           returnReference(input.destination_reference),
           who.id,
           now,
+          note,
         ],
       );
       requiredRow(result.rows, 'Return task was not found');
@@ -2456,11 +2537,40 @@ export class AssignmentCustodyService {
     return this.#returnTransition(input, 'RETURN_AUTHORIZED', 'RETURNING', 'RETURNING');
   }
 
+  /**
+   * The goods are back (9.9): who received them, how many came back, in what
+   * condition, and the proof. The count is recorded as handed over -- a
+   * shortfall against what was carried is a fact on the return, not a
+   * refusal at the counter -- and custody closes on it; the money is
+   * operations' to divide from the case the return opens.
+   */
   async completeReturn(
-    input: TransitionInput & { readonly proof_reference: string },
+    input: TransitionInput & {
+      readonly proof_reference: string;
+      readonly received_by: string;
+      readonly package_count: number;
+      readonly condition_note?: string;
+    },
   ): Promise<DeliveryAssignmentRecord> {
     const who = actor(input.context, ['delivery_partner']);
     const now = input.now ?? new Date();
+    const receivedBy = input.received_by.trim();
+    if (receivedBy.length < 2 || receivedBy.length > 120) {
+      throw new AssignmentInputError('Say who received the return, in 2 to 120 characters');
+    }
+    if (
+      !Number.isSafeInteger(input.package_count) ||
+      input.package_count < 0 ||
+      input.package_count > 100
+    ) {
+      throw new AssignmentInputError('The returned package count must be between 0 and 100');
+    }
+    if (
+      input.condition_note !== undefined &&
+      (input.condition_note.length < 1 || input.condition_note.length > 240)
+    ) {
+      throw new AssignmentInputError('A condition note is between 1 and 240 characters');
+    }
     return transaction(this.#pool, async (client) => {
       const prior = await replay(client, {
         command_reference: input.command_reference,
@@ -2481,12 +2591,30 @@ export class AssignmentCustodyService {
         throw new AssignmentConflictError('Return completion requires active return custody');
       }
       const proofRef = proof(input.proof_reference);
-      await this.#custodyClosure(client, assignment, who.id, 'RETURNED', proofRef, input, now);
+      await this.#custodyClosure(
+        client,
+        assignment,
+        who.id,
+        'RETURNED',
+        proofRef,
+        input,
+        now,
+        input.package_count,
+      );
       await client.query(
         `UPDATE marketplace.return_tasks
-            SET return_state='RETURNED', proof_reference=$2, version=version+1, updated_at=$3
+            SET return_state='RETURNED', proof_reference=$2, received_by=$4,
+                returned_package_count=$5, condition_note=$6, returned_at=$3,
+                version=version+1, updated_at=$3
           WHERE delivery_assignment_id=$1 AND return_state='RETURNING'`,
-        [assignment.delivery_assignment_id, proofRef, now],
+        [
+          assignment.delivery_assignment_id,
+          proofRef,
+          now,
+          receivedBy,
+          input.package_count,
+          input.condition_note ?? null,
+        ],
       );
       await endMembership(client, assignment, now, 'RETURN_COMPLETED');
       if (assignment.vendor_order_id) {
@@ -2506,9 +2634,13 @@ export class AssignmentCustodyService {
         next_custody_state: 'RETURNED',
         next_state: 'RETURNED',
         now,
-        package_count: assignment.package_count,
+        package_count: input.package_count,
         proof_reference: proofRef,
-        reason_code: input.reason_code,
+        // A shortfall is said in the history, whatever the client's reason.
+        reason_code:
+          input.package_count < assignment.package_count
+            ? 'RETURN_SHORT_OF_PACKAGES'
+            : input.reason_code,
         who,
       });
     });
@@ -2795,6 +2927,7 @@ export class AssignmentCustodyService {
     proofReference: string,
     input: TransitionInput,
     now: Date,
+    packageCount: number = assignment.package_count,
   ) {
     const contextIds = ids(input.context);
     await client.query(
@@ -2808,7 +2941,7 @@ export class AssignmentCustodyService {
         assignment.delivery_assignment_id,
         state,
         partnerId,
-        assignment.package_count,
+        packageCount,
         proofReference,
         reason(input.reason_code),
         contextIds.requestId,

@@ -2166,6 +2166,40 @@ Five requirements. Three held (every path exists and is reachable from the partn
 
 **Step 9.8: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 64 (21 September 2026) — step 9.9, return to origin
+
+Five requirements. Two held (custody preserved through the return; custody closed separately from the money, which a case decides) and three did not: the authorised destination was a reference the partner could not read and the returning partner's record carried no destination at all — not even the store's point it carries on the way there; a store that was closed or refused the goods had no report and no path, since an authorisation could not be moved once given; and completion recorded an invented proof reference and nothing else — no recipient, no count, no condition. One migration (0106); eight connected assertions, two unit tests; five mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Authorize return and destination | Authorised, **but the destination was unreadable and absent from the partner's record** — P64-01. |
+| 2 | Preserve custody while returning | Met: `IN_CUSTODY` from `DELIVERY_FAILED` through `RETURNING`; asserted on the returning record. |
+| 3 | Handle vendor closed/refusal and alternate safe point | **Not met:** no report kind, and `authorizeReturn` only from `RETURN_REQUIRED` — P64-02. |
+| 4 | Record recipient, counts, condition, and proof | **Not met:** a proof reference the app made up from the clock — P64-03. |
+| 5 | Close custody separately from refund, settlement, earning, and dispute | Met: custody closes on the receipt, no settlement runs, the returned event opens a HIGH case (worker); asserted that no earning is posted by the return. |
+
+**P64-01 — the destination.** 0106 adds `destination_note` to the return task. The partner's active record carries `return_destination` (reference, note, `is_store`) while `RETURN_AUTHORIZED` or `RETURNING`, and the store's own point (`pickup_location`) when the return is to the store — the same card as the outbound leg, headed "Return to". A safe point named in words is shown as operations wrote it.
+
+**P64-02 — closed or refusing.** `RETURN_REFUSED` is a report kind on the partner's sheet. `direct(RETURN_TO_VENDOR)` with a destination while the return is authorised or under way redirects it: the task's destination and note change, a `RETURN_AUTHORIZED` event is appended at the current state, and the partner's record shows the new point and no longer the store. The operations queue asks for the alternate safe point in words when directing a return.
+
+**P64-03 — the receipt.** `completeReturn` requires `received_by` (2–120 characters) and the count handed back (0–100), takes a condition note, and records them with the proof and `returned_at` on the task (0106; a completed return must carry them). Custody's closing event carries the count actually returned, and a shortfall against what was carried is said in the history as `RETURN_SHORT_OF_PACKAGES`. The partner's app closes the return on the receipt form, not a button.
+
+**Mutation results.** Five probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| No destination on the return leg (old) | *The returning partner was not told where to go* |
+| A redirect while returning is a no-op (old) | *A closed store did not redirect the return to a named safe point* |
+| The receipt recorded is not the partner's | *The return did not record its receipt ({"received_by":"SYNTH nobody","returned_package_count":99, …})* — redone after a first form failed at bind time |
+| A short return is not said | *A return short of its two packages was not said so* |
+| Nobody has to receive it | *A return completed with nobody recorded as receiving it* |
+
+**Forward findings.** (9.10 / DLP-49) What a partner is owed for a failed delivery and its return trip is unpriced; the case carries it. (8.x) A returned order's stock is not released to the shelf by the return; the case's operator does that. (11.3) The vendor's console does not yet show the return's receipt. (carried) `ZONE` scopes by name; branch protection off; Android arrivals are claims and its shell holds nothing offline.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 107 migration files (0000–0106), full ladder; `assignment_custody` 65 assertions (60 before). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 587 pass / 0 fail (585 before: the receipt route and the return leg's source checks); `pnpm test:integration` exit 0 on a rebuilt test stack; all five probes on a rebuilt database.
+
+**Step 9.9: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

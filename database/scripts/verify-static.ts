@@ -178,6 +178,7 @@ assert(
       '0103_customer_arrival',
       '0104_held_proof_completion',
       '0105_exception_direction',
+      '0106_return_receipt',
     ]),
   'Unexpected reviewed migrations',
 );

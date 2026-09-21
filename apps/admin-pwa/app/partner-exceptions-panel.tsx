@@ -65,6 +65,7 @@ const KIND_COPY: Readonly<Record<string, string>> = {
   VEHICLE_FAILURE: 'Vehicle failure',
   PROHIBITED_GOODS: 'Possible prohibited goods',
   PROOF_SYNC_FAILED: 'Held delivery proof refused on replay',
+  RETURN_REFUSED: 'Store closed or refused the return',
 };
 
 function shortReference(value: string): string {
@@ -79,6 +80,9 @@ export function PartnerExceptionsPanel() {
   // direction the platform carries out.
   const [instruction, setInstruction] = useState<Record<string, string>>({});
   const [compensation, setCompensation] = useState<Record<string, string>>({});
+  // An alternate safe point for a return, in words (9.9): the store closed
+  // or refused; where the goods go instead.
+  const [safePoint, setSafePoint] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -114,6 +118,7 @@ export function PartnerExceptionsPanel() {
     setError(null);
     const words = (instruction[entry.partner_exception_event_id] ?? '').trim();
     const rupees = Number(compensation[entry.partner_exception_event_id] ?? '0');
+    const point = (safePoint[entry.partner_exception_event_id] ?? '').trim();
     try {
       // A return, a reassignment or a cancellation is applied to the attempt
       // before the instruction is written (9.8): the partner never reads a
@@ -128,6 +133,12 @@ export function PartnerExceptionsPanel() {
           ...(words ? { instruction: words } : {}),
           ...(resolution === 'REASSIGN' && Number.isFinite(rupees) && rupees > 0
             ? { compensation_minor: Math.round(rupees * 100) }
+            : {}),
+          ...(resolution === 'RETURN_TO_VENDOR' && point
+            ? {
+                destination_note: point,
+                destination_reference: `SYNTH-RETURN-ALT-${Date.now().toString(36).toUpperCase()}`,
+              }
             : {}),
         }),
       });
@@ -228,6 +239,21 @@ export function PartnerExceptionsPanel() {
                     }
                     value={instruction[entry.partner_exception_event_id] ?? ''}
                   />
+                  {(choice[entry.partner_exception_event_id] ?? 'SUPPORT') ===
+                  'RETURN_TO_VENDOR' ? (
+                    <Field
+                      hint="Leave empty to return to the store. Otherwise name the safe point in words the partner can find."
+                      label="Alternate safe point"
+                      maxLength={240}
+                      onChange={(event) =>
+                        setSafePoint((current) => ({
+                          ...current,
+                          [entry.partner_exception_event_id]: event.target.value,
+                        }))
+                      }
+                      value={safePoint[entry.partner_exception_event_id] ?? ''}
+                    />
+                  ) : null}
                   {(choice[entry.partner_exception_event_id] ?? 'SUPPORT') === 'REASSIGN' ? (
                     <Field
                       hint="For the partner this is taken from, in rupees."

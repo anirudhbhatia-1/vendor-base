@@ -538,3 +538,27 @@ test('the instruction that stands is operations’ latest word per kind (9.8)', 
     },
   ]);
 });
+
+test('the return leg names its destination and closes on a receipt, not a button (9.9)', () => {
+  const source = panel('partner-workspace.tsx');
+  assert.ok(
+    source.includes('(returning && assignment.return_destination?.is_store === true)'),
+    'the store is the destination again on a return to it',
+  );
+  assert.ok(
+    source.includes('assignment.return_destination.note ??') &&
+      source.includes('Named by operations.'),
+    'an alternate safe point is shown in operations’ words',
+  );
+  assert.ok(
+    source.includes('received_by: receivedBy.trim()') &&
+      source.includes('label="Who received it"') &&
+      source.includes('package_count: Math.max(0, Math.round(Number(returnedCount) || 0))'),
+    'the receipt is what completes the return',
+  );
+  const fieldOps = panel('field-ops-panel.tsx');
+  assert.ok(
+    fieldOps.includes("['RETURN_REFUSED', 'The store is closed or will not take it back']"),
+    'a closed or refusing store is a report of its own',
+  );
+});

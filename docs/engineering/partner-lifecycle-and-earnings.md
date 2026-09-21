@@ -213,6 +213,21 @@ without touching that aggregate:
   Until run 63 an operator's "return it to the store" was a word on the exception that moved
   nothing, the partner never saw it (the card vanished once the report was no longer open), and
   no evidence or instruction text existed anywhere.
+- **A return goes somewhere named, and closes on a receipt (9.9, audit run 64).** An authorised
+  return carries its destination as a reference and, for a safe point other than the store, in
+  words (`destination_note`, 0106); the partner's record carries `return_destination` while
+  returning, with the store's own point (`pickup_location`) when the destination is the store.
+  Custody stays `IN_CUSTODY` throughout. A store that is closed or refuses the goods is a
+  `RETURN_REFUSED` report; operations answer it with `direct(RETURN_TO_VENDOR)` naming another
+  safe point, which redirects a return already under way (a `RETURN_AUTHORIZED` event at the same
+  state). `completeReturn` records the receipt — `received_by` (required), the count handed back,
+  a condition note, the proof, `returned_at` — and closes custody on the count actually returned;
+  a shortfall against what was carried is said in the history (`RETURN_SHORT_OF_PACKAGES`), not
+  refused at the counter. Custody closes there and money does not move: the `vendor_order.returned`
+  event opens a HIGH support case for operations to divide the money (what the partner is owed for
+  a return trip is unpriced, DLP-49/9.10). Until run 64 the destination was an unreadable
+  reference, completion recorded an invented proof reference and nothing else, and a closed store
+  had no path.
 - **Support and the emergency control travel with the job (9.4).** The field-ops panel with its
   reports and the always-visible Emergency control sit on the active job; an open safety report
   holds the job's next step.

@@ -690,6 +690,8 @@ export type DeliveryAssignment = {
     claimed_at: string;
     reason: 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
   } | null;
+  /** Where a return goes (9.9): the store by default, or a safe point named in words. */
+  return_destination?: { reference: string; note: string | null; is_store: boolean } | null;
   /** How the arrival at the customer's door was trusted (9.6), once recorded. */
   customer_arrival_kind?: 'TRUSTED_LOCATION' | 'UNVERIFIED' | 'CUSTOMER_CONFIRMED' | null;
   customer_arrived_at?: string | null;
