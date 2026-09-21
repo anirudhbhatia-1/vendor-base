@@ -1403,4 +1403,6 @@ Step 8.7 is **VERIFIED_LOCAL** as of run 55 (21 September 2026), and with it Pha
 
 Phase 8 exit gate: one-store prepaid pickup completes exactly once end to end (the collection walk); vendor timeout, decline, substitution approve/reject/timeout, variable weight, cancellation, OTP failure/replay, support and refund input paths pass (runs 41–55).
 
-Continue the step audit from 9.1 while keeping the Phase 2 gates (branch protection) visible.
+Step 9.1 is **VERIFIED_LOCAL** as of run 56 (21 September 2026). The application collected and reviewed its seven references and its approval granted the role and eligibility; but no document could expire and nothing was ever reverified — the partner's profile carried sentences for "a document has expired" that no code emitted — going online failed as a bare "not eligible", and a trust restriction restricted nothing. Now: 0099 puts expiries on the identity, vehicle and insurance documents and adds renewals; the worker's sweep restricts a partner whose document lapses and dispatch reads the lapse directly; a renewal is reviewed by an admin and lifts the restriction only when nothing else has lapsed; `onlineEligibility` names every blocker and going online refuses with `PARTNER_NOT_ELIGIBLE`; restrictions apply by scope (GLOBAL, VENDOR_LOCATION, ZONE by service-zone name); a delivery in custody is never touched. DLP-04's claim corrected. Eight mutation probes, all caught.
+
+Continue the step audit from 9.2 while keeping the Phase 2 gates (branch protection) visible.

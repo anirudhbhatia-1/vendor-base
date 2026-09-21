@@ -5,6 +5,8 @@ import { AUTHORIZATION_REQUIREMENT, type AuthorizationRequirement } from './auth
 import {
   AdminPartnerApplicationController,
   AdminPartnerDisputeController,
+  AdminPartnerDocumentController,
+  PartnerStandingController,
   PartnerApplicationController,
   PartnerEarningsController,
   PartnerFieldOpsController,
@@ -82,6 +84,24 @@ test('scopes every admin partner application route to admin.partner_application.
     // evidence; without one it can never match, and the queue answered 404.
     assert.deepEqual(adminAppAuth(method)?.admin_scope, { kind: 'GLOBAL' }, `${method} scope`);
   }
+});
+
+test('document renewal review is an admin partner-application review, and the partner reads standing', () => {
+  // The renewal queue and decision (9.1) sit beside the application review:
+  // the same reviewers, the same global scope.
+  for (const method of ['queue', 'review'] as const) {
+    const rule = Reflect.getMetadata(
+      AUTHORIZATION_REQUIREMENT,
+      AdminPartnerDocumentController.prototype[method],
+    ) as AuthorizationRequirement | undefined;
+    assert.equal(rule?.capability, 'admin.partner_application.review', method);
+    assert.deepEqual(rule?.admin_scope, { kind: 'GLOBAL' }, `${method} scope`);
+  }
+  const standing = (method: keyof PartnerStandingController) =>
+    Reflect.getMetadata(AUTHORIZATION_REQUIREMENT, PartnerStandingController.prototype[method]) as
+      AuthorizationRequirement | undefined;
+  assert.equal(standing('eligibility')?.capability, 'partner.standing.read');
+  assert.equal(standing('renewDocument')?.capability, 'partner.application.manage');
 });
 
 test('separates earnings read from dispute open and withdrawal', () => {

@@ -373,6 +373,14 @@ a {
 /* ── Profile and standing ──────────────────────────────────────────────────── */
 
 .standing-card,
+.blocker-list,
+.document-list {
+  margin: var(--space-3xs) 0;
+  padding-left: var(--space-md);
+}
+.document-list li {
+  margin: var(--space-3xs) 0;
+}
 .restriction-card {
   display: flex;
   flex-direction: column;

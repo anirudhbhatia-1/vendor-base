@@ -171,6 +171,7 @@ assert(
       '0096_decision_details',
       '0097_ready_packaging',
       '0098_receipt_and_support_line',
+      '0099_partner_documents',
     ]),
   'Unexpected reviewed migrations',
 );

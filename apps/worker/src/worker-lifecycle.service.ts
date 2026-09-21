@@ -23,13 +23,20 @@ export class WorkerLifecycleService implements OnApplicationShutdown {
    * swallowed: losing the liveness record must not take down a worker that is
    * otherwise processing jobs correctly.
    */
-  async #recordHeartbeat(pool: Pool, startedAt: Date, stopped: boolean): Promise<void> {
+  async #recordHeartbeat(pool: Pool, stopped: boolean): Promise<void> {
     const config = loadRuntimeConfig();
     try {
+      // Every instant on the row is the database's own clock. The start used to
+      // be this process's clock and the heartbeat the database's, and the row's
+      // check (`last_seen_at >= started_at`) refused the very first heartbeat
+      // whenever the database ran a few seconds behind the worker -- readiness
+      // then saw no consumer for a worker that was running (audit run 56, on a
+      // container clock that had drifted during host sleep). The first insert
+      // stamps the start; a repeat keeps it.
       await pool.query(
         `INSERT INTO marketplace.worker_heartbeats
            (worker_id, component, queues, environment, version, started_at, last_seen_at, stopped_at)
-         VALUES ($1,$2,$3,$4,$5,$6,now(),$7)
+         VALUES ($1,$2,$3,$4,$5,now(),now(),CASE WHEN $6 THEN now() END)
          ON CONFLICT (worker_id) DO UPDATE
             SET last_seen_at = now(), stopped_at = EXCLUDED.stopped_at`,
         [
@@ -38,8 +45,7 @@ export class WorkerLifecycleService implements OnApplicationShutdown {
           [...QUEUES],
           config.environment,
           config.version,
-          startedAt,
-          stopped ? new Date() : null,
+          stopped,
         ],
       );
     } catch (error: unknown) {
@@ -72,16 +78,15 @@ export class WorkerLifecycleService implements OnApplicationShutdown {
       queues: ['finance.payout', 'marketplace.operations', 'marketplace.outbox'],
       production_ready: false,
     });
-    const startedAt = new Date();
     this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-worker-liveness',
       connectionString: config.databaseUrl,
       max: 1,
     });
-    void this.#recordHeartbeat(this.#pool, startedAt, false);
+    void this.#recordHeartbeat(this.#pool, false);
     this.heartbeat = setInterval(() => {
       workerLogger.event('worker.heartbeat', { queues: [...QUEUES] });
-      if (this.#pool) void this.#recordHeartbeat(this.#pool, startedAt, false);
+      if (this.#pool) void this.#recordHeartbeat(this.#pool, false);
     }, HEARTBEAT_INTERVAL_MS);
     this.heartbeat.unref?.();
   }

@@ -11,6 +11,7 @@ import {
   InventoryReservationService,
   LocalProtectedObjectStorage,
   PartnerAvailabilityService,
+  PartnerLifecycleService,
   PartnerFieldOpsService,
   PartnerWaitPolicyService,
   LocalNotificationService,
@@ -76,6 +77,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #notifications: LocalNotificationService;
   readonly #configuration: ConfigurationAdminService;
   readonly #availability: PartnerAvailabilityService;
+  readonly #partnerLifecycle: PartnerLifecycleService;
   readonly #fulfilment: VendorFulfilmentService;
   readonly #onboarding: VendorOnboardingService;
   readonly #dispatch: DeliveryDispatchOrchestrator;
@@ -121,6 +123,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#notifications = new LocalNotificationService({ connection_string: databaseUrl });
     this.#configuration = new ConfigurationAdminService({ connection_string: databaseUrl });
     this.#availability = new PartnerAvailabilityService({ connection_string: databaseUrl });
+    this.#partnerLifecycle = new PartnerLifecycleService({ connection_string: databaseUrl });
     this.#money = new MoneyLifecycleService({ connection_string: databaseUrl, provider });
     this.#completeMoney = new CompleteMoneyLifecycleService({
       connection_string: databaseUrl,
@@ -215,6 +218,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     await Promise.all([
       this.#pool.end(),
       this.#assignments.close(),
+      this.#partnerLifecycle.close(),
       this.#adminControl.close(),
       this.#checkout.close(),
       this.#inventory.close(),
@@ -354,6 +358,11 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#fulfilment.timeoutOverdueDecisions({ context, now }),
         [],
       );
+      const lapsedDocuments = await pass(
+        'partners.sweepExpiredDocuments',
+        () => this.#partnerLifecycle.sweepExpiredDocuments({ context, now }),
+        [],
+      );
       const offers = await pass(
         'assignments.expireOffers',
         () =>
@@ -464,6 +473,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         abandoned +
         accepts.length +
         decisions.length +
+        lapsedDocuments.length +
         offers +
         documents +
         offlineProofs.length +
@@ -481,6 +491,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         workerLogger.event('operations.deadlines.processed', {
           accepts: accepts.length,
           decisions: decisions.length,
+          lapsed_documents: lapsedDocuments.length,
           documents,
           offline_proofs: offlineProofs.length,
           trust_controls: controls.trust,

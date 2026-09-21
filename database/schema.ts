@@ -1666,3 +1666,33 @@ export const routeCache = marketplaceSchema.table(
     index('route_cache_expiry').on(table.expiresAt),
   ],
 );
+
+/** A partner's renewed document, awaiting or past review (9.1, 0099). */
+export const partnerDocumentRenewals = marketplaceSchema.table(
+  'partner_document_renewals',
+  {
+    partnerDocumentRenewalId: uuid('partner_document_renewal_id').primaryKey(),
+    partnerUserId: uuid('partner_user_id').notNull(),
+    documentKind: text('document_kind').notNull(),
+    documentReference: text('document_reference').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    lifecycleState: text('lifecycle_state').notNull().default('SUBMITTED'),
+    reviewerUserId: uuid('reviewer_user_id'),
+    reasonCode: text('reason_code'),
+    note: text('note'),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+  },
+  (table) => [
+    check(
+      'partner_document_renewal_decision_shape',
+      sql`(${table.lifecycleState} = 'SUBMITTED') = (${table.decidedAt} IS NULL AND ${table.reviewerUserId} IS NULL)`,
+    ),
+    uniqueIndex('partner_document_renewal_open')
+      .on(table.partnerUserId, table.documentKind)
+      .where(sql`${table.lifecycleState} = 'SUBMITTED'`),
+    index('partner_document_renewals_queue').on(table.lifecycleState, table.createdAt),
+  ],
+);

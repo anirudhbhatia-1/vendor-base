@@ -1878,6 +1878,43 @@ Five requirements. Two held (the grouped history with the derived summary since 
 
 **Step 8.7: VERIFIED_LOCAL. Phase 8 exit gate: met.**
 
+## Run 56 (21 September 2026) — step 9.1, partner onboarding and eligibility
+
+Five requirements. One held (the seven references are collected and reviewed through a versioned, append-only application lifecycle whose approval grants the role and eligibility — runs 4–5's work), one held in part (an appeal is offered on every restriction in force; custody is never touched, which was true by omission), and three did not: no document could expire and nothing was ever reverified, going online failed with a bare "not eligible", and a trust restriction restricted nothing. Migration 0099; twenty-three connected assertions, one API unit test; eight mutation probes, all caught. DLP-04's matrix claim ("document and insurance warnings are shown … with what it stops") was copy nothing emitted, and is corrected.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Collect identity, vehicle, bank, insurance, zone, emergency contact, training | Met (references, synthetic); the three that expire now carry their dates — P56-01. Training is one reference (DLP-05 stays partial). |
+| 2 | Review documents with expiry and reverification lifecycle | **Absent.** No expiry on any document, no renewal, no sweep; the partner's profile had sentences for "a document has expired" that no code emitted — P56-01. |
+| 3 | Show exact online eligibility blockers | **Absent.** `set(ONLINE)` failed with "Partner is not eligible" as a bare state conflict; nothing listed why — P56-02. |
+| 4 | Apply capability-specific restrictions | **Absent.** A trust restriction case on a partner was listed on their profile and consulted nowhere: going online and dispatch both ignored it — P56-03. |
+| 5 | Preserve appeal and active-custody obligations | Met: `appealable` on every case in force; custody actions check the assignment, never eligibility. Now walked: a lapse and a restriction leave a delivery in custody untouched. |
+
+**P56-01 — documents that expire.** 0099 adds `identity_expires_at`, `vehicle_expires_at` and `insurance_expires_at` to the application (required and future-dated at creation) and `partner_document_renewals` (one in review per document; a new reference and expiry; reviewed with a reason). `documentStanding` reads each document as VALID, EXPIRING (30 days), EXPIRED or UNDATED. The worker's `sweepExpiredDocuments` restricts a partner whose document has lapsed — eligibility `RESTRICTED`, reason `DOCUMENT_EXPIRED`, a `DOCUMENT_EXPIRED` event naming the documents — and dispatch reads the lapse directly, so a partner still ONLINE from before is not offered work even before the sweep. A renewal rejected leaves the restriction; approved, it writes the document onto the application and lifts the restriction only when nothing else has lapsed (two lapsed, one renewed: still restricted). The partner's profile lists the documents and takes a renewal; the admin console has the review queue.
+
+**P56-02 — the exact blockers.** `onlineEligibility` returns `can_go_online`, the blockers by code and detail — `NO_APPLICATION`, `APPLICATION_NOT_APPROVED` (state), `DOCUMENT_EXPIRED` (document), `ELIGIBILITY_RESTRICTED` / `SUSPENDED` / `PENDING` (reason), `RESTRICTION_ACTIVE` (scope and reason), `OFFLINE_PROOF_PENDING` — and the warnings (`DOCUMENT_EXPIRING`). `PartnerAvailabilityService.set(ONLINE)` refuses for the same reasons with the new code `PARTNER_NOT_ELIGIBLE`, whose sentence sends the partner to the profile that names them.
+
+**P56-03 — restrictions that restrict.** `eligible()` excludes a partner under an ACTIVE restriction that is `GLOBAL`, `VENDOR_LOCATION` for that store, or `ZONE` for a store whose active service zone carries that name; `set(ONLINE)` refuses under `GLOBAL`. A store-scoped restriction leaves the partner online and offered elsewhere.
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Insurance dropped from the sweep | *The sweep did not restrict the partner once, for the lapsed insurance (0/0)* |
+| Eligibility restored while another document is lapsed | *Renewing one of two lapsed documents lifted the restriction* — after the two-document walk was written; the first form let this through |
+| A rejection writes the document too | *A rejected renewal lifted the restriction* |
+| GLOBAL restriction not checked at going online | *A GLOBAL restriction did not keep the partner off the road and off offers* |
+| VENDOR_LOCATION scope ignores the store | *A store-scoped restriction did not apply to that store alone* |
+| Dispatch ignores a lapse before the sweep | *A partner with a lapsed document was still offered work* — after the walk kept the partner present; the first form let this through |
+| Past expiries accepted at application | *An application was accepted with a document that had already expired* |
+| A decided renewal decided again | *A decided renewal was decided again* |
+
+**Forward findings.** (11.4) A `ZONE` restriction matches a store's service zone by name; the platform has no zone identity of its own for partners (`home_zone_name` is free text). (9.1, carried) Training is one reference, not a per-module checklist (DLP-05). (9.2) An application made before 0099 has undated documents (`UNDATED`); nothing yet asks such a partner for the dates.
+
+**Verification.** `pnpm db:verify` exit 0 — 100 migration files (0000–0099), full ladder; `partner_lifecycle` 73 assertions (47 after run 25). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 567 pass / 0 fail. `pnpm test:integration` exit 0 — after a finding of its own: the worker's liveness row stamped `started_at` from the process clock and `last_seen_at` from the database's, and its check (`last_seen_at >= started_at`) refused the first heartbeat whenever the database ran behind the worker; on a container clock that had drifted during host sleep, readiness saw no consumer for a worker that was running. Both instants are the database's now (`worker-lifecycle.service.ts`).
+
+**Step 9.1: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

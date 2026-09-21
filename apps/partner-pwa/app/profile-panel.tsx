@@ -73,6 +73,54 @@ const WARNINGS: Readonly<Record<string, string>> = {
   STALE_LOCATION: 'We have not had a location update from you recently.',
 };
 
+/** A blocker's sentence: what stops going online, and what to do (9.1). */
+export function blockerSentence(blocker: {
+  readonly code: string;
+  readonly detail: string | null;
+  readonly until: string | null;
+}): string {
+  const document = (blocker.detail ?? 'document').toLowerCase().replaceAll('_', ' ');
+  switch (blocker.code) {
+    case 'NO_APPLICATION':
+      return 'You have not applied yet. Complete your application to be offered work.';
+    case 'APPLICATION_NOT_APPROVED':
+      return `Your application is ${document}. You can be offered work once it is approved.`;
+    case 'DOCUMENT_EXPIRED':
+      return `Your ${document} document has expired${
+        blocker.until ? ` (on ${new Date(blocker.until).toLocaleDateString()})` : ''
+      }. Submit the renewed document below to keep working.`;
+    case 'ELIGIBILITY_RESTRICTED':
+      return `You are restricted from new work${blocker.detail ? ` (${document})` : ''}${
+        blocker.until ? ` until ${new Date(blocker.until).toLocaleDateString()}` : ''
+      }.`;
+    case 'ELIGIBILITY_SUSPENDED':
+      return `Your account is suspended${blocker.detail ? ` (${document})` : ''}. Contact support.`;
+    case 'ELIGIBILITY_PENDING':
+      return 'Your eligibility is still being set up. Check back shortly.';
+    case 'RESTRICTION_ACTIVE':
+      return `A restriction is in force (${document})${
+        blocker.until ? ` until ${new Date(blocker.until).toLocaleDateString()}` : ''
+      }. See it below to appeal.`;
+    case 'OFFLINE_PROOF_PENDING':
+      return 'A delivery proof saved offline has not synced yet. Sync it before going online.';
+    default:
+      return blocker.code.replaceAll('_', ' ').toLowerCase();
+  }
+}
+
+type Eligibility = {
+  readonly can_go_online: boolean;
+  readonly blockers: readonly { code: string; detail: string | null; until: string | null }[];
+  readonly warnings: readonly { code: string; detail: string; until: string }[];
+  readonly documents: readonly {
+    document_kind: string;
+    document_reference: string;
+    expires_at: string | null;
+    state: string;
+    renewal_pending: boolean;
+  }[];
+};
+
 const TERMINAL_ASSIGNMENTS = new Set([
   'DELIVERED',
   'RETURNED',
@@ -90,6 +138,11 @@ export function PartnerProfilePanel() {
   } | null>(null);
   const [application, setApplication] = useState<Application | null>(null);
   const [restrictions, setRestrictions] = useState<readonly Restriction[]>([]);
+  const [eligibility, setEligibility] = useState<Eligibility | null>(null);
+  const [renewKind, setRenewKind] = useState('IDENTITY');
+  const [renewReference, setRenewReference] = useState('');
+  const [renewExpires, setRenewExpires] = useState('');
+  const [renewMessage, setRenewMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,6 +168,11 @@ export function PartnerProfilePanel() {
       setApplication(own.application);
       setRestrictions(standing.restrictions);
       setRatings(delivery);
+      // The exact blockers (9.1): why going online is refused, and what is
+      // about to lapse.
+      setEligibility(
+        await partnerRequest<Eligibility>('partner/standing/eligibility').catch(() => null),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Your record could not be loaded.');
     } finally {
@@ -216,7 +274,108 @@ export function PartnerProfilePanel() {
               .join(' ')}
           </Notice>
         ) : null}
+
+        {/* Exactly what stops going online (9.1), one line each, and what is
+            about to. Until audit run 56 going online failed with "not
+            eligible" and nothing said why. */}
+        {eligibility && eligibility.blockers.length > 0 ? (
+          <Notice tone="danger">
+            <span className="sr-only">You cannot go online. </span>
+            <ul className="blocker-list">
+              {eligibility.blockers.map((blocker) => (
+                <li key={`${blocker.code}:${blocker.detail ?? ''}`}>{blockerSentence(blocker)}</li>
+              ))}
+            </ul>
+          </Notice>
+        ) : null}
+        {eligibility && eligibility.warnings.length > 0 ? (
+          <Notice tone="warning">
+            {eligibility.warnings
+              .map(
+                (warning) =>
+                  `Your ${warning.detail.toLowerCase()} document expires on ${new Date(warning.until).toLocaleDateString()} — renew it below to keep working.`,
+              )
+              .join(' ')}
+          </Notice>
+        ) : null}
       </Panel>
+
+      {eligibility && eligibility.documents.length > 0 ? (
+        <Panel
+          description="The documents on your record, when they lapse, and how to renew one."
+          eyebrow="Documents"
+          id="documents"
+          level={2}
+          title="Identity, vehicle and insurance"
+        >
+          <ul className="document-list">
+            {eligibility.documents.map((document) => (
+              <li key={document.document_kind}>
+                <strong>{document.document_kind.toLowerCase()}</strong> ·{' '}
+                {shortReference(document.document_reference)} ·{' '}
+                {document.expires_at
+                  ? `${document.state.toLowerCase()}, ${document.state === 'EXPIRED' ? 'expired' : 'expires'} ${new Date(document.expires_at).toLocaleDateString()}`
+                  : 'no expiry on record'}
+                {document.renewal_pending ? ' · renewal in review' : ''}
+              </li>
+            ))}
+          </ul>
+          <form
+            className="ns-stack"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setRenewMessage(null);
+              void partnerRequest('partner/standing/documents/renewals', {
+                method: 'POST',
+                body: JSON.stringify({
+                  document_kind: renewKind,
+                  document_reference: renewReference.trim(),
+                  expires_at: new Date(renewExpires).toISOString(),
+                }),
+              })
+                .then(() => {
+                  setRenewMessage('Sent for review. You will see the result here.');
+                  setRenewReference('');
+                  setRenewExpires('');
+                  void load();
+                })
+                .catch((cause: unknown) =>
+                  setRenewMessage(cause instanceof Error ? cause.message : 'Could not send it.'),
+                );
+            }}
+          >
+            <label>
+              Which document
+              <select onChange={(event) => setRenewKind(event.target.value)} value={renewKind}>
+                <option value="IDENTITY">Identity document</option>
+                <option value="VEHICLE">Vehicle registration</option>
+                <option value="INSURANCE">Insurance</option>
+              </select>
+            </label>
+            <label>
+              New reference
+              <input
+                onChange={(event) => setRenewReference(event.target.value)}
+                required
+                value={renewReference}
+              />
+            </label>
+            <label>
+              Expires on
+              <input
+                onChange={(event) => setRenewExpires(event.target.value)}
+                required
+                type="date"
+                value={renewExpires}
+              />
+            </label>
+            <Button type="submit" variant="secondary">
+              Send the renewed document for review
+            </Button>
+            {renewMessage ? <Notice tone="information">{renewMessage}</Notice> : null}
+          </form>
+        </Panel>
+      ) : null}
 
       {/* DLP-44, DLP-45: what is collected, when it stops, and a control that
           actually stops it. The disclosure describes what the app really does

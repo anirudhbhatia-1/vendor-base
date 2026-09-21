@@ -9,7 +9,17 @@ import {
 import { Pool } from 'pg';
 export class PartnerAvailabilityInputError extends Error {}
 export class PartnerAvailabilityAuthorizationError extends Error {}
-export class PartnerAvailabilityConflictError extends Error {}
+export class PartnerAvailabilityConflictError extends Error {
+  readonly code: 'ORDER_STATE_CONFLICT' | 'PARTNER_NOT_ELIGIBLE';
+
+  constructor(
+    message?: string,
+    code: 'ORDER_STATE_CONFLICT' | 'PARTNER_NOT_ELIGIBLE' = 'ORDER_STATE_CONFLICT',
+  ) {
+    super(message);
+    this.code = code;
+  }
+}
 function partner(c: RequestContext) {
   if (c.actor?.actor_kind !== 'delivery_partner') throw new PartnerAvailabilityAuthorizationError();
   return c.actor.actor_id;
@@ -62,18 +72,52 @@ export class PartnerAvailabilityService {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
+      // Going online is refused for the same reasons the profile lists (9.1,
+      // `PartnerLifecycleService.eligibilityOf`): eligibility, an expired
+      // document, a platform-wide restriction, an unsynced proof. The code
+      // sends the partner to the profile for the exact blockers.
       const eligible = await client.query(
         `SELECT 1 FROM marketplace.partner_eligibilities WHERE user_id=$1 AND state='ELIGIBLE' AND (eligible_until IS NULL OR eligible_until>$2)`,
         [id, now],
       );
       if (input.state === 'ONLINE' && !eligible.rows[0])
-        throw new PartnerAvailabilityConflictError('Partner is not eligible');
+        throw new PartnerAvailabilityConflictError(
+          'Partner is not eligible',
+          'PARTNER_NOT_ELIGIBLE',
+        );
+      if (input.state === 'ONLINE') {
+        const lapsed = await client.query(
+          `SELECT 1 FROM marketplace.partner_applications
+            WHERE applicant_user_id=$1 AND lifecycle_state='APPROVED'
+              AND (identity_expires_at <= $2 OR vehicle_expires_at <= $2 OR insurance_expires_at <= $2)`,
+          [id, now],
+        );
+        if (lapsed.rows[0])
+          throw new PartnerAvailabilityConflictError(
+            'A document has expired',
+            'PARTNER_NOT_ELIGIBLE',
+          );
+        const restricted = await client.query(
+          `SELECT 1 FROM marketplace.trust_restriction_cases
+            WHERE subject_kind='PARTNER' AND subject_reference=$1 AND lifecycle_state='ACTIVE'
+              AND scope_kind='GLOBAL' AND effective_until > $2`,
+          [String(id), now],
+        );
+        if (restricted.rows[0])
+          throw new PartnerAvailabilityConflictError(
+            'Partner is restricted',
+            'PARTNER_NOT_ELIGIBLE',
+          );
+      }
       const pending = await client.query(
         `SELECT 1 FROM marketplace.partner_offline_proofs WHERE partner_user_id=$1 AND sync_state='PENDING'`,
         [id],
       );
       if (input.state === 'ONLINE' && pending.rows[0])
-        throw new PartnerAvailabilityConflictError('Sync offline proof before going online');
+        throw new PartnerAvailabilityConflictError(
+          'Sync offline proof before going online',
+          'PARTNER_NOT_ELIGIBLE',
+        );
       const prior = await client.query<{
         availability_state: string;
         online_since: Date | null;
@@ -270,7 +314,12 @@ export class PartnerAvailabilityService {
     // device has confirmed itself inside the window is offered work.
     const seenSince = new Date(now.getTime() - PRESENCE_WINDOW_SECONDS * 1000);
     const r = await this.#pool.query(
-      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 WHERE a.availability_state='ONLINE' AND a.last_seen_at>$4::timestamptz AND EXISTS(SELECT 1 FROM marketplace.partner_eligibilities e WHERE e.user_id=a.partner_user_id AND e.state='ELIGIBLE' AND (e.eligible_until IS NULL OR e.eligible_until>$5::timestamptz)) AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') AND NOT (a.partner_user_id = ANY($3::uuid[])) ORDER BY distance_meters LIMIT 50`,
+      // A restriction is capability-specific (9.1): GLOBAL keeps the partner
+      // off every offer, VENDOR_LOCATION off this store's, ZONE off the stores
+      // serving that zone by name. An expired document keeps them off until
+      // the sweep or a renewal has spoken. Until audit run 56 none of these
+      // touched who was offered work.
+      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 WHERE a.availability_state='ONLINE' AND a.last_seen_at>$4::timestamptz AND EXISTS(SELECT 1 FROM marketplace.partner_eligibilities e WHERE e.user_id=a.partner_user_id AND e.state='ELIGIBLE' AND (e.eligible_until IS NULL OR e.eligible_until>$5::timestamptz)) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_applications app WHERE app.applicant_user_id=a.partner_user_id AND app.lifecycle_state='APPROVED' AND (app.identity_expires_at<=$5::timestamptz OR app.vehicle_expires_at<=$5::timestamptz OR app.insurance_expires_at<=$5::timestamptz)) AND NOT EXISTS(SELECT 1 FROM marketplace.trust_restriction_cases r WHERE r.subject_kind='PARTNER' AND r.subject_reference=a.partner_user_id::text AND r.lifecycle_state='ACTIVE' AND r.effective_until>$5::timestamptz AND (r.scope_kind='GLOBAL' OR (r.scope_kind='VENDOR_LOCATION' AND r.scope_reference=l.vendor_location_id::text) OR (r.scope_kind='ZONE' AND EXISTS(SELECT 1 FROM marketplace.vendor_service_zones z WHERE z.vendor_location_id=l.vendor_location_id AND z.lifecycle_state='ACTIVE' AND z.zone_name=r.scope_reference)))) AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') AND NOT (a.partner_user_id = ANY($3::uuid[])) ORDER BY distance_meters LIMIT 50`,
       [input.vendor_location_id, radius, excluded, seenSince, now],
     );
     return r.rows.map((x) => ({ ...x, partner_user_id: parseUuidV7(x.partner_user_id) }));

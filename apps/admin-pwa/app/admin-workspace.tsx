@@ -13,6 +13,7 @@ import { IncidentsPanel } from './incidents-panel';
 import { OperationsHealthPanel } from './operations-health-panel';
 import { OrderInterventionPanel } from './order-intervention-panel';
 import { PartnerExceptionsPanel } from './partner-exceptions-panel';
+import { PartnerDocumentsPanel } from './partner-documents-panel';
 import { PolicyPanel } from './policy-panel';
 import { ZoneControlsPanel } from './zone-controls-panel';
 import { VerificationPanel } from './verification-panel';
@@ -668,6 +669,7 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
               </div>
             </div>
           </article>
+          <PartnerDocumentsPanel />
           <LifecyclePanel kind="partners" />
         </section>
       )}

@@ -922,6 +922,9 @@ export function createApiClient(options: ApiClientOptions) {
           emergency_contact_reference: string;
           training_reference: string;
           home_zone_name: string;
+          identity_expires_at: string;
+          vehicle_expires_at: string;
+          insurance_expires_at: string;
         }) =>
           r<{ partner_application_id: string }>('/partner/applications', {
             method: 'POST',

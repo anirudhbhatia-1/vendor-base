@@ -16,12 +16,20 @@ import {
   type ExceptionKind,
   type ExceptionResolution,
   type OfflineProofKind,
+  type DocumentKind,
   type VehicleKind,
 } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { PARTNER_FIELD_OPS, PARTNER_LIFECYCLE } from './tokens.js';
-import { integerField, object, stringField, uuid } from './request-fields.js';
+import {
+  dateField,
+  integerField,
+  object,
+  optionalString,
+  stringField,
+  uuid,
+} from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const partnerApplicationManage = RequireAuthorization({
   capability: 'partner.application.manage',
@@ -100,6 +108,9 @@ export class PartnerApplicationController {
         emergency_contact_reference: stringField(body, 'emergency_contact_reference'),
         training_reference: stringField(body, 'training_reference'),
         home_zone_name: stringField(body, 'home_zone_name'),
+        identity_expires_at: dateField(body, 'identity_expires_at'),
+        vehicle_expires_at: dateField(body, 'vehicle_expires_at'),
+        insurance_expires_at: dateField(body, 'insurance_expires_at'),
       });
     } catch (error) {
       translateDomainError(error);
@@ -251,6 +262,78 @@ export class PartnerStandingController {
       return {
         restrictions: await this.lifecycle.listOwnRestrictions({
           context: currentRequestContext(),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  /** Exactly what stops this partner going online, and what is about to (9.1). */
+  @Get('eligibility')
+  @partnerStandingRead
+  async eligibility() {
+    try {
+      return await this.lifecycle.onlineEligibility({ context: currentRequestContext() });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  /** A renewed document, submitted for review (9.1). */
+  @Post('documents/renewals')
+  @partnerApplicationManage
+  async renewDocument(@Body() raw: unknown) {
+    const body = object(raw);
+    try {
+      return {
+        renewal: await this.lifecycle.submitDocumentRenewal({
+          context: currentRequestContext(),
+          document_kind: stringField(body, 'document_kind') as DocumentKind,
+          document_reference: stringField(body, 'document_reference'),
+          expires_at: dateField(body, 'expires_at'),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+}
+
+/** Renewed documents awaiting review, and the reviewer's decision (9.1). */
+@Controller('admin/partner-documents')
+export class AdminPartnerDocumentController {
+  constructor(@Inject(PARTNER_LIFECYCLE) private readonly lifecycle: PartnerLifecycleService) {}
+
+  @Get()
+  @adminReviewApplication
+  async queue(@Query('limit') limit?: string) {
+    try {
+      return {
+        renewals: await this.lifecycle.listDocumentRenewalsForAdmin({
+          context: currentRequestContext(),
+          ...(limit === undefined ? {} : { limit: Number(limit) }),
+        }),
+      };
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Post(':partner_document_renewal_id/review')
+  @adminReviewApplication
+  async review(@Param('partner_document_renewal_id') id: string, @Body() raw: unknown) {
+    const body = object(raw);
+    try {
+      return {
+        renewal: await this.lifecycle.reviewDocumentRenewal({
+          context: currentRequestContext(),
+          partner_document_renewal_id: uuid(id),
+          decision: stringField(body, 'decision') as 'APPROVED' | 'REJECTED',
+          reason_code: stringField(body, 'reason_code'),
+          ...(optionalString(body, 'note') !== undefined
+            ? { note: optionalString(body, 'note') as string }
+            : {}),
         }),
       };
     } catch (error) {

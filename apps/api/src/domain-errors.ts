@@ -262,7 +262,7 @@ export const DOMAIN_ERROR_TRANSLATIONS: ReadonlyArray<readonly [ErrorClass, Tran
   [SessionInputError, { status: 'bad_request' }],
   [OtpInvalidError, { status: 'bad_request' }],
   [PartnerAvailabilityInputError, { status: 'bad_request' }],
-  [PartnerAvailabilityConflictError, { status: 'conflict', code: 'ORDER_STATE_CONFLICT' }],
+  [PartnerAvailabilityConflictError, { status: 'conflict', code: coded }],
   [PartnerAvailabilityAuthorizationError, { status: 'forbidden' }],
   [PartnerLifecycleInputError, { status: 'bad_request' }],
   [PartnerLifecycleNotFoundError, { status: 'not_found' }],

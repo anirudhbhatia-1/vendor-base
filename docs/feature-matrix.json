@@ -3260,7 +3260,7 @@
       "name": "Identity and document capture",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Identity and vehicle references are supplied by the applicant, not synthesised",
+      "notes": "Identity, vehicle and insurance references are supplied by the applicant with their expiry dates (audit run 56)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3314,7 +3314,7 @@
       "name": "Expiry and reverification",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Document and insurance warnings are shown to the partner in their own words, with what it stops",
+      "notes": "Identity, vehicle and insurance carry expiries; the worker restricts a partner whose document lapses, the profile names the blocker and offers a renewal, and an admin reviews it (audit run 56 -- until then no expiry existed and the warnings were copy nothing emitted)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

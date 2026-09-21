@@ -43,6 +43,31 @@ without touching that aggregate:
   requires an `expected_version` and appends an append-only event.
 - A partner may have exactly one application via a UNIQUE constraint on
   `applicant_user_id`.
+- **Documents expire and are reverified (9.1, audit run 56).** The application carries when the
+  identity document, the vehicle registration and the insurance lapse (0099; each must be in the
+  future when applied). `documentStanding` reads each as VALID, EXPIRING (within
+  `DOCUMENT_EXPIRY_WARNING_DAYS`, 30), EXPIRED or UNDATED. The worker's `sweepExpiredDocuments`
+  restricts a partner whose document has lapsed — eligibility `RESTRICTED`, reason
+  `DOCUMENT_EXPIRED`, a `DOCUMENT_EXPIRED` event naming the documents — and touches no delivery in
+  their custody. The partner submits a renewal (`partner_document_renewals`: one in review per
+  document, a new reference and expiry); an admin with `admin.partner_application.review`
+  approves or rejects it with a reason; approval writes the document onto the application and
+  restores eligibility when nothing else has lapsed. Until run 56 nothing expired and nothing was
+  reverified, while the partner's profile carried copy for "a document has expired" that nothing
+  emitted.
+- **The blockers are exact (9.1).** `onlineEligibility` names why a partner cannot go online —
+  `NO_APPLICATION`, `APPLICATION_NOT_APPROVED` (with the state), `DOCUMENT_EXPIRED` (with the
+  document), `ELIGIBILITY_RESTRICTED` / `SUSPENDED` / `PENDING` (with the reason),
+  `RESTRICTION_ACTIVE` (a GLOBAL trust restriction), `OFFLINE_PROOF_PENDING` — and what is about
+  to (`DOCUMENT_EXPIRING`). Going online is refused for the same reasons as
+  `PARTNER_NOT_ELIGIBLE`, whose sentence sends the partner to the profile that lists them; until
+  run 56 it failed as a bare state conflict.
+- **Restrictions are capability-specific (9.1).** An ACTIVE trust restriction on a partner keeps
+  them off the road and off every offer when `GLOBAL`, off one store's offers when
+  `VENDOR_LOCATION`, and off the offers of stores whose active service zone carries that name when
+  `ZONE` (`PartnerAvailabilityService.eligible`). Until run 56 a restriction restricted nothing.
+  A delivery already in custody is never ended by a restriction or a lapse: custody obligations
+  stand, and an appeal is offered on every restriction in force.
 - `net_minor` is `base + distance + time + wait + return + incentive + tip +
   adjustment`, checked at the row level. A schema-enforced identity, not an
   application invariant.

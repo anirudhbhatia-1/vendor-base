@@ -820,6 +820,7 @@ await withDatabaseClient(config, async (client) => {
     marketplace.in_app_notifications, marketplace.notification_attempts,
     marketplace.notification_intents,
     marketplace.partner_availability_events, marketplace.partner_availability,
+    marketplace.partner_application_events, marketplace.partner_document_renewals,
     marketplace.partner_wait_earning_adjustments, marketplace.partner_wait_timer_events,
     marketplace.partner_wait_timers,
     marketplace.vendor_order_ratings,

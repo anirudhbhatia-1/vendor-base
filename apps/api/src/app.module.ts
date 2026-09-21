@@ -134,6 +134,7 @@ import {
 import {
   PartnerApplicationController,
   AdminPartnerApplicationController,
+  AdminPartnerDocumentController,
   AdminPartnerExceptionsController,
   PartnerEarningsController,
   PartnerStandingController,
@@ -194,6 +195,7 @@ import {
     PartnerHandoverController,
     PartnerApplicationController,
     AdminPartnerApplicationController,
+    AdminPartnerDocumentController,
     AdminPartnerExceptionsController,
     PartnerEarningsController,
     PartnerStandingController,

@@ -11,16 +11,23 @@ import {
 import {
   PartnerLifecycleAuthorizationError,
   PartnerLifecycleConflictError,
+  PartnerLifecycleInputError,
   PartnerLifecycleNotFoundError,
   PartnerLifecycleService,
 } from '../src/partner-lifecycle.js';
+import {
+  PartnerAvailabilityConflictError,
+  PartnerAvailabilityService,
+} from '../src/partner-availability.js';
 import { check, rejects, adminContext, partnerContext, systemContext } from './verify-support.js';
 
 export async function verifyPartnerLifecycle(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, max: 4 });
   const lifecycle = new PartnerLifecycleService({ connection_string: connectionString });
   const fieldOps = new PartnerFieldOpsService({ connection_string: connectionString });
+  const availability = new PartnerAvailabilityService({ connection_string: connectionString });
   const now = new Date();
+  const DAY = 86_400_000;
   const applicantId = createUuidV7();
   const otherPartnerId = createUuidV7();
   const adminId = createUuidV7();
@@ -44,10 +51,60 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       emergency_contact_reference: 'SYNTH-PARTNER-EMERGENCY-E001',
       training_reference: 'SYNTH-PARTNER-TRAINING-T001',
       home_zone_name: 'SYNTH Jaipur Central',
+      // The identity document and the vehicle registration run a year; the
+      // insurance lapses in a month, which is what the expiry walk below uses.
+      identity_expires_at: new Date(now.getTime() + 365 * DAY),
+      vehicle_expires_at: new Date(now.getTime() + 400 * DAY),
+      insurance_expires_at: new Date(now.getTime() + 30 * DAY),
       now,
     });
     check(created.lifecycle_state === 'DRAFT', 'New application not DRAFT');
     check(created.version === 1, 'New application version not 1');
+    check(
+      created.identity_expires_at?.getTime() === now.getTime() + 365 * DAY &&
+        created.insurance_expires_at?.getTime() === now.getTime() + 30 * DAY,
+      'The application did not record when its documents expire',
+    );
+    // 9.1 -- a document already expired is not a document.
+    await rejects(
+      () =>
+        lifecycle.createApplication({
+          context: partnerContext(otherPartnerId),
+          identity_reference: 'SYNTH-PARTNER-IDENTITY-P003',
+          vehicle_reference: 'SYNTH-PARTNER-VEHICLE-V003',
+          vehicle_kind: 'BICYCLE',
+          bank_account_reference: 'SYNTH-PARTNER-BANK-B003',
+          insurance_reference: 'SYNTH-PARTNER-INSURANCE-I003',
+          emergency_contact_reference: 'SYNTH-PARTNER-EMERGENCY-E003',
+          training_reference: 'SYNTH-PARTNER-TRAINING-T003',
+          home_zone_name: 'SYNTH Jaipur East',
+          identity_expires_at: new Date(now.getTime() - DAY),
+          vehicle_expires_at: new Date(now.getTime() + 400 * DAY),
+          insurance_expires_at: new Date(now.getTime() + 30 * DAY),
+          now,
+        }),
+      PartnerLifecycleInputError,
+      'An application was accepted with a document that had already expired',
+    );
+    // 9.1 -- the exact blockers: nobody without an application, and an
+    // applicant whose application is not yet approved, is told so by name.
+    const noApplication = await lifecycle.onlineEligibility({
+      context: partnerContext(otherPartnerId),
+      now,
+    });
+    const draftBlockers = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now,
+    });
+    check(
+      !noApplication.can_go_online &&
+        noApplication.blockers.some((blocker) => blocker.code === 'NO_APPLICATION') &&
+        !draftBlockers.can_go_online &&
+        draftBlockers.blockers.some(
+          (blocker) => blocker.code === 'APPLICATION_NOT_APPROVED' && blocker.detail === 'DRAFT',
+        ),
+      `The blockers before approval are not named (${JSON.stringify({ noApplication, draftBlockers })})`,
+    );
 
     // Cannot create a second application for the same partner
     await rejects(
@@ -62,6 +119,9 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
           emergency_contact_reference: 'SYNTH-PARTNER-EMERGENCY-E002',
           training_reference: 'SYNTH-PARTNER-TRAINING-T002',
           home_zone_name: 'SYNTH Jaipur East',
+          identity_expires_at: new Date(now.getTime() + 365 * DAY),
+          vehicle_expires_at: new Date(now.getTime() + 400 * DAY),
+          insurance_expires_at: new Date(now.getTime() + 30 * DAY),
         }),
       PartnerLifecycleConflictError,
       'Duplicate partner application was allowed',
@@ -180,6 +240,25 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       'Partner approval left no ROLE_GRANTED event carrying the approval reason',
     );
 
+    // 9.1 -- approved, with every document valid: nothing blocks going
+    // online, and the standing says so document by document.
+    const clean = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: new Date(now.getTime() + 1_000),
+    });
+    check(
+      clean.can_go_online &&
+        clean.blockers.length === 0 &&
+        clean.documents.length === 3 &&
+        clean.documents.every(
+          (document) => document.state === 'VALID' || document.state === 'EXPIRING',
+        ) &&
+        clean.documents.find((document) => document.document_kind === 'INSURANCE')?.state ===
+          'EXPIRING' &&
+        clean.warnings.some((warning) => warning.detail === 'INSURANCE'),
+      `An approved partner with valid documents is blocked, or the month-out insurance is not a warning (${JSON.stringify(clean)})`,
+    );
+
     // Cannot approve an already-decided application (version guard)
     await rejects(
       () =>
@@ -249,6 +328,425 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       ],
     );
 
+    // 9.1 -- expiry and reverification. The insurance lapses a month in;
+    // the sweep restricts the partner from new work, going online is refused
+    // with the code that sends them to their profile, dispatch stops offering
+    // them, and the delivery already in their custody is untouched. A renewal
+    // is reviewed; rejected leaves the restriction, approved lifts it. Until
+    // audit run 56 nothing expired and nothing was reverified.
+    const online = await availability.set({
+      context: partnerContext(applicantId),
+      state: 'ONLINE',
+      latitude: 26.91,
+      longitude: 75.81,
+      reason_code: 'SHIFT_START',
+      now: new Date(now.getTime() + 2_000),
+    });
+    check(online.availability_state === 'ONLINE', 'An eligible partner could not go online');
+    const offeredBefore = await availability.eligible({
+      context: adminContext(adminId),
+      vendor_location_id: vendorLocationId,
+      radius_meters: 2_000,
+      now: new Date(now.getTime() + 3_000),
+    });
+    check(
+      offeredBefore.some((candidate) => candidate.partner_user_id === applicantId),
+      'An eligible online partner was not offered work',
+    );
+    const lapsedAt = new Date(now.getTime() + 31 * DAY);
+    // Dispatch reads the lapse directly: a partner still ONLINE from before
+    // is not offered work at the store even before the sweep has run.
+    await availability.set({
+      context: partnerContext(applicantId),
+      state: 'ONLINE',
+      latitude: 26.91,
+      longitude: 75.81,
+      reason_code: 'SHIFT_START',
+      now: new Date(now.getTime() + 30 * DAY - 30_000),
+    });
+    const offeredLapsed = await availability.eligible({
+      context: adminContext(adminId),
+      vendor_location_id: vendorLocationId,
+      radius_meters: 2_000,
+      now: new Date(now.getTime() + 30 * DAY + 1_000),
+    });
+    check(
+      !offeredLapsed.some((candidate) => candidate.partner_user_id === applicantId),
+      'A partner with a lapsed document was still offered work',
+    );
+    const earlySweep = await lifecycle.sweepExpiredDocuments({
+      context: systemContext(systemActorId),
+      now: new Date(now.getTime() + 29 * DAY),
+    });
+    check(
+      !earlySweep.some((id) => id === applicantId),
+      'The sweep restricted a partner whose documents had not lapsed',
+    );
+    const swept = await lifecycle.sweepExpiredDocuments({
+      context: systemContext(systemActorId),
+      now: lapsedAt,
+    });
+    const sweptAgain = await lifecycle.sweepExpiredDocuments({
+      context: systemContext(systemActorId),
+      now: new Date(lapsedAt.getTime() + 1_000),
+    });
+    check(
+      swept.some((id) => id === applicantId) && !sweptAgain.some((id) => id === applicantId),
+      `The sweep did not restrict the partner once, for the lapsed insurance (${swept.length}/${sweptAgain.length})`,
+    );
+    const restrictedStanding = await pool.query<{
+      state: string;
+      reason: string;
+      note: string | null;
+    }>(
+      `SELECT e.state, e.reason_code AS reason,
+              (SELECT ev.note FROM marketplace.partner_application_events ev
+                WHERE ev.partner_application_id=$2 AND ev.event_type='DOCUMENT_EXPIRED'
+                ORDER BY ev.occurred_at DESC LIMIT 1) AS note
+         FROM marketplace.partner_eligibilities e WHERE e.user_id=$1`,
+      [applicantId, created.partner_application_id],
+    );
+    check(
+      restrictedStanding.rows[0]?.state === 'RESTRICTED' &&
+        restrictedStanding.rows[0]?.reason === 'DOCUMENT_EXPIRED' &&
+        restrictedStanding.rows[0]?.note === 'INSURANCE',
+      `The lapsed document did not restrict the partner with its reason on record (${JSON.stringify(restrictedStanding.rows)})`,
+    );
+    const lapsedBlockers = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: lapsedAt,
+    });
+    check(
+      !lapsedBlockers.can_go_online &&
+        lapsedBlockers.blockers.some(
+          (blocker) => blocker.code === 'DOCUMENT_EXPIRED' && blocker.detail === 'INSURANCE',
+        ) &&
+        lapsedBlockers.blockers.some(
+          (blocker) =>
+            blocker.code === 'ELIGIBILITY_RESTRICTED' && blocker.detail === 'DOCUMENT_EXPIRED',
+        ),
+      `The blockers do not name the lapsed document (${JSON.stringify(lapsedBlockers.blockers)})`,
+    );
+    let refusedOnline: unknown = null;
+    try {
+      await availability.set({
+        context: partnerContext(applicantId),
+        state: 'ONLINE',
+        latitude: 26.91,
+        longitude: 75.81,
+        reason_code: 'SHIFT_START',
+        now: lapsedAt,
+      });
+    } catch (error) {
+      refusedOnline = error;
+    }
+    check(
+      refusedOnline instanceof PartnerAvailabilityConflictError &&
+        refusedOnline.code === 'PARTNER_NOT_ELIGIBLE',
+      `Going online with a lapsed document was not refused as PARTNER_NOT_ELIGIBLE (${String(refusedOnline)})`,
+    );
+    // The delivery already in their custody is theirs to finish.
+    const custody = await pool.query<{ state: string; custody: string; partner: string }>(
+      `SELECT assignment_state AS state, custody_state AS custody, partner_user_id AS partner
+         FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1`,
+      [deliveryAssignmentId],
+    );
+    check(
+      custody.rows[0]?.state === 'PICKED_UP' &&
+        custody.rows[0]?.custody === 'IN_CUSTODY' &&
+        custody.rows[0]?.partner === applicantId,
+      `The restriction touched a delivery in custody (${JSON.stringify(custody.rows)})`,
+    );
+
+    // Renewal: one in review per document; a rejection keeps the
+    // restriction; an approval writes the new document and lifts it.
+    const renewal = await lifecycle.submitDocumentRenewal({
+      context: partnerContext(applicantId),
+      document_kind: 'INSURANCE',
+      document_reference: 'SYNTH-PARTNER-INSURANCE-I001-R1',
+      expires_at: new Date(lapsedAt.getTime() + 400 * DAY),
+      now: lapsedAt,
+    });
+    await rejects(
+      () =>
+        lifecycle.submitDocumentRenewal({
+          context: partnerContext(applicantId),
+          document_kind: 'INSURANCE',
+          document_reference: 'SYNTH-PARTNER-INSURANCE-I001-R1B',
+          expires_at: new Date(lapsedAt.getTime() + 400 * DAY),
+          now: new Date(lapsedAt.getTime() + 1_000),
+        }),
+      PartnerLifecycleConflictError,
+      'A second renewal of the same document was accepted while one was in review',
+    );
+    await rejects(
+      () =>
+        lifecycle.reviewDocumentRenewal({
+          context: partnerContext(applicantId),
+          partner_document_renewal_id: renewal.partner_document_renewal_id,
+          decision: 'APPROVED',
+          reason_code: 'SELF_APPROVED',
+        }),
+      PartnerLifecycleAuthorizationError,
+      'A partner reviewed their own renewal',
+    );
+    const rejectedRenewal = await lifecycle.reviewDocumentRenewal({
+      context: adminContext(adminId),
+      partner_document_renewal_id: renewal.partner_document_renewal_id,
+      decision: 'REJECTED',
+      reason_code: 'DOCUMENT_UNREADABLE',
+      now: new Date(lapsedAt.getTime() + 2_000),
+    });
+    const stillRestricted = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: new Date(lapsedAt.getTime() + 3_000),
+    });
+    check(
+      rejectedRenewal.lifecycle_state === 'REJECTED' &&
+        !stillRestricted.can_go_online &&
+        stillRestricted.blockers.some((blocker) => blocker.code === 'DOCUMENT_EXPIRED'),
+      'A rejected renewal lifted the restriction',
+    );
+    const renewalAgain = await lifecycle.submitDocumentRenewal({
+      context: partnerContext(applicantId),
+      document_kind: 'INSURANCE',
+      document_reference: 'SYNTH-PARTNER-INSURANCE-I001-R2',
+      expires_at: new Date(lapsedAt.getTime() + 400 * DAY),
+      now: new Date(lapsedAt.getTime() + 4_000),
+    });
+    const renewalQueue = await lifecycle.listDocumentRenewalsForAdmin({
+      context: adminContext(adminId),
+    });
+    check(
+      renewalQueue.some(
+        (entry) => entry.partner_document_renewal_id === renewalAgain.partner_document_renewal_id,
+      ) &&
+        !renewalQueue.some(
+          (entry) => entry.partner_document_renewal_id === renewal.partner_document_renewal_id,
+        ),
+      'The review queue does not hold the renewal in review, or still holds the decided one',
+    );
+    const approvedRenewal = await lifecycle.reviewDocumentRenewal({
+      context: adminContext(adminId),
+      partner_document_renewal_id: renewalAgain.partner_document_renewal_id,
+      decision: 'APPROVED',
+      reason_code: 'DOCUMENT_VERIFIED',
+      now: new Date(lapsedAt.getTime() + 5_000),
+    });
+    await rejects(
+      () =>
+        lifecycle.reviewDocumentRenewal({
+          context: adminContext(adminId),
+          partner_document_renewal_id: renewalAgain.partner_document_renewal_id,
+          decision: 'REJECTED',
+          reason_code: 'DOCUMENT_VERIFIED',
+        }),
+      PartnerLifecycleConflictError,
+      'A decided renewal was decided again',
+    );
+    const renewedApplication = await lifecycle.getOwnApplication({
+      context: partnerContext(applicantId),
+    });
+    const lifted = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: new Date(lapsedAt.getTime() + 6_000),
+    });
+    check(
+      approvedRenewal.lifecycle_state === 'APPROVED' &&
+        renewedApplication?.insurance_reference === 'SYNTH-PARTNER-INSURANCE-I001-R2' &&
+        renewedApplication?.insurance_expires_at?.getTime() === lapsedAt.getTime() + 400 * DAY &&
+        lifted.can_go_online &&
+        lifted.blockers.length === 0 &&
+        lifted.documents.find((document) => document.document_kind === 'INSURANCE')?.state ===
+          'VALID',
+      `An approved renewal did not write the document and lift the restriction (${JSON.stringify({ renewedApplication, lifted })})`,
+    );
+    const backOnline = await availability.set({
+      context: partnerContext(applicantId),
+      state: 'ONLINE',
+      latitude: 26.91,
+      longitude: 75.81,
+      reason_code: 'SHIFT_START',
+      now: new Date(lapsedAt.getTime() + 7_000),
+    });
+    check(backOnline.availability_state === 'ONLINE', 'A renewed partner could not go online');
+
+    // 9.1 -- capability-specific restrictions: a GLOBAL restriction keeps
+    // the partner off the road and off every offer; one scoped to a store
+    // keeps them off that store's offers alone. Until audit run 56 a
+    // restriction restricted nothing.
+    const restrictionAt = new Date(lapsedAt.getTime() + 8_000);
+    const globalRestrictionId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.trust_restriction_cases
+         (trust_restriction_case_id, subject_kind, subject_reference, scope_kind, scope_reference,
+          lifecycle_state, reason_code, evidence_reference, policy_reference, proposed_by_user_id,
+          approved_by_user_id, effective_until, review_at, request_id, correlation_id)
+       VALUES ($1,'PARTNER',$2,'GLOBAL','global','ACTIVE','SAFETY_REVIEW','SYNTH-EVIDENCE-P9-1',
+               'SYNTH-POLICY-P9-1',$3,$4,$5,$5,$6,$6)`,
+      [
+        globalRestrictionId,
+        String(applicantId),
+        adminId,
+        systemActorId,
+        new Date(restrictionAt.getTime() + 7 * DAY),
+        createUuidV7(),
+      ],
+    );
+    const globallyRestricted = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: restrictionAt,
+    });
+    let refusedByRestriction: unknown = null;
+    try {
+      await availability.set({
+        context: partnerContext(applicantId),
+        state: 'ONLINE',
+        latitude: 26.91,
+        longitude: 75.81,
+        reason_code: 'SHIFT_START',
+        now: restrictionAt,
+      });
+    } catch (error) {
+      refusedByRestriction = error;
+    }
+    const offeredUnderGlobal = await availability.eligible({
+      context: adminContext(adminId),
+      vendor_location_id: vendorLocationId,
+      radius_meters: 2_000,
+      now: restrictionAt,
+    });
+    check(
+      !globallyRestricted.can_go_online &&
+        globallyRestricted.blockers.some(
+          (blocker) =>
+            blocker.code === 'RESTRICTION_ACTIVE' && blocker.detail === 'GLOBAL:SAFETY_REVIEW',
+        ) &&
+        refusedByRestriction instanceof PartnerAvailabilityConflictError &&
+        refusedByRestriction.code === 'PARTNER_NOT_ELIGIBLE' &&
+        !offeredUnderGlobal.some((candidate) => candidate.partner_user_id === applicantId),
+      `A GLOBAL restriction did not keep the partner off the road and off offers (${JSON.stringify({ blockers: globallyRestricted.blockers, refused: String(refusedByRestriction) })})`,
+    );
+    await pool.query(
+      `UPDATE marketplace.trust_restriction_cases SET lifecycle_state='EXPIRED', version=version+1
+        WHERE trust_restriction_case_id=$1`,
+      [globalRestrictionId],
+    );
+    const otherLocationId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.vendor_locations
+        (vendor_location_id,vendor_id,location_name,profile_description,operating_timezone,
+         coordinates,category,lifecycle_state,request_id,correlation_id)
+       VALUES ($1,$2,'SYNTH Partner Store Two','Synthetic partner test location','Asia/Kolkata',
+         ST_SetSRID(ST_MakePoint(75.812,26.912),4326)::geography,'FRUIT_VEGETABLE','ACTIVE',$3,$3)`,
+      [otherLocationId, vendorId, createUuidV7()],
+    );
+    await pool.query(
+      `INSERT INTO marketplace.trust_restriction_cases
+         (trust_restriction_case_id, subject_kind, subject_reference, scope_kind, scope_reference,
+          lifecycle_state, reason_code, evidence_reference, policy_reference, proposed_by_user_id,
+          approved_by_user_id, effective_until, review_at, request_id, correlation_id)
+       VALUES ($1,'PARTNER',$2,'VENDOR_LOCATION',$3,'ACTIVE','STORE_COMPLAINT','SYNTH-EVIDENCE-P9-2',
+               'SYNTH-POLICY-P9-2',$4,$5,$6,$6,$7,$7)`,
+      [
+        createUuidV7(),
+        String(applicantId),
+        String(vendorLocationId),
+        adminId,
+        systemActorId,
+        new Date(restrictionAt.getTime() + 7 * DAY),
+        createUuidV7(),
+      ],
+    );
+    const scopedAt = new Date(restrictionAt.getTime() + 1_000);
+    const scopedStanding = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: scopedAt,
+    });
+    const offeredAtRestrictedStore = await availability.eligible({
+      context: adminContext(adminId),
+      vendor_location_id: vendorLocationId,
+      radius_meters: 2_000,
+      now: scopedAt,
+    });
+    const offeredElsewhere = await availability.eligible({
+      context: adminContext(adminId),
+      vendor_location_id: otherLocationId,
+      radius_meters: 2_000,
+      now: scopedAt,
+    });
+    check(
+      scopedStanding.can_go_online &&
+        !offeredAtRestrictedStore.some((candidate) => candidate.partner_user_id === applicantId) &&
+        offeredElsewhere.some((candidate) => candidate.partner_user_id === applicantId),
+      `A store-scoped restriction did not apply to that store alone (${JSON.stringify({ online: scopedStanding.can_go_online, atStore: offeredAtRestrictedStore.length, elsewhere: offeredElsewhere.length })})`,
+    );
+
+    // Two documents lapsed: renewing one does not lift the restriction the
+    // other keeps; renewing both does.
+    await pool.query(
+      `UPDATE marketplace.trust_restriction_cases SET lifecycle_state='EXPIRED', version=version+1
+        WHERE subject_reference=$1 AND lifecycle_state='ACTIVE'`,
+      [String(applicantId)],
+    );
+    const bothLapsedAt = new Date(now.getTime() + 401 * DAY);
+    const sweptBoth = await lifecycle.sweepExpiredDocuments({
+      context: systemContext(systemActorId),
+      now: bothLapsedAt,
+    });
+    check(
+      sweptBoth.some((id) => id === applicantId),
+      'Two lapsed documents did not restrict',
+    );
+    const identityRenewal = await lifecycle.submitDocumentRenewal({
+      context: partnerContext(applicantId),
+      document_kind: 'IDENTITY',
+      document_reference: 'SYNTH-PARTNER-IDENTITY-P001-R1',
+      expires_at: new Date(bothLapsedAt.getTime() + 365 * DAY),
+      now: bothLapsedAt,
+    });
+    await lifecycle.reviewDocumentRenewal({
+      context: adminContext(adminId),
+      partner_document_renewal_id: identityRenewal.partner_document_renewal_id,
+      decision: 'APPROVED',
+      reason_code: 'DOCUMENT_VERIFIED',
+      now: new Date(bothLapsedAt.getTime() + 1_000),
+    });
+    const halfRenewed = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: new Date(bothLapsedAt.getTime() + 2_000),
+    });
+    check(
+      !halfRenewed.can_go_online &&
+        halfRenewed.blockers.some(
+          (blocker) => blocker.code === 'DOCUMENT_EXPIRED' && blocker.detail === 'VEHICLE',
+        ) &&
+        halfRenewed.blockers.some((blocker) => blocker.code === 'ELIGIBILITY_RESTRICTED'),
+      `Renewing one of two lapsed documents lifted the restriction (${JSON.stringify(halfRenewed.blockers)})`,
+    );
+    const vehicleRenewal = await lifecycle.submitDocumentRenewal({
+      context: partnerContext(applicantId),
+      document_kind: 'VEHICLE',
+      document_reference: 'SYNTH-PARTNER-VEHICLE-V001-R1',
+      expires_at: new Date(bothLapsedAt.getTime() + 365 * DAY),
+      now: new Date(bothLapsedAt.getTime() + 3_000),
+    });
+    await lifecycle.reviewDocumentRenewal({
+      context: adminContext(adminId),
+      partner_document_renewal_id: vehicleRenewal.partner_document_renewal_id,
+      decision: 'APPROVED',
+      reason_code: 'DOCUMENT_VERIFIED',
+      now: new Date(bothLapsedAt.getTime() + 4_000),
+    });
+    const fullyRenewed = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: new Date(bothLapsedAt.getTime() + 5_000),
+    });
+    check(
+      fullyRenewed.can_go_online && fullyRenewed.blockers.length === 0,
+      `Renewing both lapsed documents did not lift the restriction (${JSON.stringify(fullyRenewed.blockers)})`,
+    );
+
     const proofDigest = createHash('sha256').update('SYNTH-PROOF-1').digest('hex');
     const proof = await fieldOps.saveOfflineProof({
       context: partnerContext(applicantId),
@@ -261,6 +759,15 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       now,
     });
     check(proof.sync_state === 'PENDING', 'proof not saved as PENDING');
+    // 9.1 -- an unsynced proof is a named blocker too.
+    const proofBlocked = await lifecycle.onlineEligibility({
+      context: partnerContext(applicantId),
+      now: new Date(now.getTime() + 40 * DAY),
+    });
+    check(
+      proofBlocked.blockers.some((blocker) => blocker.code === 'OFFLINE_PROOF_PENDING'),
+      `An unsynced proof is not named as a blocker (${JSON.stringify(proofBlocked.blockers)})`,
+    );
 
     // Cannot save a second PENDING proof for the same partner
     await rejects(
@@ -536,6 +1043,7 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     check(empty.length === 0, 'other partner saw earnings');
   } finally {
     await fieldOps.close();
+    await availability.close();
     await lifecycle.close();
     await pool.end();
   }

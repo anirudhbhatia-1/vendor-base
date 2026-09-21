@@ -26,6 +26,11 @@ export function PartnerApplicationPanel() {
   const [insuranceReference, setInsuranceReference] = useState('');
   const [emergencyContact, setEmergencyContact] = useState('');
   const [trainingReference, setTrainingReference] = useState('');
+  // When each expiring document lapses (9.1): the platform warns before, and
+  // stops offers after, so the dates are part of the application.
+  const [identityExpires, setIdentityExpires] = useState('');
+  const [vehicleExpires, setVehicleExpires] = useState('');
+  const [insuranceExpires, setInsuranceExpires] = useState('');
 
   async function createApplication(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -41,6 +46,9 @@ export function PartnerApplicationPanel() {
         emergency_contact_reference: emergencyContact.trim(),
         training_reference: trainingReference.trim(),
         home_zone_name: homeZone,
+        identity_expires_at: new Date(identityExpires).toISOString(),
+        vehicle_expires_at: new Date(vehicleExpires).toISOString(),
+        insurance_expires_at: new Date(insuranceExpires).toISOString(),
       });
       setAppState({ partner_application_id: result.partner_application_id, version: 1 });
       setMessage(`Application created: ${result.partner_application_id}`);
@@ -106,11 +114,29 @@ export function PartnerApplicationPanel() {
             />
           </label>
           <label>
+            Identity document expires on
+            <input
+              onChange={(e) => setIdentityExpires(e.target.value)}
+              required
+              type="date"
+              value={identityExpires}
+            />
+          </label>
+          <label>
             Vehicle registration reference
             <input
               value={vehicleReference}
               onChange={(e) => setVehicleReference(e.target.value)}
               required
+            />
+          </label>
+          <label>
+            Vehicle registration expires on
+            <input
+              onChange={(e) => setVehicleExpires(e.target.value)}
+              required
+              type="date"
+              value={vehicleExpires}
             />
           </label>
           <label>
@@ -128,6 +154,15 @@ export function PartnerApplicationPanel() {
               value={insuranceReference}
               onChange={(e) => setInsuranceReference(e.target.value)}
               required
+            />
+          </label>
+          <label>
+            Insurance expires on
+            <input
+              onChange={(e) => setInsuranceExpires(e.target.value)}
+              required
+              type="date"
+              value={insuranceExpires}
             />
           </label>
           <label>

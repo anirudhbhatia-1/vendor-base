@@ -42,15 +42,79 @@ export type DisputeComponent =
 
 export type DisputeState = 'OPEN' | 'RESOLVED' | 'WITHDRAWN';
 
+export type DocumentKind = 'IDENTITY' | 'VEHICLE' | 'INSURANCE';
+export const DOCUMENT_KINDS: readonly DocumentKind[] = Object.freeze([
+  'IDENTITY',
+  'VEHICLE',
+  'INSURANCE',
+]);
+/** How long before a document's expiry the partner is warned (9.1). */
+export const DOCUMENT_EXPIRY_WARNING_DAYS = 30;
+
+/** One document's standing: its reference, when it lapses, and whether it has. */
+export interface DocumentStanding {
+  readonly document_kind: DocumentKind;
+  readonly document_reference: string;
+  readonly expires_at: string | null;
+  readonly state: 'VALID' | 'EXPIRING' | 'EXPIRED' | 'UNDATED';
+  /** A renewal awaiting review, if any. */
+  readonly renewal_pending: boolean;
+}
+
+/** Why a partner cannot go online, in codes the profile turns into words (9.1). */
+export interface EligibilityBlocker {
+  readonly code:
+    | 'NO_APPLICATION'
+    | 'APPLICATION_NOT_APPROVED'
+    | 'DOCUMENT_EXPIRED'
+    | 'ELIGIBILITY_RESTRICTED'
+    | 'ELIGIBILITY_SUSPENDED'
+    | 'ELIGIBILITY_PENDING'
+    | 'RESTRICTION_ACTIVE'
+    | 'OFFLINE_PROOF_PENDING';
+  /** The document, the application state, the restriction's scope, the reason. */
+  readonly detail: string | null;
+  readonly until: string | null;
+}
+
+export interface OnlineEligibility {
+  readonly can_go_online: boolean;
+  readonly blockers: readonly EligibilityBlocker[];
+  /** Not blockers yet: a document about to expire. */
+  readonly warnings: readonly {
+    readonly code: 'DOCUMENT_EXPIRING';
+    readonly detail: string;
+    readonly until: string;
+  }[];
+  readonly documents: readonly DocumentStanding[];
+}
+
+export interface DocumentRenewal {
+  readonly partner_document_renewal_id: UuidV7;
+  readonly partner_user_id: UuidV7;
+  readonly document_kind: DocumentKind;
+  readonly document_reference: string;
+  readonly expires_at: Date;
+  readonly lifecycle_state: 'SUBMITTED' | 'APPROVED' | 'REJECTED';
+  readonly reviewer_user_id: UuidV7 | null;
+  readonly reason_code: string | null;
+  readonly note: string | null;
+  readonly created_at: Date;
+  readonly decided_at: Date | null;
+}
+
 export interface PartnerApplication {
   readonly partner_application_id: UuidV7;
   readonly applicant_user_id: UuidV7;
   readonly lifecycle_state: ApplicationState;
   readonly identity_reference: string;
+  readonly identity_expires_at: Date | null;
   readonly vehicle_reference: string;
+  readonly vehicle_expires_at: Date | null;
   readonly vehicle_kind: VehicleKind;
   readonly bank_account_reference: string;
   readonly insurance_reference: string;
+  readonly insurance_expires_at: Date | null;
   readonly emergency_contact_reference: string;
   readonly training_reference: string;
   readonly home_zone_name: string;
@@ -147,10 +211,13 @@ function projectApplication(row: Record<string, unknown>): PartnerApplication {
     applicant_user_id: parseUuidV7(row['applicant_user_id'] as string),
     lifecycle_state: row['lifecycle_state'] as ApplicationState,
     identity_reference: row['identity_reference'] as string,
+    identity_expires_at: (row['identity_expires_at'] as Date | null) ?? null,
     vehicle_reference: row['vehicle_reference'] as string,
+    vehicle_expires_at: (row['vehicle_expires_at'] as Date | null) ?? null,
     vehicle_kind: row['vehicle_kind'] as VehicleKind,
     bank_account_reference: row['bank_account_reference'] as string,
     insurance_reference: row['insurance_reference'] as string,
+    insurance_expires_at: (row['insurance_expires_at'] as Date | null) ?? null,
     emergency_contact_reference: row['emergency_contact_reference'] as string,
     training_reference: row['training_reference'] as string,
     home_zone_name: row['home_zone_name'] as string,
@@ -164,6 +231,33 @@ function projectApplication(row: Record<string, unknown>): PartnerApplication {
     version: row['version'] as number,
   });
 }
+function projectRenewal(row: Record<string, unknown>): DocumentRenewal {
+  return Object.freeze({
+    partner_document_renewal_id: parseUuidV7(row['partner_document_renewal_id'] as string),
+    partner_user_id: parseUuidV7(row['partner_user_id'] as string),
+    document_kind: row['document_kind'] as DocumentKind,
+    document_reference: row['document_reference'] as string,
+    expires_at: row['expires_at'] as Date,
+    lifecycle_state: row['lifecycle_state'] as 'SUBMITTED' | 'APPROVED' | 'REJECTED',
+    reviewer_user_id: row['reviewer_user_id']
+      ? parseUuidV7(row['reviewer_user_id'] as string)
+      : null,
+    reason_code: (row['reason_code'] as string | null) ?? null,
+    note: (row['note'] as string | null) ?? null,
+    created_at: row['created_at'] as Date,
+    decided_at: (row['decided_at'] as Date | null) ?? null,
+  });
+}
+
+/** Where each expiring document's date and reference live on the application. */
+const DOCUMENT_COLUMNS: Readonly<
+  Record<DocumentKind, { readonly reference: string; readonly expires: string }>
+> = Object.freeze({
+  IDENTITY: { reference: 'identity_reference', expires: 'identity_expires_at' },
+  VEHICLE: { reference: 'vehicle_reference', expires: 'vehicle_expires_at' },
+  INSURANCE: { reference: 'insurance_reference', expires: 'insurance_expires_at' },
+});
+
 function projectEarnings(row: Record<string, unknown>): EarningsRecord {
   return Object.freeze({
     partner_earnings_record_id: parseUuidV7(row['partner_earnings_record_id'] as string),
@@ -215,7 +309,11 @@ async function appendApplicationEvent(
       | 'CHANGES_REQUESTED'
       | 'APPROVED'
       | 'REJECTED'
-      | 'APPEAL_OPENED';
+      | 'APPEAL_OPENED'
+      | 'DOCUMENT_EXPIRED'
+      | 'DOCUMENT_RENEWAL_SUBMITTED'
+      | 'DOCUMENT_RENEWED'
+      | 'DOCUMENT_RENEWAL_REJECTED';
     readonly actor_id: UuidV7;
     readonly previous_state: ApplicationState | null;
     readonly resulting_state: ApplicationState | null;
@@ -283,6 +381,10 @@ export class PartnerLifecycleService {
     readonly emergency_contact_reference: string;
     readonly training_reference: string;
     readonly home_zone_name: string;
+    /** When each expiring document lapses (9.1); each must be in the future. */
+    readonly identity_expires_at: Date;
+    readonly vehicle_expires_at: Date;
+    readonly insurance_expires_at: Date;
     readonly now?: Date;
   }): Promise<PartnerApplication> {
     const applicantId = requirePartner(input.context);
@@ -303,6 +405,14 @@ export class PartnerLifecycleService {
     if (!zoneName.test(input.home_zone_name))
       throw new PartnerLifecycleInputError('home_zone_name contains unsupported characters');
     const now = input.now ?? new Date();
+    for (const [field, value] of [
+      ['identity_expires_at', input.identity_expires_at],
+      ['vehicle_expires_at', input.vehicle_expires_at],
+      ['insurance_expires_at', input.insurance_expires_at],
+    ] as const) {
+      if (!(value instanceof Date) || Number.isNaN(value.getTime()) || value <= now)
+        throw new PartnerLifecycleInputError(`${field} must be a date in the future`);
+    }
     const ids = contextIds(input.context);
     return tx(this.#pool, async (client) => {
       const applicationId = createUuidV7({ now_ms: now.getTime() });
@@ -312,8 +422,9 @@ export class PartnerLifecycleService {
           `INSERT INTO marketplace.partner_applications
              (partner_application_id, applicant_user_id, identity_reference, vehicle_reference,
               vehicle_kind, bank_account_reference, insurance_reference, emergency_contact_reference,
-              training_reference, home_zone_name, lifecycle_state, request_id, correlation_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11,$12)
+              training_reference, home_zone_name, lifecycle_state, request_id, correlation_id,
+              identity_expires_at, vehicle_expires_at, insurance_expires_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11,$12,$13,$14,$15)
            RETURNING *`,
           [
             applicationId,
@@ -328,6 +439,9 @@ export class PartnerLifecycleService {
             input.home_zone_name,
             ids.request,
             ids.correlation,
+            input.identity_expires_at,
+            input.vehicle_expires_at,
+            input.insurance_expires_at,
           ],
         );
       } catch (error) {
@@ -569,6 +683,420 @@ export class PartnerLifecycleService {
     );
     const row = found.rows[0];
     return row ? projectApplication(row) : null;
+  }
+
+  // -----------------------------------------------------------------------
+  // 9.1 -- documents, expiry, reverification, and what blocks going online
+  // -----------------------------------------------------------------------
+
+  /**
+   * Each expiring document's standing for a partner, read off the approved
+   * application (or, before approval, the application as it stands): VALID,
+   * EXPIRING within `DOCUMENT_EXPIRY_WARNING_DAYS`, EXPIRED, or UNDATED for
+   * an application made before 0099. A renewal in review is noted.
+   */
+  async documentStanding(
+    partnerUserId: UuidV7,
+    now: Date,
+    client?: PoolClient,
+  ): Promise<readonly DocumentStanding[]> {
+    const queryable = client ?? this.#pool;
+    const application = await queryable.query<Record<string, unknown>>(
+      `SELECT identity_reference, identity_expires_at, vehicle_reference, vehicle_expires_at,
+              insurance_reference, insurance_expires_at
+         FROM marketplace.partner_applications WHERE applicant_user_id=$1`,
+      [partnerUserId],
+    );
+    const row = application.rows[0];
+    if (!row) return [];
+    const pending = await queryable.query<{ document_kind: DocumentKind }>(
+      `SELECT document_kind FROM marketplace.partner_document_renewals
+        WHERE partner_user_id=$1 AND lifecycle_state='SUBMITTED'`,
+      [partnerUserId],
+    );
+    const inReview = new Set(pending.rows.map((entry) => entry.document_kind));
+    const warningMs = DOCUMENT_EXPIRY_WARNING_DAYS * 86_400_000;
+    return Object.freeze(
+      DOCUMENT_KINDS.map((kind) => {
+        const columns = DOCUMENT_COLUMNS[kind];
+        const expires = (row[columns.expires] as Date | null) ?? null;
+        const state: DocumentStanding['state'] =
+          expires === null
+            ? 'UNDATED'
+            : expires <= now
+              ? 'EXPIRED'
+              : expires.getTime() - now.getTime() <= warningMs
+                ? 'EXPIRING'
+                : 'VALID';
+        return Object.freeze({
+          document_kind: kind,
+          document_reference: row[columns.reference] as string,
+          expires_at: expires?.toISOString() ?? null,
+          state,
+          renewal_pending: inReview.has(kind),
+        });
+      }),
+    );
+  }
+
+  /**
+   * Exactly what stops this partner going online, and what is about to (9.1):
+   * no application or one not yet approved; an expired document; an
+   * eligibility that is not ELIGIBLE, with its reason; an active restriction
+   * on the whole platform; an offline proof still to sync. Until audit run 56
+   * going online failed with "Partner is not eligible" and nothing said why.
+   */
+  async onlineEligibility(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+  }): Promise<OnlineEligibility> {
+    const partnerId = requirePartner(input.context);
+    return this.eligibilityOf(partnerId, input.now ?? new Date());
+  }
+
+  async eligibilityOf(
+    partnerId: UuidV7,
+    now: Date,
+    client?: PoolClient,
+  ): Promise<OnlineEligibility> {
+    const queryable = client ?? this.#pool;
+    const blockers: EligibilityBlocker[] = [];
+    const warnings: { code: 'DOCUMENT_EXPIRING'; detail: string; until: string }[] = [];
+    const application = await queryable.query<{ lifecycle_state: ApplicationState }>(
+      `SELECT lifecycle_state FROM marketplace.partner_applications WHERE applicant_user_id=$1`,
+      [partnerId],
+    );
+    const state = application.rows[0]?.lifecycle_state;
+    if (!state) blockers.push({ code: 'NO_APPLICATION', detail: null, until: null });
+    else if (state !== 'APPROVED')
+      blockers.push({ code: 'APPLICATION_NOT_APPROVED', detail: state, until: null });
+    const documents = await this.documentStanding(partnerId, now, client);
+    for (const document of documents) {
+      if (document.state === 'EXPIRED')
+        blockers.push({
+          code: 'DOCUMENT_EXPIRED',
+          detail: document.document_kind,
+          until: document.expires_at,
+        });
+      else if (document.state === 'EXPIRING' && document.expires_at)
+        warnings.push({
+          code: 'DOCUMENT_EXPIRING',
+          detail: document.document_kind,
+          until: document.expires_at,
+        });
+    }
+    const eligibility = await queryable.query<{
+      state: string;
+      reason_code: string | null;
+      eligible_until: Date | null;
+    }>(
+      `SELECT state, reason_code, eligible_until FROM marketplace.partner_eligibilities
+        WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 1`,
+      [partnerId],
+    );
+    const standing = eligibility.rows[0];
+    if (state === 'APPROVED') {
+      if (!standing || standing.state === 'PENDING')
+        blockers.push({
+          code: 'ELIGIBILITY_PENDING',
+          detail: standing?.reason_code ?? null,
+          until: null,
+        });
+      else if (standing.state === 'RESTRICTED')
+        blockers.push({
+          code: 'ELIGIBILITY_RESTRICTED',
+          detail: standing.reason_code,
+          until: standing.eligible_until?.toISOString() ?? null,
+        });
+      else if (standing.state === 'SUSPENDED')
+        blockers.push({
+          code: 'ELIGIBILITY_SUSPENDED',
+          detail: standing.reason_code,
+          until: standing.eligible_until?.toISOString() ?? null,
+        });
+      else if (standing.eligible_until && standing.eligible_until <= now)
+        blockers.push({
+          code: 'ELIGIBILITY_RESTRICTED',
+          detail: 'ELIGIBILITY_LAPSED',
+          until: standing.eligible_until.toISOString(),
+        });
+    }
+    const restrictions = await queryable.query<{
+      scope_kind: string;
+      scope_reference: string;
+      reason_code: string;
+      effective_until: Date;
+    }>(
+      `SELECT scope_kind, scope_reference, reason_code, effective_until
+         FROM marketplace.trust_restriction_cases
+        WHERE subject_kind='PARTNER' AND subject_reference=$1 AND lifecycle_state='ACTIVE'
+          AND effective_until > $2 AND scope_kind='GLOBAL'`,
+      [String(partnerId), now],
+    );
+    for (const restriction of restrictions.rows)
+      blockers.push({
+        code: 'RESTRICTION_ACTIVE',
+        detail: `${restriction.scope_kind}:${restriction.reason_code}`,
+        until: restriction.effective_until.toISOString(),
+      });
+    const proofs = await queryable.query(
+      `SELECT 1 FROM marketplace.partner_offline_proofs
+        WHERE partner_user_id=$1 AND sync_state='PENDING' LIMIT 1`,
+      [partnerId],
+    );
+    if (proofs.rows.length > 0)
+      blockers.push({ code: 'OFFLINE_PROOF_PENDING', detail: null, until: null });
+    return Object.freeze({
+      can_go_online: blockers.length === 0,
+      blockers: Object.freeze(blockers),
+      warnings: Object.freeze(warnings),
+      documents,
+    });
+  }
+
+  /**
+   * A renewed document, submitted for review (9.1): a new reference and a
+   * new expiry, one renewal per document in review at a time. The application
+   * it belongs to must exist; before approval the applicant edits by a
+   * change request instead.
+   */
+  async submitDocumentRenewal(input: {
+    readonly context: RequestContext;
+    readonly document_kind: DocumentKind;
+    readonly document_reference: string;
+    readonly expires_at: Date;
+    readonly now?: Date;
+  }): Promise<DocumentRenewal> {
+    const partnerId = requirePartner(input.context);
+    if (!DOCUMENT_KINDS.includes(input.document_kind))
+      throw new PartnerLifecycleInputError('document_kind is not allowed');
+    if (!referencePatterns.identity.test(input.document_reference))
+      throw new PartnerLifecycleInputError('document_reference is invalid');
+    const now = input.now ?? new Date();
+    if (
+      !(input.expires_at instanceof Date) ||
+      Number.isNaN(input.expires_at.getTime()) ||
+      input.expires_at <= now
+    )
+      throw new PartnerLifecycleInputError('expires_at must be a date in the future');
+    const ids = contextIds(input.context);
+    return tx(this.#pool, async (client) => {
+      const application = await client.query<{
+        partner_application_id: string;
+        lifecycle_state: ApplicationState;
+      }>(
+        `SELECT partner_application_id, lifecycle_state FROM marketplace.partner_applications
+          WHERE applicant_user_id=$1 FOR UPDATE`,
+        [partnerId],
+      );
+      const row = application.rows[0];
+      if (!row) throw new PartnerLifecycleNotFoundError();
+      if (row.lifecycle_state !== 'APPROVED')
+        throw new PartnerLifecycleConflictError(
+          'A document is renewed once the application is approved; before that, resubmit it',
+        );
+      let inserted;
+      try {
+        inserted = await client.query<Record<string, unknown>>(
+          `INSERT INTO marketplace.partner_document_renewals
+             (partner_document_renewal_id, partner_user_id, document_kind, document_reference,
+              expires_at, request_id, correlation_id, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+          [
+            createUuidV7({ now_ms: now.getTime() }),
+            partnerId,
+            input.document_kind,
+            input.document_reference,
+            input.expires_at,
+            ids.request,
+            ids.correlation,
+            now,
+          ],
+        );
+      } catch (error) {
+        if ((error as { code?: unknown }).code === '23505')
+          throw new PartnerLifecycleConflictError(
+            'A renewal of this document is already in review',
+          );
+        throw error;
+      }
+      await appendApplicationEvent(client, {
+        partner_application_id: parseUuidV7(row.partner_application_id),
+        event_type: 'DOCUMENT_RENEWAL_SUBMITTED',
+        actor_id: partnerId,
+        previous_state: null,
+        resulting_state: null,
+        reason_code: `${input.document_kind}_RENEWAL_SUBMITTED`,
+        ids,
+      });
+      return projectRenewal(inserted.rows[0] as Record<string, unknown>);
+    });
+  }
+
+  /** The renewals awaiting review, oldest first. */
+  async listDocumentRenewalsForAdmin(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+  }): Promise<readonly DocumentRenewal[]> {
+    requireAdmin(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const rows = await this.#pool.query<Record<string, unknown>>(
+      `SELECT * FROM marketplace.partner_document_renewals
+        WHERE lifecycle_state='SUBMITTED' ORDER BY created_at LIMIT $1`,
+      [limit],
+    );
+    return Object.freeze(rows.rows.map(projectRenewal));
+  }
+
+  /**
+   * The reviewer's decision on a renewal (9.1). Approval writes the new
+   * reference and expiry onto the application and, if the partner had been
+   * restricted for that document and no other document is expired, restores
+   * their eligibility; a rejection leaves the old document and its standing.
+   */
+  async reviewDocumentRenewal(input: {
+    readonly context: RequestContext;
+    readonly partner_document_renewal_id: UuidV7;
+    readonly decision: 'APPROVED' | 'REJECTED';
+    readonly reason_code: string;
+    readonly note?: string;
+    readonly now?: Date;
+  }): Promise<DocumentRenewal> {
+    const reviewerId = requireAdmin(input.context);
+    if (input.decision !== 'APPROVED' && input.decision !== 'REJECTED')
+      throw new PartnerLifecycleInputError('decision must be APPROVED or REJECTED');
+    if (!reasonCode.test(input.reason_code))
+      throw new PartnerLifecycleInputError('reason_code must be shouting-snake-case');
+    const now = input.now ?? new Date();
+    const ids = contextIds(input.context);
+    return tx(this.#pool, async (client) => {
+      const found = await client.query<Record<string, unknown>>(
+        `SELECT * FROM marketplace.partner_document_renewals
+          WHERE partner_document_renewal_id=$1 FOR UPDATE`,
+        [input.partner_document_renewal_id],
+      );
+      const renewal = found.rows[0];
+      if (!renewal) throw new PartnerLifecycleNotFoundError();
+      if (renewal['lifecycle_state'] !== 'SUBMITTED')
+        throw new PartnerLifecycleConflictError('This renewal has already been decided');
+      const partnerId = parseUuidV7(renewal['partner_user_id'] as string);
+      const kind = renewal['document_kind'] as DocumentKind;
+      const updated = await client.query<Record<string, unknown>>(
+        `UPDATE marketplace.partner_document_renewals
+            SET lifecycle_state=$2, reviewer_user_id=$3, reason_code=$4, note=$5, decided_at=$6
+          WHERE partner_document_renewal_id=$1 RETURNING *`,
+        [
+          input.partner_document_renewal_id,
+          input.decision,
+          reviewerId,
+          input.reason_code,
+          input.note ?? null,
+          now,
+        ],
+      );
+      const application = await client.query<{ partner_application_id: string }>(
+        `SELECT partner_application_id FROM marketplace.partner_applications
+          WHERE applicant_user_id=$1 FOR UPDATE`,
+        [partnerId],
+      );
+      const applicationId = parseUuidV7(application.rows[0]?.partner_application_id as string);
+      if (input.decision === 'APPROVED') {
+        const columns = DOCUMENT_COLUMNS[kind];
+        await client.query(
+          `UPDATE marketplace.partner_applications
+              SET ${columns.reference}=$2, ${columns.expires}=$3, version=version+1, updated_at=$4
+            WHERE partner_application_id=$1`,
+          [applicationId, renewal['document_reference'], renewal['expires_at'], now],
+        );
+        // Restored only when nothing else is expired: another lapsed document
+        // keeps the partner off the road on its own account.
+        const remaining = (await this.documentStanding(partnerId, now, client)).filter(
+          (document) => document.state === 'EXPIRED',
+        );
+        if (remaining.length === 0) {
+          await client.query(
+            `UPDATE marketplace.partner_eligibilities
+                SET state='ELIGIBLE', eligible_until=NULL, reason_code=$2,
+                    version=version+1, updated_at=$3
+              WHERE user_id=$1 AND state='RESTRICTED' AND reason_code='DOCUMENT_EXPIRED'`,
+            [partnerId, `${kind}_RENEWED`, now],
+          );
+        }
+      }
+      await appendApplicationEvent(client, {
+        partner_application_id: applicationId,
+        event_type:
+          input.decision === 'APPROVED' ? 'DOCUMENT_RENEWED' : 'DOCUMENT_RENEWAL_REJECTED',
+        actor_id: reviewerId,
+        previous_state: null,
+        resulting_state: null,
+        reason_code: input.reason_code,
+        note: input.note ?? null,
+        ids,
+      });
+      return projectRenewal(updated.rows[0] as Record<string, unknown>);
+    });
+  }
+
+  /**
+   * The expiry sweep (9.1): a partner whose identity, vehicle or insurance
+   * document has lapsed is restricted from new work -- eligibility
+   * RESTRICTED with the reason DOCUMENT_EXPIRED, recorded on the application
+   * -- until a renewal is approved. A delivery already in their custody is
+   * not touched: the restriction is on offers, and custody obligations stand.
+   */
+  async sweepExpiredDocuments(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+  }): Promise<readonly UuidV7[]> {
+    const actor = input.context.actor;
+    if (actor?.actor_kind !== 'system' && actor?.actor_kind !== 'admin')
+      throw new PartnerLifecycleAuthorizationError();
+    const now = input.now ?? new Date();
+    const ids = contextIds(input.context);
+    return tx(this.#pool, async (client) => {
+      const lapsed = await client.query<{
+        partner_application_id: string;
+        applicant_user_id: string;
+        kinds: string[];
+      }>(
+        `SELECT a.partner_application_id, a.applicant_user_id,
+                array_remove(ARRAY[
+                  CASE WHEN a.identity_expires_at <= $1 THEN 'IDENTITY' END,
+                  CASE WHEN a.vehicle_expires_at <= $1 THEN 'VEHICLE' END,
+                  CASE WHEN a.insurance_expires_at <= $1 THEN 'INSURANCE' END], NULL) AS kinds
+           FROM marketplace.partner_applications a
+           JOIN marketplace.partner_eligibilities e
+             ON e.user_id = a.applicant_user_id AND e.state='ELIGIBLE'
+          WHERE a.lifecycle_state='APPROVED'
+            AND (a.identity_expires_at <= $1 OR a.vehicle_expires_at <= $1
+                 OR a.insurance_expires_at <= $1)
+          FOR UPDATE OF e SKIP LOCKED`,
+        [now],
+      );
+      const restricted: UuidV7[] = [];
+      for (const row of lapsed.rows) {
+        await client.query(
+          `UPDATE marketplace.partner_eligibilities
+              SET state='RESTRICTED', eligible_until=NULL, reason_code='DOCUMENT_EXPIRED',
+                  version=version+1, updated_at=$2
+            WHERE user_id=$1 AND state='ELIGIBLE'`,
+          [row.applicant_user_id, now],
+        );
+        await appendApplicationEvent(client, {
+          partner_application_id: parseUuidV7(row.partner_application_id),
+          event_type: 'DOCUMENT_EXPIRED',
+          actor_id: actor.actor_id,
+          previous_state: null,
+          resulting_state: null,
+          reason_code: 'DOCUMENT_EXPIRED',
+          note: row.kinds.join(', '),
+          ids,
+        });
+        restricted.push(parseUuidV7(row.applicant_user_id));
+      }
+      return Object.freeze(restricted);
+    });
   }
 
   async listOwnRestrictions(input: {

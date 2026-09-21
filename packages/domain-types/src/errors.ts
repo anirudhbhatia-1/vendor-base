@@ -98,6 +98,16 @@ export const ERROR_DEFINITIONS = {
     message_key: 'orders.pickup_otp_exhausted',
     retryable: false,
   },
+  /**
+   * The partner cannot go online: an expired document, a restriction, an
+   * application not yet approved. The profile lists the exact blockers (9.1);
+   * the sentence sends them there.
+   */
+  PARTNER_NOT_ELIGIBLE: {
+    http_status: 409,
+    message_key: 'partner.not_eligible',
+    retryable: false,
+  },
   /** A fallback code cannot displace the live code the collector already holds. */
   CUSTOMER_OTP_ACTIVE: {
     http_status: 409,
@@ -220,6 +230,8 @@ export const ERROR_MESSAGES_EN: Readonly<Record<StableErrorCode, string>> = Obje
     'That collection code has expired. Ask the person collecting to open a fresh one.',
   PICKUP_OTP_EXHAUSTED:
     'Too many wrong attempts. A fresh collection code has to be issued before trying again.',
+  PARTNER_NOT_ELIGIBLE:
+    'You cannot go online yet. Open your profile to see what is stopping you and what to do.',
   CUSTOMER_OTP_ACTIVE:
     'They already have a live collection code. Ask them to read it from their screen.',
   SUBSTITUTION_NOT_ALLOWED:
