@@ -77,6 +77,10 @@ export interface ExceptionEvent {
   readonly exception_kind: ExceptionKind;
   readonly resolution_state: ExceptionResolution;
   readonly evidence_note: string | null;
+  /** Who wrote this row (9.8): the partner reporting, or operations directing. */
+  readonly actor_kind: 'delivery_partner' | 'admin' | 'system' | null;
+  /** What operations told the partner to do, in words, on a directed row. */
+  readonly instruction: string | null;
   readonly reason_code: string;
   readonly occurred_at: Date;
 }
@@ -177,6 +181,8 @@ function projectException(row: Record<string, unknown>): ExceptionEvent {
     exception_kind: row['exception_kind'] as ExceptionKind,
     resolution_state: row['resolution_state'] as ExceptionResolution,
     evidence_note: (row['evidence_note'] as string | null) ?? null,
+    actor_kind: (row['actor_kind'] as ExceptionEvent['actor_kind'] | null) ?? null,
+    instruction: (row['instruction'] as string | null) ?? null,
     reason_code: row['reason_code'] as string,
     occurred_at: row['occurred_at'] as Date,
   });
@@ -410,8 +416,8 @@ export class PartnerFieldOpsService {
         `INSERT INTO marketplace.partner_exception_events
            (partner_exception_event_id, delivery_assignment_id, partner_user_id,
             exception_kind, resolution_state, evidence_note, reason_code,
-            request_id, correlation_id, occurred_at)
-         VALUES ($1,$2,$3,$4,'OPEN',$5,$6,$7,$8,$9)
+            request_id, correlation_id, occurred_at, actor_kind, actor_id)
+         VALUES ($1,$2,$3,$4,'OPEN',$5,$6,$7,$8,$9,'delivery_partner',$3)
          RETURNING *`,
         [
           eventId,
@@ -441,10 +447,18 @@ export class PartnerFieldOpsService {
     readonly resolution_state: Exclude<ExceptionResolution, 'OPEN'>;
     readonly reason_code: string;
     readonly evidence_note?: string;
+    /** Operations' words to the partner (9.8); a partner's own resolution carries none. */
+    readonly instruction?: string;
     readonly now?: Date;
   }): Promise<ExceptionEvent> {
     if (!resolutions.has(input.resolution_state))
       throw new FieldOpsInputError('resolution_state must be a terminal resolution');
+    if (
+      input.instruction !== undefined &&
+      (input.instruction.length < 1 || input.instruction.length > 500)
+    ) {
+      throw new FieldOpsInputError('instruction must be between 1 and 500 characters');
+    }
     if (!reasonCode.test(input.reason_code))
       throw new FieldOpsInputError('reason_code must be shouting-snake-case');
     if (
@@ -466,6 +480,9 @@ export class PartnerFieldOpsService {
       throw new FieldOpsAuthorizationError(
         'Operations decide a return, a cancellation or a reassignment',
       );
+    }
+    if (actorKind === 'delivery_partner' && input.instruction !== undefined) {
+      throw new FieldOpsAuthorizationError('An instruction is operations’ to give');
     }
     const actorId = actor.actor_id;
     const now = input.now ?? new Date();
@@ -494,8 +511,8 @@ export class PartnerFieldOpsService {
         `INSERT INTO marketplace.partner_exception_events
            (partner_exception_event_id, delivery_assignment_id, partner_user_id,
             exception_kind, resolution_state, evidence_note, reason_code,
-            request_id, correlation_id, occurred_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            request_id, correlation_id, occurred_at, actor_kind, actor_id, instruction)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING *`,
         [
           eventId,
@@ -508,6 +525,9 @@ export class PartnerFieldOpsService {
           ids.request,
           ids.correlation,
           now,
+          actorKind,
+          actorId,
+          input.instruction ?? null,
         ],
       );
       return projectException(inserted.rows[0] as Record<string, unknown>);

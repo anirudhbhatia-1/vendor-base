@@ -138,3 +138,45 @@ test('self-scoped field routes do not claim an assignment rule they cannot satis
     );
   }
 });
+
+test('a directed resolution is applied to the attempt before the instruction is written (9.8)', async () => {
+  const { createRequestContext } = await import('@neighbourhood-store/domain-types');
+  const { requestContextStorage } = await import('./request-context-storage.js');
+  const { AdminPartnerExceptionsController } = await import('./partner-lifecycle.controller.js');
+  const calls: string[] = [];
+  const controller = new AdminPartnerExceptionsController(
+    {
+      resolveException: async (input: { resolution_state: string; instruction?: string }) => {
+        calls.push(`resolve:${input.resolution_state}:${input.instruction ?? '-'}`);
+        return { resolution_state: input.resolution_state };
+      },
+    } as never,
+    {
+      direct: async (input: { direction: string; compensation_minor?: number }) => {
+        calls.push(`direct:${input.direction}:${input.compensation_minor ?? '-'}`);
+        return { assignment_state: 'UNASSIGNED' };
+      },
+    } as never,
+  );
+  await requestContextStorage.run(createRequestContext(), async () => {
+    await controller.resolve('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-DIRECT-T1',
+      exception_kind: 'VEHICLE_FAILURE',
+      resolution_state: 'REASSIGN',
+      reason_code: 'OPERATIONS_DIRECTED',
+      instruction: 'Wait with the bag; another partner is coming.',
+      compensation_minor: 500,
+    });
+    await controller.resolve('01a0c40b-070f-7393-8216-0df916eb851f', {
+      command_reference: 'SYNTH-CMD-DIRECT-T2',
+      exception_kind: 'VENDOR_DELAY',
+      resolution_state: 'CONTINUE',
+      reason_code: 'OPERATIONS_DIRECTED',
+    });
+  });
+  assert.deepEqual(calls, [
+    'direct:REASSIGN:500',
+    'resolve:REASSIGN:Wait with the bag; another partner is coming.',
+    'resolve:CONTINUE:-',
+  ]);
+});

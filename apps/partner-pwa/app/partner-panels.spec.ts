@@ -489,3 +489,52 @@ test('the door is reached by fix and by message, never by number (9.6)', () => {
     'an unverified arrival is said, with the code as the proof of the door',
   );
 });
+
+test('the instruction that stands is operations’ latest word per kind (9.8)', async () => {
+  const { standingInstructions } = await import('./field-ops-panel.js');
+  const events = [
+    {
+      partner_exception_event_id: 'e1',
+      exception_kind: 'UNREACHABLE_CUSTOMER' as const,
+      resolution_state: 'OPEN',
+      occurred_at: '2026-09-21T10:00:00.000Z',
+      actor_kind: 'delivery_partner' as const,
+    },
+    {
+      partner_exception_event_id: 'e2',
+      exception_kind: 'UNREACHABLE_CUSTOMER' as const,
+      resolution_state: 'RETRY',
+      occurred_at: '2026-09-21T10:02:00.000Z',
+      actor_kind: 'delivery_partner' as const,
+    },
+    {
+      partner_exception_event_id: 'e3',
+      exception_kind: 'UNREACHABLE_CUSTOMER' as const,
+      resolution_state: 'RETURN_TO_VENDOR',
+      occurred_at: '2026-09-21T10:05:00.000Z',
+      actor_kind: 'admin' as const,
+      instruction: 'Take it back; the customer collects tomorrow.',
+    },
+    {
+      partner_exception_event_id: 'e4',
+      exception_kind: 'VENDOR_DELAY' as const,
+      resolution_state: 'CONTINUE',
+      occurred_at: '2026-09-21T09:00:00.000Z',
+      actor_kind: 'admin' as const,
+    },
+  ];
+  assert.deepEqual(standingInstructions(events), [
+    {
+      kind: 'UNREACHABLE_CUSTOMER',
+      direction: 'Take the order back to the store',
+      instruction: 'Take it back; the customer collects tomorrow.',
+      at: '2026-09-21T10:05:00.000Z',
+    },
+    {
+      kind: 'VENDOR_DELAY',
+      direction: 'Carry on as planned',
+      instruction: null,
+      at: '2026-09-21T09:00:00.000Z',
+    },
+  ]);
+});

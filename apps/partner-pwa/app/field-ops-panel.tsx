@@ -33,7 +33,46 @@ type ExceptionEvent = {
   readonly exception_kind: ExceptionKind;
   readonly resolution_state: string;
   readonly occurred_at: string;
+  /** Who wrote the row and, on a direction, what operations said (9.8). */
+  readonly actor_kind?: 'delivery_partner' | 'admin' | 'system' | null;
+  readonly instruction?: string | null;
 };
+
+/** What each direction means for the partner, in their words (9.8). */
+const DIRECTION_LABEL: Readonly<Record<string, string>> = {
+  RETURN_TO_VENDOR: 'Take the order back to the store',
+  REASSIGN: 'This job is being handed to another partner',
+  CANCEL: 'This delivery is cancelled',
+  CONTINUE: 'Carry on as planned',
+  RETRY: 'Try again',
+  SUPPORT: 'Support is with you on this',
+};
+
+/**
+ * The instruction that stands for each kind: the latest row operations wrote
+ * (9.8). A report the partner closed themselves is not an instruction.
+ */
+export function standingInstructions(events: readonly ExceptionEvent[]): readonly {
+  readonly kind: ExceptionKind;
+  readonly direction: string;
+  readonly instruction: string | null;
+  readonly at: string;
+}[] {
+  const latest = new Map<ExceptionKind, ExceptionEvent>();
+  for (const event of events) {
+    if (event.actor_kind !== 'admin' || event.resolution_state === 'OPEN') continue;
+    const current = latest.get(event.exception_kind);
+    if (!current || Date.parse(event.occurred_at) >= Date.parse(current.occurred_at)) {
+      latest.set(event.exception_kind, event);
+    }
+  }
+  return [...latest.values()].map((event) => ({
+    kind: event.exception_kind,
+    direction: DIRECTION_LABEL[event.resolution_state] ?? event.resolution_state,
+    instruction: event.instruction ?? null,
+    at: event.occurred_at,
+  }));
+}
 
 type OfflineProof = {
   readonly partner_offline_proof_id: string;
@@ -168,6 +207,8 @@ export function FieldOpsPanel({
   const [proofs, setProofs] = useState<readonly OfflineProof[]>([]);
   const [wait, setWait] = useState<WaitTimer | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  // What happened, in the partner's words: evidence beside the report (9.8).
+  const [evidence, setEvidence] = useState('');
   const [emergencyOpen, setEmergencyOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -216,6 +257,10 @@ export function FieldOpsPanel({
   }
 
   const open = exceptions.filter((entry) => entry.resolution_state === 'OPEN');
+  // An instruction stands while a later report of the same kind is not open.
+  const directed = standingInstructions(exceptions).filter(
+    (item) => !open.some((entry) => entry.exception_kind === item.kind),
+  );
   const heldHere = proofs.filter((proof) => proof.delivery_assignment_id === assignmentId);
   // The server's own figure (9.5): the number the handover records and the
   // settlement pays. The screen used to round up where the ledger rounds down,
@@ -241,7 +286,21 @@ export function FieldOpsPanel({
       {message ? <Notice tone="success">{message}</Notice> : null}
       {error ? <Notice tone="danger">{error}</Notice> : null}
 
-      {/* ── Open exceptions and the instruction that stands ───────────────── */}
+      {/* ── The instruction that stands (9.8) ──────────────────────────────── */}
+      {directed.map((item) => (
+        <Card className="exception-card" key={`${item.kind}:${item.at}`} tone="sunken">
+          <div className="ns-row">
+            <StatusPill label={KIND_LABEL[item.kind] ?? item.kind} state="READY" />
+            <span className="ns-eyebrow">operations, {new Date(item.at).toLocaleTimeString()}</span>
+          </div>
+          <p className="exception-card__instruction">
+            <strong>{item.direction}.</strong>
+            {item.instruction ? ` ${item.instruction}` : ''}
+          </p>
+        </Card>
+      ))}
+
+      {/* ── Open exceptions, waiting on an instruction ─────────────────────── */}
       {open.map((entry) => {
         const emergency = EMERGENCY_KINDS.has(entry.exception_kind);
         return (
@@ -424,6 +483,16 @@ export function FieldOpsPanel({
           Tell operations what you are seeing. They send the instruction — you never have to decide
           alone what happens to the order.
         </p>
+        <label className="ns-field">
+          <span className="ns-field__label">What happened? (optional)</span>
+          <textarea
+            className="ns-input"
+            maxLength={500}
+            onChange={(event) => setEvidence(event.target.value)}
+            rows={2}
+            value={evidence}
+          />
+        </label>
         <p className="ns-eyebrow">At the store</p>
         <div className="field-ops__choices">
           {AT_STORE.map(([kind, label]) => (
@@ -439,8 +508,12 @@ export function FieldOpsPanel({
                       body: JSON.stringify({
                         exception_kind: kind,
                         reason_code: 'PARTNER_REPORTED',
+                        ...(evidence.trim() ? { evidence_note: evidence.trim() } : {}),
                       }),
-                    }).then(() => setReportOpen(false)),
+                    }).then(() => {
+                      setReportOpen(false);
+                      setEvidence('');
+                    }),
                   'Reported. Operations will send guidance for this stop.',
                 )
               }
@@ -465,8 +538,12 @@ export function FieldOpsPanel({
                       body: JSON.stringify({
                         exception_kind: kind,
                         reason_code: 'PARTNER_REPORTED',
+                        ...(evidence.trim() ? { evidence_note: evidence.trim() } : {}),
                       }),
-                    }).then(() => setReportOpen(false)),
+                    }).then(() => {
+                      setReportOpen(false);
+                      setEvidence('');
+                    }),
                   'Reported. Operations will send guidance for this stop.',
                 )
               }

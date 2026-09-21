@@ -2134,6 +2134,38 @@ Five requirements, and the step was a façade: the partner app's "I have no sign
 
 **Step 9.7: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 63 (21 September 2026) — step 9.8, guided exceptions and safety
+
+Five requirements. Three held (every path exists and is reachable from the partner's screen; emergencies are ranked first, hold the job and sit behind their own control; no integrity signal moves a partner's standing on its own) and two did not: an operator's "return it to the store", "reassign" and "cancel" were resolution words on the exception that moved nothing on the attempt, and the partner never read them — the card showed only open reports, so the instruction vanished the moment it was given; and no evidence or instruction text existed anywhere. One migration (0105); nine connected assertions, two unit tests; five mutation probes, four caught and one survived on a second guard.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Paths for vendor delay, missing/damaged, unreachable customer, wrong address, unsafe location, accident, medical emergency, threat, vehicle failure, prohibited goods | Met: eleven kinds (with 9.7's `PROOF_SYNC_FAILED`), grouped on the partner's sheet by where they stand. |
+| 2 | End each path in a named retry/continue/return/cancel/reassign/support state | Named, **but a directed state was a word**: nothing returned, reassigned or cancelled the attempt — P63-01. |
+| 3 | Record evidence and current instruction | **Not met:** the report carried no evidence, the resolution no author and no words, and the partner saw no instruction once given — P63-02. |
+| 4 | Avoid automatic guilt from one integrity signal | Met: no code path opens a restriction or moves eligibility from a report; now asserted before and after an unreachable-customer report and an accident. |
+| 5 | Keep emergency handling separate from generic support | Met: the Emergency control is its own, an open emergency holds the job, emergencies rank first in the operations queue. |
+
+**P63-01 — the direction is the transition.** `AssignmentCustodyService.direct` (admin): `RETURN_TO_VENDOR` with goods in hand fails the delivery if it was not already, requires the return and authorises it to the destination given (the store's own reference by default) in one commit — three events under the operator, one return task authorised by them — and is a no-op once returning; `REASSIGN` with nothing in hand takes the attempt back with the compensation decided (`reassign`), and is refused with goods in hand; `CANCEL` with nothing in hand ends the attempt, is refused with goods in hand, and is refused for an attempt in the pool (the schema says a cancelled attempt had a partner; the order is cancelled with the order). The admin route applies the direction before it records the resolution, so the partner never reads an instruction the platform did not carry out.
+
+**P63-02 — evidence and instruction.** 0105 puts `actor_kind`, `actor_id` and `instruction` on the exception event; a report carries the partner's `evidence_note` (the sheet asks "What happened?"); a directed row carries operations' words, which a partner may not write. `standingInstructions` in the partner app shows operations' latest word per kind — "Take the order back to the store. Take it back; the customer collects tomorrow." — until the job ends, while a newer open report of the same kind waits its turn. The operations queue shows the evidence and asks for the instruction, and for the compensation on a reassignment.
+
+**Mutation results.** Five probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| A return direction authorises nothing (old) | *A directed return did not fail, require and authorise the return once* |
+| Goods in hand reassigned by a word | **Survived**: `reassign` itself refuses an attempt with custody, so the direction's own guard is the second of two. Kept, recorded. |
+| A partner may direct | *A partner directed their own return* |
+| The direction does not say who gave it | *The direction did not carry who gave it and what they said* |
+| A partner may write an instruction | *A partner wrote an instruction* |
+
+**Forward findings.** (9.9) The return's destination is a reference; vendor closed/refusal and an alternate safe point are 9.9's. (11.3) The partner's report reaches operations as a queue entry; a support case with messages is the support slice's. (carried) `ZONE` scopes by name; branch protection off; Android arrivals are claims and its shell holds nothing offline.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 106 migration files (0000–0105), full ladder; `assignment_custody` 60 assertions (55 before), `partner_lifecycle` 77 (73). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 585 pass / 0 fail (583 before: the standing instruction and the directed route); `pnpm test:integration` exit 0 on a rebuilt test stack; all five probes on a rebuilt database.
+
+**Step 9.8: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

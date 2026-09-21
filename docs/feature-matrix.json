@@ -4113,7 +4113,7 @@
       "name": "Missing or damaged package flow",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Missing and damaged packages are reported to operations, who direct the outcome",
+      "notes": "Missing and damaged packages are reported with the partner's evidence; operations' direction is applied to the attempt and read by the partner in operations' words (audit run 63)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4139,7 +4139,7 @@
       "name": "Customer unreachable flow",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Customer-unreachable is reported to operations, and the wait timer is available at the customer as well as the store",
+      "notes": "Customer-unreachable is reported to operations, and the wait timer is available at the customer as well as the store; a directed return fails, requires and authorises the return in one commit (audit run 63)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4165,7 +4165,7 @@
       "name": "Wrong-address flow",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Wrong-address reports reach an operations queue that can answer them",
+      "notes": "Wrong-address reports reach an operations queue whose instruction the partner reads, in words, until the job ends (audit run 63)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4191,7 +4191,7 @@
       "name": "Unsafe-location flow",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Unsafe-location reports reach operations; the partner cannot close a safety exception themselves",
+      "notes": "Unsafe-location reports reach operations; the partner cannot close a safety exception themselves; no report moves the partner's standing on its own (audit run 63)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4239,7 +4239,7 @@
       "name": "Return-location fallback",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "A partner reports; operations authorise the return destination and its proof rules",
+      "notes": "A partner reports; operations authorise the return destination and its proof rules -- now as the effect of their direction, not a separate step (audit run 63)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

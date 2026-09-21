@@ -10,6 +10,7 @@ import {
   Post,
 } from '@nestjs/common';
 import {
+  AssignmentCustodyService,
   PartnerFieldOpsService,
   PartnerLifecycleService,
   type DisputeComponent,
@@ -21,11 +22,12 @@ import {
 } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
-import { PARTNER_FIELD_OPS, PARTNER_LIFECYCLE } from './tokens.js';
+import { ASSIGNMENT_CUSTODY, PARTNER_FIELD_OPS, PARTNER_LIFECYCLE } from './tokens.js';
 import {
   dateField,
   integerField,
   object,
+  optionalInteger,
   optionalString,
   stringField,
   uuid,
@@ -420,7 +422,10 @@ export class AdminPartnerDisputeController {
  */
 @Controller('admin/partner-exceptions')
 export class AdminPartnerExceptionsController {
-  constructor(@Inject(PARTNER_FIELD_OPS) private readonly ops: PartnerFieldOpsService) {}
+  constructor(
+    @Inject(PARTNER_FIELD_OPS) private readonly ops: PartnerFieldOpsService,
+    @Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService,
+  ) {}
 
   @Get()
   @adminDeliveryOps
@@ -434,22 +439,53 @@ export class AdminPartnerExceptionsController {
     }
   }
 
-  /** Directs the outcome: return, cancel and reassign live here, not with the partner. */
+  /**
+   * Directs the outcome: return, cancel and reassign live here, not with the
+   * partner -- and they are the transitions they name (9.8), applied on the
+   * attempt before the instruction is written to the exception. A direction
+   * that cannot apply (a cancellation with the goods in hand) is refused
+   * before anything is recorded, so the partner never reads an instruction
+   * the platform did not carry out.
+   */
   @Post(':delivery_assignment_id/resolve')
   @adminDeliveryOps
   @HttpCode(200)
   async resolve(@Param('delivery_assignment_id') id: string, @Body() raw: unknown) {
     const body = object(raw);
+    const resolution = stringField(body, 'resolution_state') as Exclude<
+      ExceptionResolution,
+      'OPEN'
+    >;
+    const context = currentRequestContext();
     try {
+      if (
+        resolution === 'RETURN_TO_VENDOR' ||
+        resolution === 'REASSIGN' ||
+        resolution === 'CANCEL'
+      ) {
+        await this.assignments.direct({
+          command_reference: stringField(body, 'command_reference'),
+          context,
+          delivery_assignment_id: uuid(id),
+          direction: resolution,
+          reason_code: stringField(body, 'reason_code'),
+          ...(optionalString(body, 'destination_reference') !== undefined
+            ? { destination_reference: optionalString(body, 'destination_reference') as string }
+            : {}),
+          ...(optionalInteger(body, 'compensation_minor') !== undefined
+            ? { compensation_minor: optionalInteger(body, 'compensation_minor') as number }
+            : {}),
+        });
+      }
       return await this.ops.resolveException({
-        context: currentRequestContext(),
+        context,
         delivery_assignment_id: uuid(id),
         exception_kind: stringField(body, 'exception_kind') as ExceptionKind,
-        resolution_state: stringField(body, 'resolution_state') as Exclude<
-          ExceptionResolution,
-          'OPEN'
-        >,
+        resolution_state: resolution,
         reason_code: stringField(body, 'reason_code'),
+        ...(optionalString(body, 'instruction') !== undefined
+          ? { instruction: optionalString(body, 'instruction') as string }
+          : {}),
       });
     } catch (error) {
       translateDomainError(error);
@@ -528,6 +564,10 @@ export class PartnerFieldOpsController {
         delivery_assignment_id: uuid(id),
         exception_kind: stringField(body, 'exception_kind') as ExceptionKind,
         reason_code: stringField(body, 'reason_code'),
+        // What happened, in the partner's words (9.8): evidence for the direction.
+        ...(optionalString(body, 'evidence_note') !== undefined
+          ? { evidence_note: optionalString(body, 'evidence_note') as string }
+          : {}),
       });
     } catch (error) {
       translateDomainError(error);

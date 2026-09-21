@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   EmptyState,
+  Field,
   LoadingState,
   Notice,
   Panel,
@@ -31,6 +32,8 @@ type OpenException = {
   readonly is_emergency: boolean;
   readonly source_order_reference: string;
   readonly assignment_state: string;
+  /** What happened, in the partner's words (9.8). */
+  readonly evidence_note?: string | null;
 };
 
 /**
@@ -72,6 +75,10 @@ function shortReference(value: string): string {
 export function PartnerExceptionsPanel() {
   const [open, setOpen] = useState<readonly OpenException[]>([]);
   const [choice, setChoice] = useState<Record<string, string>>({});
+  // The instruction in words (9.8): what the partner reads, beside the
+  // direction the platform carries out.
+  const [instruction, setInstruction] = useState<Record<string, string>>({});
+  const [compensation, setCompensation] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -105,13 +112,23 @@ export function PartnerExceptionsPanel() {
     const resolution = choice[entry.partner_exception_event_id] ?? 'SUPPORT';
     setBusy(entry.partner_exception_event_id);
     setError(null);
+    const words = (instruction[entry.partner_exception_event_id] ?? '').trim();
+    const rupees = Number(compensation[entry.partner_exception_event_id] ?? '0');
     try {
+      // A return, a reassignment or a cancellation is applied to the attempt
+      // before the instruction is written (9.8): the partner never reads a
+      // direction the platform did not carry out.
       await adminRequest(`admin/partner-exceptions/${entry.delivery_assignment_id}/resolve`, {
         method: 'POST',
         body: JSON.stringify({
+          command_reference: `SYNTH-CMD-DIRECT-${Date.now().toString(36).toUpperCase()}`,
           exception_kind: entry.exception_kind,
           resolution_state: resolution,
           reason_code: 'OPERATIONS_DIRECTED',
+          ...(words ? { instruction: words } : {}),
+          ...(resolution === 'REASSIGN' && Number.isFinite(rupees) && rupees > 0
+            ? { compensation_minor: Math.round(rupees * 100) }
+            : {}),
         }),
       });
       setMessage(
@@ -179,6 +196,9 @@ export function PartnerExceptionsPanel() {
                     </p>
                   </div>
                 </div>
+                {entry.evidence_note ? (
+                  <p className="exception-evidence">“{entry.evidence_note}”</p>
+                ) : null}
                 <div className="actions">
                   <SelectField
                     label="Instruction"
@@ -196,6 +216,32 @@ export function PartnerExceptionsPanel() {
                       </option>
                     ))}
                   </SelectField>
+                  <Field
+                    hint="What the partner reads. Say what to do next."
+                    label="In your words"
+                    maxLength={500}
+                    onChange={(event) =>
+                      setInstruction((current) => ({
+                        ...current,
+                        [entry.partner_exception_event_id]: event.target.value,
+                      }))
+                    }
+                    value={instruction[entry.partner_exception_event_id] ?? ''}
+                  />
+                  {(choice[entry.partner_exception_event_id] ?? 'SUPPORT') === 'REASSIGN' ? (
+                    <Field
+                      hint="For the partner this is taken from, in rupees."
+                      inputMode="decimal"
+                      label="Compensation"
+                      onChange={(event) =>
+                        setCompensation((current) => ({
+                          ...current,
+                          [entry.partner_exception_event_id]: event.target.value,
+                        }))
+                      }
+                      value={compensation[entry.partner_exception_event_id] ?? '0'}
+                    />
+                  ) : null}
                   <Button
                     busy={busy === entry.partner_exception_event_id}
                     onClick={() => void direct(entry)}

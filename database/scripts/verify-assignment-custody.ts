@@ -1484,6 +1484,236 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       [strayProof.partner_offline_proof_id, new Date(signalBack.getTime() + 20_000)],
     );
 
+    // 9.8 -- operations' direction is the transition it names. With the goods
+    // in hand a reassignment or a cancellation is refused and a return is
+    // failed, required and authorised in one commit; with nothing in hand a
+    // cancellation ends the attempt and a reassignment takes it back.
+    const directedSeed = await service.create({
+      approximate_drop_area: 'SYNTH Tonk Road Jaipur',
+      approximate_pickup_area: 'SYNTH Jain Stores Jaipur',
+      command_reference: 'SYNTH-CMD-CREATE-DIRECT-H001',
+      context: admin,
+      handling_flags: [],
+      now: new Date(now.getTime() + 3_000_000),
+      package_count: 2,
+      reason_code: 'SYNTH_ASSIGNMENT_CREATED',
+      source_order_reference: 'SYNTH-ORDER-DIRECT-H001',
+      vendor_location_id: locationId,
+    });
+    const directedOffer = await service.offer({
+      command_reference: 'SYNTH-CMD-OFFER-DIRECT-H001',
+      context: admin,
+      delivery_assignment_id: directedSeed.delivery_assignment_id,
+      expected_version: directedSeed.version,
+      expires_at: new Date(now.getTime() + 3_060_000),
+      now: new Date(now.getTime() + 3_000_000),
+      partner_user_id: partnerOneId,
+      reason_code: 'SYNTH_OFFER_CREATED',
+    });
+    let directedJob = await service.accept({
+      command_reference: 'SYNTH-CMD-ACCEPT-DIRECT-H001',
+      context: partnerOne,
+      delivery_assignment_id: directedSeed.delivery_assignment_id,
+      expected_version: directedOffer.version,
+      now: new Date(now.getTime() + 3_001_000),
+      reason_code: 'PARTNER_ACCEPTED',
+    });
+    directedJob = await service.arriveAtVendor({
+      command_reference: 'SYNTH-CMD-ARRIVE-DIRECT-H001',
+      context: partnerOne,
+      delivery_assignment_id: directedJob.delivery_assignment_id,
+      expected_version: directedJob.version,
+      now: new Date(now.getTime() + 3_002_000),
+      position: AT_THE_COUNTER,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    directedJob = await service.confirmPickup({
+      command_reference: 'SYNTH-CMD-PICKUP-DIRECT-H001',
+      context: partnerOne,
+      delivery_assignment_id: directedJob.delivery_assignment_id,
+      expected_version: directedJob.version,
+      now: new Date(now.getTime() + 3_003_000),
+      package_count: 2,
+      proof_reference: 'SYNTH-PROOF-PICKUP-DIRECT-H001',
+      reason_code: 'PICKUP_VERIFIED',
+      vendor_confirmed: true,
+    });
+    const directedAs = async (
+      direction: 'RETURN_TO_VENDOR' | 'REASSIGN' | 'CANCEL',
+      commandReference: string,
+      context = admin,
+    ) =>
+      service
+        .direct({
+          command_reference: commandReference,
+          context,
+          delivery_assignment_id: directedJob.delivery_assignment_id,
+          direction,
+          now: new Date(now.getTime() + 3_004_000),
+          reason_code: 'OPERATIONS_DIRECTED',
+        })
+        .then((record) => record.assignment_state)
+        .catch((error: unknown) =>
+          error instanceof AssignmentConflictError
+            ? 'conflict'
+            : error instanceof AssignmentAuthorizationError
+              ? 'forbidden'
+              : `other:${String(error)}`,
+        );
+    check(
+      (await directedAs('REASSIGN', 'SYNTH-CMD-DIRECT-REASSIGN-H001')) === 'conflict' &&
+        (await directedAs('CANCEL', 'SYNTH-CMD-DIRECT-CANCEL-H001')) === 'conflict',
+      'Goods in the partner’s hands were reassigned or cancelled by a word',
+    );
+    check(
+      (await directedAs('RETURN_TO_VENDOR', 'SYNTH-CMD-DIRECT-RETURN-H001', partnerOne)) ===
+        'forbidden',
+      'A partner directed their own return',
+    );
+    const returned = await service.direct({
+      command_reference: 'SYNTH-CMD-DIRECT-RETURN-H001',
+      context: admin,
+      delivery_assignment_id: directedJob.delivery_assignment_id,
+      direction: 'RETURN_TO_VENDOR',
+      now: new Date(now.getTime() + 3_004_000),
+      reason_code: 'OPERATIONS_DIRECTED',
+    });
+    const returnedAgain = await service.direct({
+      command_reference: 'SYNTH-CMD-DIRECT-RETURN-H001',
+      context: admin,
+      delivery_assignment_id: directedJob.delivery_assignment_id,
+      direction: 'RETURN_TO_VENDOR',
+      now: new Date(now.getTime() + 3_005_000),
+      reason_code: 'OPERATIONS_DIRECTED',
+    });
+    const returnTrail = await pool.query<{
+      events: string;
+      return_state: string | null;
+      destination: string | null;
+      authorized_by: string | null;
+    }>(
+      `SELECT (SELECT string_agg(event_type || ':' || actor_kind, ',' ORDER BY assignment_version)
+                 FROM marketplace.assignment_events
+                WHERE delivery_assignment_id=$1 AND assignment_version > $2) AS events,
+              task.return_state, task.destination_reference AS destination,
+              task.authorized_by_user_id::text AS authorized_by
+         FROM marketplace.return_tasks task WHERE task.delivery_assignment_id=$1`,
+      [directedJob.delivery_assignment_id, directedJob.version],
+    );
+    check(
+      returned.assignment_state === 'RETURN_AUTHORIZED' &&
+        returned.custody_state === 'IN_CUSTODY' &&
+        returnedAgain.version === returned.version &&
+        returnTrail.rows[0]?.events ===
+          'DELIVERY_FAILED:admin,RETURN_REQUIRED:admin,RETURN_AUTHORIZED:admin' &&
+        returnTrail.rows[0].return_state === 'AUTHORIZED' &&
+        returnTrail.rows[0].destination?.startsWith('SYNTH-RETURN-') === true &&
+        returnTrail.rows[0].authorized_by === adminId,
+      `A directed return did not fail, require and authorise the return once (${JSON.stringify({ returned, trail: returnTrail.rows[0] })})`,
+    );
+    // The partner carries it back under the authorisation, as before.
+    directedJob = await service.beginReturn({
+      command_reference: 'SYNTH-CMD-BEGIN-RETURN-DIRECT-H001',
+      context: partnerOne,
+      delivery_assignment_id: directedJob.delivery_assignment_id,
+      expected_version: returned.version,
+      now: new Date(now.getTime() + 3_006_000),
+      reason_code: 'RETURN_ROUTE_STARTED',
+    });
+    directedJob = await service.completeReturn({
+      command_reference: 'SYNTH-CMD-COMPLETE-RETURN-DIRECT-H001',
+      context: partnerOne,
+      delivery_assignment_id: directedJob.delivery_assignment_id,
+      expected_version: directedJob.version,
+      now: new Date(now.getTime() + 3_007_000),
+      proof_reference: 'SYNTH-PROOF-RETURN-DIRECT-H001',
+      reason_code: 'RETURN_PROOF_VERIFIED',
+    });
+    check(directedJob.custody_state === 'RETURNED', 'A directed return did not close custody');
+    // Nothing in hand: a cancellation ends the attempt; a reassignment takes it back.
+    const pooledSeed = await service.create({
+      approximate_drop_area: 'SYNTH Sanganer Jaipur',
+      approximate_pickup_area: 'SYNTH Jain Stores Jaipur',
+      command_reference: 'SYNTH-CMD-CREATE-DIRECT-H002',
+      context: admin,
+      handling_flags: [],
+      now: new Date(now.getTime() + 3_010_000),
+      package_count: 1,
+      reason_code: 'SYNTH_ASSIGNMENT_CREATED',
+      source_order_reference: 'SYNTH-ORDER-DIRECT-H002',
+      vendor_location_id: locationId,
+    });
+    const pooledOffer = await service.offer({
+      command_reference: 'SYNTH-CMD-OFFER-DIRECT-H002',
+      context: admin,
+      delivery_assignment_id: pooledSeed.delivery_assignment_id,
+      expected_version: pooledSeed.version,
+      expires_at: new Date(now.getTime() + 3_070_000),
+      now: new Date(now.getTime() + 3_010_000),
+      partner_user_id: partnerTwoId,
+      reason_code: 'SYNTH_OFFER_CREATED',
+    });
+    const pooledReassigned = await service.direct({
+      command_reference: 'SYNTH-CMD-DIRECT-REASSIGN-H002',
+      compensation_minor: 300,
+      context: admin,
+      delivery_assignment_id: pooledOffer.delivery_assignment_id,
+      direction: 'REASSIGN',
+      now: new Date(now.getTime() + 3_011_000),
+      reason_code: 'OPERATIONS_DIRECTED',
+    });
+    // An attempt in the pool has nobody to cancel it for: refused. Offered
+    // again and accepted, a cancellation ends it and its membership.
+    const pooledCancelRefused = await service
+      .direct({
+        command_reference: 'SYNTH-CMD-DIRECT-CANCEL-H002',
+        context: admin,
+        delivery_assignment_id: pooledOffer.delivery_assignment_id,
+        direction: 'CANCEL',
+        now: new Date(now.getTime() + 3_012_000),
+        reason_code: 'OPERATIONS_DIRECTED',
+      })
+      .then(() => 'admitted')
+      .catch((error: unknown) => (error instanceof AssignmentConflictError ? 'conflict' : 'other'));
+    const secondPooledOffer = await service.offer({
+      command_reference: 'SYNTH-CMD-OFFER-DIRECT-H003',
+      context: admin,
+      delivery_assignment_id: pooledOffer.delivery_assignment_id,
+      expected_version: pooledReassigned.version,
+      expires_at: new Date(now.getTime() + 3_080_000),
+      now: new Date(now.getTime() + 3_013_000),
+      partner_user_id: partnerOneId,
+      reason_code: 'SYNTH_OFFER_CREATED',
+    });
+    await service.accept({
+      command_reference: 'SYNTH-CMD-ACCEPT-DIRECT-H003',
+      context: partnerOne,
+      delivery_assignment_id: pooledOffer.delivery_assignment_id,
+      expected_version: secondPooledOffer.version,
+      now: new Date(now.getTime() + 3_014_000),
+      reason_code: 'PARTNER_ACCEPTED',
+    });
+    const pooledCancelled = await service.direct({
+      command_reference: 'SYNTH-CMD-DIRECT-CANCEL-H003',
+      context: admin,
+      delivery_assignment_id: pooledOffer.delivery_assignment_id,
+      direction: 'CANCEL',
+      now: new Date(now.getTime() + 3_015_000),
+      reason_code: 'OPERATIONS_DIRECTED',
+    });
+    const pooledOwed = await pool.query<{ amount_minor: string }>(
+      `SELECT amount_minor::text FROM marketplace.partner_attempt_compensations
+        WHERE delivery_assignment_id=$1 AND partner_user_id=$2`,
+      [pooledOffer.delivery_assignment_id, partnerTwoId],
+    );
+    check(
+      pooledReassigned.assignment_state === 'UNASSIGNED' &&
+        pooledOwed.rows[0]?.amount_minor === '300' &&
+        pooledCancelRefused === 'conflict' &&
+        pooledCancelled.assignment_state === 'CANCELLED',
+      `Directions with nothing in hand did not take the attempt back and end it (${JSON.stringify({ pooledReassigned, pooledCancelRefused, pooledCancelled, owed: pooledOwed.rows[0] })})`,
+    );
+
     const activeMemberships = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM marketplace.partner_assignment_memberships
         WHERE state='ACTIVE'`,

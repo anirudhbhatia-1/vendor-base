@@ -853,14 +853,29 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
     );
 
     // 9.8 -- guided exceptions
+    const standingSql = `SELECT e.state,
+              (SELECT count(*) FROM marketplace.trust_restriction_cases r
+                WHERE r.subject_kind='PARTNER' AND r.subject_reference=$2)::text AS restrictions
+         FROM marketplace.partner_eligibilities e WHERE e.user_id=$1`;
+    const standingBefore = await pool.query<{ state: string; restrictions: string }>(standingSql, [
+      applicantId,
+      String(applicantId),
+    ]);
     const openException = await fieldOps.raiseException({
       context: partnerContext(applicantId),
       delivery_assignment_id: deliveryAssignmentId,
       exception_kind: 'UNREACHABLE_CUSTOMER',
+      evidence_note: 'SYNTH rang twice, gate locked, no answer on the bell',
       reason_code: 'CUSTOMER_NOT_RESPONDING',
       now,
     });
     check(openException.resolution_state === 'OPEN', 'exception not OPEN');
+    // 9.8 -- the report carries the partner's evidence and says who wrote it.
+    check(
+      openException.actor_kind === 'delivery_partner' &&
+        openException.evidence_note === 'SYNTH rang twice, gate locked, no answer on the bell',
+      `The report did not carry its evidence and author (${JSON.stringify(openException)})`,
+    );
     // Emergency kinds are recorded with the same shape
     await fieldOps.raiseException({
       context: partnerContext(applicantId),
@@ -884,14 +899,46 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       FieldOpsAuthorizationError,
       'A partner was allowed to direct a return on their own assignment',
     );
+    // 9.8 -- an instruction is operations' to give, in words, on their own row.
+    await rejects(
+      () =>
+        fieldOps.resolveException({
+          context: partnerContext(applicantId),
+          delivery_assignment_id: deliveryAssignmentId,
+          exception_kind: 'UNREACHABLE_CUSTOMER',
+          resolution_state: 'RETRY',
+          instruction: 'SYNTH I will decide for myself',
+          reason_code: 'PARTNER_RESOLVED',
+        }),
+      FieldOpsAuthorizationError,
+      'A partner wrote an instruction',
+    );
     const resolvedException = await fieldOps.resolveException({
       context: adminContext(adminId),
       delivery_assignment_id: deliveryAssignmentId,
       exception_kind: 'UNREACHABLE_CUSTOMER',
       resolution_state: 'RETURN_TO_VENDOR',
+      instruction: 'SYNTH Take it back to the store; the customer will collect tomorrow.',
       reason_code: 'CUSTOMER_UNREACHABLE_AFTER_ATTEMPTS',
     });
     check(resolvedException.resolution_state === 'RETURN_TO_VENDOR', 'resolution not recorded');
+    check(
+      resolvedException.actor_kind === 'admin' &&
+        resolvedException.instruction ===
+          'SYNTH Take it back to the store; the customer will collect tomorrow.',
+      `The direction did not carry who gave it and what they said (${JSON.stringify(resolvedException)})`,
+    );
+    // 9.8 -- no automatic guilt: a report, even an emergency, moves no
+    // eligibility and opens no restriction on the partner who made it.
+    const standingAfter = await pool.query<{ state: string; restrictions: string }>(standingSql, [
+      applicantId,
+      String(applicantId),
+    ]);
+    check(
+      standingAfter.rows[0]?.state === standingBefore.rows[0]?.state &&
+        standingAfter.rows[0]?.restrictions === standingBefore.rows[0]?.restrictions,
+      `A report changed the partner's standing on its own (${JSON.stringify({ before: standingBefore.rows[0], after: standingAfter.rows[0] })})`,
+    );
 
     // Resolving with no matching OPEN raises NotFound. Authorization is checked
     // before the lookup — a caller who may not direct a cancellation must not

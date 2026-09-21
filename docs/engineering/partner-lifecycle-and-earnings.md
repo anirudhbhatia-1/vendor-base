@@ -197,6 +197,22 @@ without touching that aggregate:
   blocked while the delivery is open (the active membership) and while a registered proof is
   pending. Until run 62 the app "held" a digest of nothing, sent it to a server it could not reach,
   and syncing it completed no delivery.
+- **A report carries its evidence; a direction is the transition it names (9.8, audit run 63).**
+  Every report kind ends in a named state, but a partner may only close their own with `RETRY`,
+  `CONTINUE` or `SUPPORT`; `RETURN_TO_VENDOR`, `REASSIGN` and `CANCEL` are operations'. A report
+  may carry the partner's `evidence_note`; every row says who wrote it (`actor_kind`, `actor_id`,
+  0105) and a directed row carries operations' `instruction` in words, which a partner may not
+  write. The admin route applies the direction to the attempt before the instruction is recorded
+  (`AssignmentCustodyService.direct`): with goods in hand a return is failed, required and
+  authorised in one commit (destination the store's own reference unless given) and a reassignment
+  or a cancellation is refused; with nothing in hand a reassignment takes the attempt back with
+  the compensation decided and a cancellation ends it; an attempt in the pool has nobody to cancel
+  it for. The partner's app shows the instruction that stands per kind — operations' latest word
+  — until the job ends, and takes the evidence with the report. No report, not even an emergency,
+  moves eligibility or opens a restriction on its own (DLP-47: restrictions are decided cases).
+  Until run 63 an operator's "return it to the store" was a word on the exception that moved
+  nothing, the partner never saw it (the card vanished once the report was no longer open), and
+  no evidence or instruction text existed anywhere.
 - **Support and the emergency control travel with the job (9.4).** The field-ops panel with its
   reports and the always-visible Emergency control sit on the active job; an open safety report
   holds the job's next step.

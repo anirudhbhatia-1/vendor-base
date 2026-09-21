@@ -2165,6 +2165,168 @@ export class AssignmentCustodyService {
     });
   }
 
+  /**
+   * Operations' instruction with its custody effect (9.8). A partner reports;
+   * operations direct; and the direction is not a word in a queue but the
+   * transition it names, in one commit:
+   *
+   * - RETURN_TO_VENDOR: goods in hand -> the delivery is failed if it was not
+   *   already, the return required, and authorised to the destination given
+   *   (the store's own reference by default). Already returning: a no-op.
+   * - REASSIGN: nothing in hand -> the attempt is taken off its partner
+   *   (`reassign`, with the compensation decided). Goods in hand: refused --
+   *   direct a return.
+   * - CANCEL: nothing in hand -> the attempt ends cancelled. Goods in hand:
+   *   refused -- direct a return.
+   *
+   * Until audit run 63 the operator's "return it to the store", "reassign"
+   * and "cancel" were resolution words on the exception and moved nothing.
+   */
+  async direct(input: {
+    readonly command_reference: string;
+    readonly context: RequestContext;
+    readonly delivery_assignment_id: UuidV7;
+    readonly direction: 'RETURN_TO_VENDOR' | 'REASSIGN' | 'CANCEL';
+    readonly reason_code: string;
+    readonly destination_reference?: string;
+    readonly compensation_minor?: number;
+    readonly now?: Date;
+  }): Promise<DeliveryAssignmentRecord> {
+    const who = actor(input.context, ['admin']);
+    const now = input.now ?? new Date();
+    command(input.command_reference);
+    const current = await this.get({
+      context: input.context,
+      delivery_assignment_id: input.delivery_assignment_id,
+    });
+    const inHand = (CUSTODY_STATES as readonly string[]).includes(current.assignment_state);
+    if (input.direction === 'REASSIGN') {
+      if (inHand) {
+        throw new AssignmentConflictError(
+          'The goods are with the partner: direct a return, not a reassignment',
+        );
+      }
+      return this.reassign({
+        command_reference: input.command_reference,
+        compensation_minor: input.compensation_minor ?? 0,
+        context: input.context,
+        delivery_assignment_id: input.delivery_assignment_id,
+        expected_version: current.version,
+        now,
+        reason_code: input.reason_code,
+      });
+    }
+    if (input.direction === 'CANCEL') {
+      if (inHand) {
+        throw new AssignmentConflictError(
+          'The goods are with the partner: direct a return, not a cancellation',
+        );
+      }
+      if (current.assignment_state === 'CANCELLED') return current;
+      if (current.assignment_state === 'UNASSIGNED') {
+        throw new AssignmentConflictError(
+          'Nobody holds this attempt: it is in the pool, and the order is cancelled with the order',
+        );
+      }
+      return this.endBeforePickup({
+        command_reference: input.command_reference,
+        context: input.context,
+        delivery_assignment_id: input.delivery_assignment_id,
+        expected_version: current.version,
+        now,
+        reason_code: input.reason_code,
+        resulting_state: 'CANCELLED',
+      });
+    }
+    // RETURN_TO_VENDOR: fail, require and authorise, as far as it has not gone.
+    return transaction(this.#pool, async (client) => {
+      const lock = async () =>
+        requiredRow(
+          (
+            await client.query<AssignmentRow>(
+              'SELECT * FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1 FOR UPDATE',
+              [input.delivery_assignment_id],
+            )
+          ).rows,
+          'Delivery assignment was not found',
+        );
+      let assignment = await lock();
+      if (['RETURN_AUTHORIZED', 'RETURNING', 'RETURNED'].includes(assignment.assignment_state)) {
+        return assignmentRecord(assignment);
+      }
+      if (
+        ![
+          'PICKED_UP',
+          'EN_ROUTE_TO_CUSTOMER',
+          'ARRIVED',
+          'DELIVERY_FAILED',
+          'RETURN_REQUIRED',
+        ].includes(assignment.assignment_state)
+      ) {
+        throw new AssignmentConflictError('A return is for goods in the partner’s hands');
+      }
+      if (['PICKED_UP', 'EN_ROUTE_TO_CUSTOMER', 'ARRIVED'].includes(assignment.assignment_state)) {
+        await updateAssignment(client, {
+          assignment,
+          command_reference: `${input.command_reference}-FAIL`,
+          context: input.context,
+          event_type: 'DELIVERY_FAILED',
+          next_state: 'DELIVERY_FAILED',
+          now,
+          reason_code: input.reason_code,
+          who,
+        });
+        assignment = await lock();
+      }
+      if (assignment.assignment_state === 'DELIVERY_FAILED') {
+        await client.query(
+          `INSERT INTO marketplace.return_tasks
+            (return_task_id, delivery_assignment_id, return_state, return_reason_code,
+             expected_package_count, created_at, updated_at)
+           VALUES ($1,$2,'REQUIRED',$3,$4,$5,$5)`,
+          [
+            createUuidV7({ now_ms: now.getTime() + 1 }),
+            assignment.delivery_assignment_id,
+            reason(input.reason_code),
+            assignment.package_count,
+            now,
+          ],
+        );
+        await updateAssignment(client, {
+          assignment,
+          command_reference: `${input.command_reference}-REQ`,
+          context: input.context,
+          event_type: 'RETURN_REQUIRED',
+          next_state: 'RETURN_REQUIRED',
+          now,
+          reason_code: input.reason_code,
+          who,
+        });
+        assignment = await lock();
+      }
+      const destination =
+        input.destination_reference ??
+        `SYNTH-RETURN-${assignment.vendor_location_id.replaceAll('-', '').slice(0, 12).toUpperCase()}`;
+      await client.query(
+        `UPDATE marketplace.return_tasks
+            SET return_state='AUTHORIZED', destination_reference=$2,
+                authorized_by_user_id=$3, version=version+1, updated_at=$4
+          WHERE delivery_assignment_id=$1 AND return_state='REQUIRED'`,
+        [assignment.delivery_assignment_id, returnReference(destination), who.id, now],
+      );
+      return updateAssignment(client, {
+        assignment,
+        command_reference: `${input.command_reference}-AUTH`,
+        context: input.context,
+        event_type: 'RETURN_AUTHORIZED',
+        next_state: 'RETURN_AUTHORIZED',
+        now,
+        reason_code: input.reason_code,
+        who,
+      });
+    });
+  }
+
   async failDelivery(input: TransitionInput): Promise<DeliveryAssignmentRecord> {
     const who = actor(input.context, ['admin', 'delivery_partner']);
     const now = input.now ?? new Date();
