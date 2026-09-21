@@ -62,6 +62,25 @@ without touching that aggregate:
   to (`DOCUMENT_EXPIRING`). Going online is refused for the same reasons as
   `PARTNER_NOT_ELIGIBLE`, whose sentence sends the partner to the profile that lists them; until
   run 56 it failed as a bare state conflict.
+- **Who is offered work (9.2, audit run 57).** `PartnerAvailabilityService.eligible` selects
+  partners who are ONLINE and seen within the presence window, ELIGIBLE, on an ACTIVE account,
+  with no lapsed document, under no restriction that reaches the store, within the configured
+  offer radius (`dispatch.offer_radius_metres`, a SETTING, 100–50000 m, default 5000), able to carry
+  the load (a bicycle is passed over for a HEAVY package or more than `BICYCLE_PACKAGE_LIMIT`
+  packages — the smallest honest vehicle rule; the exact algorithm is out of scope for the MVP),
+  and not already on active work; and it offers nobody at all while an incident control pauses
+  delivery (`DELIVERY_PAUSE`, `PARTNER_ASSIGNMENT_PAUSE` or `ZONE_PAUSE`, global or scoped to the
+  store or its zone). Dispatch passes the attempt's package count and handling needs. Until run 57
+  the radius was a constant and the load, the account and incident controls were not looked at.
+- **Presence is privacy-safe (9.2).** The position is recorded while on shift and refreshed by
+  heartbeat; going offline clears it and its accuracy. Availability events carry states and
+  warnings, never coordinates; the partner's own summary carries the active zones — the names of
+  the service zones the position falls in — never the position; dispatch reads a distance. Until
+  run 57 the row kept the last online position after going offline.
+- **The partner's day (9.2).** Trips and earnings today are counted in `PARTNER_DAY_TIMEZONE`
+  (Asia/Kolkata), not the database's date — a delivery at 23:30 IST is that day's; online time
+  today is the availability history's ONLINE spans plus the session in progress; the device
+  warnings (battery, location accuracy) travel with the summary.
 - **Restrictions are capability-specific (9.1).** An ACTIVE trust restriction on a partner keeps
   them off the road and off every offer when `GLOBAL`, off one store's offers when
   `VENDOR_LOCATION`, and off the offers of stores whose active service zone carries that name when

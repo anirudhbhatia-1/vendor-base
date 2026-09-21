@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { onlineTimeSentence } from './profile-panel.js';
 import { earningsToCsv } from './earnings-panel.js';
 import { digestOf } from './field-ops-panel.js';
 
@@ -317,4 +318,13 @@ test('a rider whose phone will not share a position places themselves on the map
     source.includes('(await devicePosition()) ??') && source.includes('manualPosition'),
     'the device is tried first and the map point is the fallback',
   );
+});
+
+test('online time today is read from the history and said in hours and minutes (9.2)', () => {
+  const source = panel('profile-panel.tsx');
+  assert.ok(source.includes('online_seconds_today'), 'the profile shows time on shift');
+  assert.ok(source.includes('active_zones'), 'the active zone is named');
+  assert.equal(onlineTimeSentence(3_600 + 5 * 60), '1 h 5 min');
+  assert.equal(onlineTimeSentence(45), '0 min');
+  assert.equal(onlineTimeSentence(undefined), '0 min');
 });

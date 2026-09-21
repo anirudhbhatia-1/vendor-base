@@ -33,8 +33,21 @@ type Availability = {
   readonly availability_state?: string;
   readonly trips_today?: string;
   readonly earnings_today_minor?: string;
+  /** Seconds on shift today, from the availability history (9.2). */
+  readonly online_seconds_today?: number;
+  /** The service zones the current position falls in, by name (9.2). */
+  readonly active_zones?: readonly string[];
   readonly warning_codes?: readonly string[];
 };
+
+/** Seconds on shift as hours and minutes. */
+export function onlineTimeSentence(seconds: number | undefined): string {
+  const total = Math.max(0, Math.floor(seconds ?? 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (hours === 0) return `${minutes} min`;
+  return `${hours} h ${minutes} min`;
+}
 
 type Application = {
   readonly partner_application_id: string;
@@ -439,6 +452,10 @@ export function PartnerProfilePanel() {
           <Card tone="sunken">
             <p className="ns-eyebrow">Earned today</p>
             <strong>{formatMoneyMinor(Number(availability?.earnings_today_minor ?? '0'))}</strong>
+          </Card>
+          <Card tone="sunken">
+            <p className="ns-eyebrow">Online today</p>
+            <strong>{onlineTimeSentence(availability?.online_seconds_today)}</strong>
           </Card>
           <Card tone="sunken">
             <p className="ns-eyebrow">Completed on record</p>

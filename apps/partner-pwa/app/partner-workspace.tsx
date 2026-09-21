@@ -97,6 +97,8 @@ type Availability = {
   readonly availability_state: string;
   readonly trips_today: string;
   readonly earnings_today_minor: string;
+  readonly online_seconds_today?: number;
+  readonly active_zones?: readonly string[];
   readonly warning_codes: readonly string[];
 };
 
@@ -951,7 +953,14 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
                 <strong>
                   {availability?.trips_today ?? '0'} trips ·{' '}
                   {formatMoneyMinor(Number(availability?.earnings_today_minor ?? '0'))}
+                  {' · '}
+                  {Math.floor((availability?.online_seconds_today ?? 0) / 60)} min online
                 </strong>
+                {/* The active zone (9.2): where the position falls, by name,
+                    which is as much of the position as the screen says. */}
+                {(availability?.active_zones ?? []).length > 0 ? (
+                  <p className="ns-eyebrow">In {(availability?.active_zones ?? []).join(', ')}</p>
+                ) : null}
               </div>
               <Button onClick={() => void refresh()} variant="secondary">
                 Refresh

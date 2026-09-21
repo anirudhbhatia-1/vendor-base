@@ -3419,7 +3419,7 @@
       "name": "Online/offline toggle",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Both PWA and Android call availability API",
+      "notes": "Both PWA and Android call availability API; going online is refused with the exact blockers and going offline clears the position (audit runs 56-57)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3442,7 +3442,7 @@
       "name": "Active-zone selection",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/partner-pwa/app/application-panel.tsx captures the home zone",
+      "notes": "apps/partner-pwa/app/application-panel.tsx captures the home zone; the availability summary names the active zones the current position falls in, by name (audit run 57)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3465,7 +3465,7 @@
       "name": "Daily activity summary",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "trips_today, earnings_today_minor from API",
+      "notes": "trips_today, earnings_today_minor, online_seconds_today and warning_codes from the API, counted in the partner's day (audit run 57)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

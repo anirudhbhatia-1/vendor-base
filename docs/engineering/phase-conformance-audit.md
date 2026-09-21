@@ -1915,6 +1915,44 @@ Five requirements. One held (the seven references are collected and reviewed thr
 
 **Step 9.1: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 57 (21 September 2026) — step 9.2, availability and offer eligibility
+
+Five requirements. Two held (online/offline/paused with a server-side session and presence; a partner on active work is excluded at offer and refused at accept — batch 9's dispatch work), and three did not hold as written: eligibility looked at zone (by restriction, since run 56), document, presence and eligibility but not at the vehicle, the account or incident controls, and its radius was a constant; presence kept the last online position after going offline; and the day's trips and earnings were counted in the database's date. No migration; sixteen connected assertions, one unit test; seven mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Online/offline and active-zone state | Online/offline/paused met. **No active-zone state:** the application's home zone was the only zone the platform knew for a partner — P57-03. |
+| 2 | Select eligible by zone, vehicle, document, account, capacity, incident controls | Zone (restriction), document and capacity met; **vehicle, account and incident controls were not looked at, and the radius was a constant** — P57-01. |
+| 3 | Exclude partners with active work | Met: `eligible()` skips an ACTIVE assignment membership; `accept` refuses a second (unique). |
+| 4 | Privacy-safe location/presence | Distance only to dispatch, no coordinates on events — but **the last online position was kept after going offline**, against the app's own disclosure — P57-02. |
+| 5 | Daily trips, earnings, online time, device guidance | Trips and earnings **in the database's date**, not the partner's day; **no online time today**; device warnings met — P57-03. |
+
+**P57-01 — who is offered.** `eligible()` takes the attempt's `package_count` and `handling_flags` (dispatch passes them) and passes over a bicycle for a HEAVY package or more than `BICYCLE_PACKAGE_LIMIT` (3) packages — the smallest honest vehicle rule, the exact algorithm being out of scope for the MVP (PRD); joins `users.state='ACTIVE'`; reads the radius from `dispatch.offer_radius_metres` (a SETTING, 100–50000 m, default 5000) unless the caller names one; and returns nobody while an ACTIVE `DELIVERY_PAUSE`, `PARTNER_ASSIGNMENT_PAUSE` or `ZONE_PAUSE` incident control reaches the store (global, the store, or its service zone by name). Found beside it: the service accepted any reference-looking string for the seven application references and let the schema's `SYNTH-PARTNER-…` shapes refuse it as a 500; the patterns now match the schema, and a renewal's reference is checked by its document's shape.
+
+**P57-02 — presence.** Going offline clears the position and its accuracy; the summary no longer returns the raw geography.
+
+**P57-03 — the partner's day, and the active zone.** `summary()` counts trips and earnings in `PARTNER_DAY_TIMEZONE` (Asia/Kolkata): a delivery at 23:30 IST is that day's, one at 00:30 IST the next day's — as `::date` in the session's UTC did not (and, bound as a JavaScript date, depended on the host's own time zone, which happens to be IST on the laptop and UTC in the container). It adds `online_seconds_today` from the availability history's ONLINE spans plus the session in progress, and `active_zones`: the names of the active service zones whose boundary holds the position — the active-zone state, and as much of the position as the summary says. The partner's screens show online time and the zone.
+
+**Mutation results.** Seven probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Incident controls ignored (old) | *A paused delivery network still offered work … (1/1)* |
+| Vehicle ignored (old) | *A bicycle was offered a load it cannot carry, or refused one it can* |
+| Constant radius (old) | *The configured offer radius was not applied* |
+| Account state ignored (old) | *A disabled account was still offered work* |
+| Position kept after offline (old) | *Going offline left the last position on record* |
+| The database's date (old) | *A delivery just after midnight IST was not counted in its day (1)* — after the after-midnight case was written; on this IST laptop the first form let it through |
+| Live session not counted | *The summary does not name the active zone with today's online time ({… "online":0})* |
+
+**Environment note.** The laptop was on battery with the lid closed for this run, cycling maintenance sleep between commands; the container VM's clock stalls during each nap and fell minutes behind the host, which made membership checks against `now()` fail mid-ladder. The ladder was re-run with the VM clock kept in step from the host every fifteen seconds; the code under test is unaffected.
+
+**Forward findings.** (9.3) A partner with an open offer can be offered a second attempt; the second accept is refused, the second offer lapses. (11.7) Incident controls are read by dispatch now; whether checkout, vendor and payout paths read theirs is 11.7's audit. (carried) `ZONE` scopes match service zones by name.
+
+**Verification.** `pnpm db:verify` exit 0 — 100 migration files (0000–0099), full ladder; `partner_availability` VERIFY_COUNT assertions (14 after batch 9). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 568 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 9.2: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

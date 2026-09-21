@@ -158,15 +158,18 @@ export interface DisputeCase {
   readonly resolved_at: Date | null;
 }
 
+// The shapes the schema enforces (0027): every reference is a synthetic
+// one in this environment. The service used to accept any reference-looking
+// string and let the database refuse it as a 500 (audit run 57).
 const referencePatterns = {
-  identity: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
-  vehicle: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
-  bank: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
-  insurance: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
-  emergency: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
-  training: /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/,
+  identity: /^SYNTH-PARTNER-IDENTITY-[A-Z0-9-]{4,64}$/,
+  vehicle: /^SYNTH-PARTNER-VEHICLE-[A-Z0-9-]{4,64}$/,
+  bank: /^SYNTH-PARTNER-BANK-[A-Z0-9-]{4,64}$/,
+  insurance: /^SYNTH-PARTNER-INSURANCE-[A-Z0-9-]{4,64}$/,
+  emergency: /^SYNTH-PARTNER-EMERGENCY-[A-Z0-9-]{4,64}$/,
+  training: /^SYNTH-PARTNER-TRAINING-[A-Z0-9-]{4,64}$/,
 };
-const zoneName = /^[\p{L}\p{N}][\p{L}\p{N} &'().,/-]{2,95}$/u;
+const zoneName = /^SYNTH [A-Za-z0-9 &'().,-]{2,95}$/;
 const reasonCode = /^[A-Z][A-Z0-9_]{2,63}$/;
 const vehicleKinds: ReadonlySet<VehicleKind> = new Set([
   'BICYCLE',
@@ -870,8 +873,14 @@ export class PartnerLifecycleService {
     const partnerId = requirePartner(input.context);
     if (!DOCUMENT_KINDS.includes(input.document_kind))
       throw new PartnerLifecycleInputError('document_kind is not allowed');
-    if (!referencePatterns.identity.test(input.document_reference))
-      throw new PartnerLifecycleInputError('document_reference is invalid');
+    const shape =
+      input.document_kind === 'IDENTITY'
+        ? referencePatterns.identity
+        : input.document_kind === 'VEHICLE'
+          ? referencePatterns.vehicle
+          : referencePatterns.insurance;
+    if (!shape.test(input.document_reference))
+      throw new PartnerLifecycleInputError('document_reference is invalid for this document');
     const now = input.now ?? new Date();
     if (
       !(input.expires_at instanceof Date) ||

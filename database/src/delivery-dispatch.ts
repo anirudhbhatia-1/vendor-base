@@ -166,8 +166,11 @@ export class DeliveryDispatchOrchestrator {
       delivery_assignment_id: string;
       vendor_location_id: string;
       version: number;
+      package_count: number;
+      handling_flags: string[];
     }>(
-      `SELECT assignment.delivery_assignment_id, assignment.vendor_location_id, assignment.version
+      `SELECT assignment.delivery_assignment_id, assignment.vendor_location_id, assignment.version,
+              assignment.package_count, assignment.handling_flags
          FROM marketplace.delivery_assignments assignment
          JOIN marketplace.vendor_orders vendor_order
            ON vendor_order.vendor_order_id = assignment.vendor_order_id
@@ -190,7 +193,9 @@ export class DeliveryDispatchOrchestrator {
       const eligible = await this.#availability.eligible({
         context: input.context,
         exclude_partner_user_ids: history.declined,
+        handling_flags: row.handling_flags,
         now,
+        package_count: row.package_count,
         vendor_location_id: parseUuidV7(row.vendor_location_id),
       });
       // Nearest first, but whoever has let this attempt lapse the fewest times

@@ -7,6 +7,7 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
+import { resolveConfiguration } from './versioned-configuration.js';
 export class PartnerAvailabilityInputError extends Error {}
 export class PartnerAvailabilityAuthorizationError extends Error {}
 export class PartnerAvailabilityConflictError extends Error {
@@ -37,6 +38,12 @@ function admin(c: RequestContext) {
  * work until the next heartbeat arrives.
  */
 export const PRESENCE_WINDOW_SECONDS = 5 * 60;
+/** How far from a store dispatch looks for partners when nothing is configured (9.2). */
+export const DEFAULT_OFFER_RADIUS_METRES = 5_000;
+/** Packages beyond this, or a HEAVY package, need more than a bicycle (9.2). */
+export const BICYCLE_PACKAGE_LIMIT = 3;
+/** The day a partner's trips, earnings and online time are counted in. */
+export const PARTNER_DAY_TIMEZONE = 'Asia/Kolkata';
 
 export class PartnerAvailabilityService {
   readonly #pool: Pool;
@@ -134,8 +141,12 @@ export class PartnerAvailabilityService {
       const warnings: string[] = [];
       if ((input.battery_percent ?? 100) < 20) warnings.push('LOW_BATTERY');
       if ((input.accuracy_meters ?? 0) > 100) warnings.push('LOW_LOCATION_ACCURACY');
+      // The position is kept while the partner is on shift and cleared when
+      // they go offline (9.2): the app promises a position recorded when
+      // online, not a last-known one held for ever. Until audit run 57 the row
+      // kept the last online position after going offline.
       const row = await client.query(
-        `INSERT INTO marketplace.partner_availability(partner_user_id,availability_state,current_coordinates,location_accuracy_meters,battery_percent,online_since,accumulated_online_seconds,warning_codes,updated_at,last_seen_at) VALUES($1,$2,CASE WHEN $3::float IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326)::geography END,$5,$6,CASE WHEN $2='ONLINE' THEN $7::timestamptz ELSE NULL END,$8,$9,$7::timestamptz,$7::timestamptz) ON CONFLICT(partner_user_id) DO UPDATE SET availability_state=$2,current_coordinates=COALESCE(EXCLUDED.current_coordinates,partner_availability.current_coordinates),location_accuracy_meters=$5,battery_percent=$6,online_since=CASE WHEN $2='ONLINE' THEN COALESCE(partner_availability.online_since,$7::timestamptz) ELSE NULL END,accumulated_online_seconds=$8,warning_codes=$9,version=partner_availability.version+1,updated_at=$7::timestamptz,last_seen_at=$7::timestamptz RETURNING *`,
+        `INSERT INTO marketplace.partner_availability(partner_user_id,availability_state,current_coordinates,location_accuracy_meters,battery_percent,online_since,accumulated_online_seconds,warning_codes,updated_at,last_seen_at) VALUES($1,$2,CASE WHEN $3::float IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($4,$3),4326)::geography END,$5,$6,CASE WHEN $2='ONLINE' THEN $7::timestamptz ELSE NULL END,$8,$9,$7::timestamptz,$7::timestamptz) ON CONFLICT(partner_user_id) DO UPDATE SET availability_state=$2,current_coordinates=CASE WHEN $2='OFFLINE' THEN NULL ELSE COALESCE(EXCLUDED.current_coordinates,partner_availability.current_coordinates) END,location_accuracy_meters=CASE WHEN $2='OFFLINE' THEN NULL ELSE $5 END,battery_percent=$6,online_since=CASE WHEN $2='ONLINE' THEN COALESCE(partner_availability.online_since,$7::timestamptz) ELSE NULL END,accumulated_online_seconds=$8,warning_codes=$9,version=partner_availability.version+1,updated_at=$7::timestamptz,last_seen_at=$7::timestamptz RETURNING *`,
         [
           id,
           input.state,
@@ -213,23 +224,94 @@ export class PartnerAvailabilityService {
     if (!row) throw new PartnerAvailabilityConflictError('Heartbeat applies while online');
     return { availability_state: row.availability_state, last_seen_at: row.last_seen_at };
   }
+  /**
+   * The partner's own day (9.2): trips and earnings counted in the partner's
+   * day, not the database's (a delivery at 23:30 IST is today's, not
+   * tomorrow's, as `::date` in UTC had it), the seconds online today from the
+   * availability history plus the session in progress, the device warnings,
+   * and the active zones -- the names of the service zones whose boundary
+   * holds the partner's position, which is as much of the position as the
+   * summary says.
+   */
   async summary(input: { context: RequestContext; now?: Date }) {
     const id = partner(input.context);
     const now = input.now ?? new Date();
-    const r = await this.#pool.query(
-      `SELECT a.*,COALESCE((SELECT count(*) FROM marketplace.delivery_assignments d WHERE d.partner_user_id=$1 AND d.assignment_state='DELIVERED' AND d.updated_at::date=$2::date),0)::text trips_today,COALESCE((SELECT sum(net_minor) FROM marketplace.partner_earnings_records e WHERE e.partner_user_id=$1 AND e.created_at::date=$2::date),0)::text earnings_today_minor FROM marketplace.partner_availability a WHERE a.partner_user_id=$1`,
-      [id, now],
+    const r = await this.#pool.query<Record<string, unknown>>(
+      `SELECT a.partner_user_id, a.availability_state, a.location_accuracy_meters,
+              a.battery_percent, a.online_since, a.accumulated_online_seconds::text AS accumulated_online_seconds,
+              a.warning_codes, a.updated_at, a.last_seen_at, a.version,
+              COALESCE((SELECT count(*) FROM marketplace.delivery_assignments d
+                         WHERE d.partner_user_id=$1 AND d.assignment_state='DELIVERED'
+                           AND (d.updated_at AT TIME ZONE $3)::date=($2::timestamptz AT TIME ZONE $3)::date),0)::text AS trips_today,
+              COALESCE((SELECT sum(net_minor) FROM marketplace.partner_earnings_records e
+                         WHERE e.partner_user_id=$1
+                           AND (e.created_at AT TIME ZONE $3)::date=($2::timestamptz AT TIME ZONE $3)::date),0)::text AS earnings_today_minor,
+              COALESCE((SELECT array_agg(DISTINCT z.zone_name ORDER BY z.zone_name)
+                         FROM marketplace.vendor_service_zones z
+                        WHERE z.lifecycle_state='ACTIVE' AND a.current_coordinates IS NOT NULL
+                          AND ST_Covers(z.boundary, a.current_coordinates)), '{}') AS active_zones
+         FROM marketplace.partner_availability a WHERE a.partner_user_id=$1`,
+      [id, now, PARTNER_DAY_TIMEZONE],
     );
-    return (
-      r.rows[0] ?? {
+    const row = r.rows[0];
+    if (!row) {
+      return {
         partner_user_id: id,
         availability_state: 'OFFLINE',
         trips_today: '0',
         earnings_today_minor: '0',
         accumulated_online_seconds: '0',
-        warning_codes: [],
-      }
+        online_seconds_today: 0,
+        active_zones: [] as string[],
+        warning_codes: [] as string[],
+      };
+    }
+    // Seconds online today: each ONLINE decision today runs until the next
+    // decision, or until now for the session in progress.
+    const dayStart = await this.#pool.query<{ start: Date }>(
+      `SELECT (date_trunc('day', $1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2) AS start`,
+      [now, PARTNER_DAY_TIMEZONE],
     );
+    const startOfDay = dayStart.rows[0]?.start ?? now;
+    const events = await this.#pool.query<{ resulting_state: string; occurred_at: Date }>(
+      `SELECT resulting_state, occurred_at FROM marketplace.partner_availability_events
+        WHERE partner_user_id=$1 AND occurred_at >= $2 AND occurred_at <= $3
+        ORDER BY occurred_at`,
+      [id, startOfDay, now],
+    );
+    let onlineSeconds = 0;
+    let onlineFrom: Date | null =
+      row['online_since'] instanceof Date && (row['online_since'] as Date) < startOfDay
+        ? startOfDay
+        : null;
+    for (const event of events.rows) {
+      if (event.resulting_state === 'ONLINE') {
+        onlineFrom = onlineFrom ?? event.occurred_at;
+      } else if (onlineFrom) {
+        onlineSeconds += Math.max(0, (event.occurred_at.getTime() - onlineFrom.getTime()) / 1000);
+        onlineFrom = null;
+      }
+    }
+    if (onlineFrom && row['availability_state'] === 'ONLINE') {
+      onlineSeconds += Math.max(0, (now.getTime() - onlineFrom.getTime()) / 1000);
+    }
+    return { ...row, online_seconds_today: Math.floor(onlineSeconds) };
+  }
+
+  /** The offer radius: `dispatch.offer_radius_metres` (a SETTING, 100-50000), or the default. */
+  async offerRadiusMetres(at?: Date): Promise<number> {
+    const resolved = await resolveConfiguration(this.#pool, {
+      configuration_key: 'dispatch.offer_radius_metres',
+      configuration_kind: 'SETTING',
+      ...(at ? { at } : {}),
+    });
+    const value = resolved?.configuration_value;
+    return typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value >= 100 &&
+      value <= 50_000
+      ? value
+      : DEFAULT_OFFER_RADIUS_METRES;
   }
   /**
    * Clears a partner's availability from a system context.
@@ -300,15 +382,44 @@ export class PartnerAvailabilityService {
   async eligible(input: {
     context: RequestContext;
     vendor_location_id: UuidV7;
+    /** Overrides the configured radius (`dispatch.offer_radius_metres`). */
     radius_meters?: number;
     /** Partners who already declined the attempt being dispatched. */
     exclude_partner_user_ids?: readonly UuidV7[];
+    /** What is to be carried: a heavy or large load needs more than a bicycle. */
+    package_count?: number;
+    handling_flags?: readonly string[];
     now?: Date;
   }) {
     admin(input.context);
-    const radius = Math.min(Math.max(input.radius_meters ?? 5000, 100), 50000);
-    const excluded = input.exclude_partner_user_ids ?? [];
     const now = input.now ?? new Date();
+    const radius = Math.min(
+      Math.max(input.radius_meters ?? (await this.offerRadiusMetres(now)), 100),
+      50000,
+    );
+    const excluded = input.exclude_partner_user_ids ?? [];
+    // Vehicle suitability (9.2): a load a bicycle cannot carry goes to a
+    // motorised partner. The rule is the smallest honest one; the exact
+    // dispatch algorithm is out of scope for the MVP (PRD).
+    const needsMotor =
+      (input.package_count ?? 1) > BICYCLE_PACKAGE_LIMIT ||
+      (input.handling_flags ?? []).includes('HEAVY');
+    // Incident controls (9.2): a paused delivery network, a paused partner
+    // assignment, or a paused zone or store offers nobody. Until audit run 57
+    // dispatch ignored them.
+    const paused = await this.#pool.query(
+      `SELECT 1 FROM marketplace.incident_controls c
+        WHERE c.lifecycle_state='ACTIVE' AND c.expires_at > $2
+          AND c.control_key IN ('DELIVERY_PAUSE','PARTNER_ASSIGNMENT_PAUSE','ZONE_PAUSE')
+          AND (c.scope_kind='GLOBAL'
+               OR (c.scope_kind='VENDOR_LOCATION' AND c.scope_reference=$1::text)
+               OR (c.scope_kind='ZONE' AND EXISTS(SELECT 1 FROM marketplace.vendor_service_zones z
+                     WHERE z.vendor_location_id=$1::uuid AND z.lifecycle_state='ACTIVE'
+                       AND z.zone_name=c.scope_reference)))
+        LIMIT 1`,
+      [String(input.vendor_location_id), now],
+    );
+    if (paused.rows.length > 0) return [];
     // ONLINE alone is not presence: a session that ended without going
     // offline stays ONLINE for ever, at the place it was. Only a partner whose
     // device has confirmed itself inside the window is offered work.
@@ -319,8 +430,8 @@ export class PartnerAvailabilityService {
       // serving that zone by name. An expired document keeps them off until
       // the sweep or a renewal has spoken. Until audit run 56 none of these
       // touched who was offered work.
-      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 WHERE a.availability_state='ONLINE' AND a.last_seen_at>$4::timestamptz AND EXISTS(SELECT 1 FROM marketplace.partner_eligibilities e WHERE e.user_id=a.partner_user_id AND e.state='ELIGIBLE' AND (e.eligible_until IS NULL OR e.eligible_until>$5::timestamptz)) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_applications app WHERE app.applicant_user_id=a.partner_user_id AND app.lifecycle_state='APPROVED' AND (app.identity_expires_at<=$5::timestamptz OR app.vehicle_expires_at<=$5::timestamptz OR app.insurance_expires_at<=$5::timestamptz)) AND NOT EXISTS(SELECT 1 FROM marketplace.trust_restriction_cases r WHERE r.subject_kind='PARTNER' AND r.subject_reference=a.partner_user_id::text AND r.lifecycle_state='ACTIVE' AND r.effective_until>$5::timestamptz AND (r.scope_kind='GLOBAL' OR (r.scope_kind='VENDOR_LOCATION' AND r.scope_reference=l.vendor_location_id::text) OR (r.scope_kind='ZONE' AND EXISTS(SELECT 1 FROM marketplace.vendor_service_zones z WHERE z.vendor_location_id=l.vendor_location_id AND z.lifecycle_state='ACTIVE' AND z.zone_name=r.scope_reference)))) AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') AND NOT (a.partner_user_id = ANY($3::uuid[])) ORDER BY distance_meters LIMIT 50`,
-      [input.vendor_location_id, radius, excluded, seenSince, now],
+      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 JOIN marketplace.users u ON u.user_id=a.partner_user_id AND u.state='ACTIVE' WHERE a.availability_state='ONLINE' AND a.last_seen_at>$4::timestamptz AND EXISTS(SELECT 1 FROM marketplace.partner_eligibilities e WHERE e.user_id=a.partner_user_id AND e.state='ELIGIBLE' AND (e.eligible_until IS NULL OR e.eligible_until>$5::timestamptz)) AND NOT ($6::boolean AND EXISTS(SELECT 1 FROM marketplace.partner_applications bike WHERE bike.applicant_user_id=a.partner_user_id AND bike.vehicle_kind='BICYCLE')) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_applications app WHERE app.applicant_user_id=a.partner_user_id AND app.lifecycle_state='APPROVED' AND (app.identity_expires_at<=$5::timestamptz OR app.vehicle_expires_at<=$5::timestamptz OR app.insurance_expires_at<=$5::timestamptz)) AND NOT EXISTS(SELECT 1 FROM marketplace.trust_restriction_cases r WHERE r.subject_kind='PARTNER' AND r.subject_reference=a.partner_user_id::text AND r.lifecycle_state='ACTIVE' AND r.effective_until>$5::timestamptz AND (r.scope_kind='GLOBAL' OR (r.scope_kind='VENDOR_LOCATION' AND r.scope_reference=l.vendor_location_id::text) OR (r.scope_kind='ZONE' AND EXISTS(SELECT 1 FROM marketplace.vendor_service_zones z WHERE z.vendor_location_id=l.vendor_location_id AND z.lifecycle_state='ACTIVE' AND z.zone_name=r.scope_reference)))) AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') AND NOT (a.partner_user_id = ANY($3::uuid[])) ORDER BY distance_meters LIMIT 50`,
+      [input.vendor_location_id, radius, excluded, seenSince, now, needsMotor],
     );
     return r.rows.map((x) => ({ ...x, partner_user_id: parseUuidV7(x.partner_user_id) }));
   }

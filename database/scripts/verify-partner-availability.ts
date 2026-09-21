@@ -1,17 +1,26 @@
 import {
   createAuthenticatedActor,
   createRequestContext,
+  createRequestId,
   createUuidV7,
   type ActorKind,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import {
+  BICYCLE_PACKAGE_LIMIT,
   PRESENCE_WINDOW_SECONDS,
   PartnerAvailabilityConflictError,
   PartnerAvailabilityService,
 } from '../src/partner-availability.js';
 import { check, rejects } from './verify-support.js';
+import {
+  activateConfigurationVersion,
+  approveConfigurationVersion,
+  createConfigurationDraft,
+  scheduleConfigurationVersion,
+  validateConfigurationVersion,
+} from '../src/versioned-configuration.js';
 
 function context(kind: ActorKind, actorId: UuidV7) {
   return createRequestContext({
@@ -186,12 +195,292 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
       'An offline partner was allowed to heartbeat as present',
     );
     check(summary.trips_today === '0', 'Unexpected trip count in fresh availability fixture');
+    // 9.2 -- privacy: going offline clears the position; the summary carries
+    // the zones the position fell in, never the position itself.
+    const cleared = await pool.query<{ has_position: boolean; accuracy: number | null }>(
+      `SELECT current_coordinates IS NOT NULL AS has_position, location_accuracy_meters AS accuracy
+         FROM marketplace.partner_availability WHERE partner_user_id=$1`,
+      [partnerId],
+    );
+    check(
+      cleared.rows[0]?.has_position === false && cleared.rows[0]?.accuracy === null,
+      `Going offline left the last position on record (${JSON.stringify(cleared.rows)})`,
+    );
+    check(!('current_coordinates' in summary), 'The availability summary carries the raw position');
+    // 9.2 -- online time today: one hour on shift, from the history, in the
+    // partner's day.
+    check(
+      summary.online_seconds_today === 3_600,
+      `Online time today was ${String(summary.online_seconds_today)}, not 3600`,
+    );
 
     const events = await pool.query<{ count: string }>(
       'SELECT count(*)::text AS count FROM marketplace.partner_availability_events WHERE partner_user_id=$1',
       [partnerId],
     );
     check(events.rows[0]?.count === '2', 'Availability event history is incomplete');
+
+    // 9.2 -- the active zone: the summary names the service zones the
+    // partner's position falls in, by name. Back online inside a zone.
+    await pool.query(
+      `INSERT INTO marketplace.vendor_service_zones
+         (service_zone_id,vendor_location_id,zone_name,operating_timezone,boundary,
+          lifecycle_state,request_id,correlation_id)
+       VALUES ($1,$2,'SYNTH Availability Zone','Asia/Kolkata',
+         ST_SetSRID(ST_GeomFromText('MULTIPOLYGON(((75.80 26.90,75.82 26.90,75.82 26.92,75.80 26.92,75.80 26.90)))'),4326)::geography,
+         'ACTIVE',$3,$3)`,
+      [createUuidV7(), locationId, createUuidV7()],
+    );
+    const dayTwo = new Date(offlineAt.getTime() + 86_400_000);
+    await service.set({
+      context: context('delivery_partner', partnerId),
+      state: 'ONLINE',
+      latitude: 26.9102,
+      longitude: 75.8102,
+      accuracy_meters: 20,
+      battery_percent: 80,
+      reason_code: 'PARTNER_STARTED_SHIFT',
+      now: dayTwo,
+    });
+    const zoned = await service.summary({
+      context: context('delivery_partner', partnerId),
+      now: new Date(dayTwo.getTime() + 600_000),
+    });
+    check(
+      Array.isArray(zoned.active_zones) &&
+        zoned.active_zones.includes('SYNTH Availability Zone') &&
+        zoned.online_seconds_today === 600,
+      `The summary does not name the active zone with today's online time (${JSON.stringify({ zones: zoned.active_zones, online: zoned.online_seconds_today })})`,
+    );
+
+    // 9.2 -- trips and earnings are counted in the partner's day. A delivery
+    // at 23:30 IST belongs to that day, though it is the next day's date in
+    // UTC -- as `::date` had it. Now is 00:15 IST the day after.
+    const assignmentId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.delivery_assignments
+        (delivery_assignment_id, source_order_reference, vendor_location_id, partner_user_id,
+         assignment_state, custody_state, package_count, approximate_pickup_area,
+         approximate_drop_area, request_id, correlation_id, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,'DELIVERED','DELIVERED',1,'SYNTH Pickup','SYNTH Drop',$5,$5,$6,$6)`,
+      [
+        assignmentId,
+        `SYNTH-ORDER-AV-${Date.now()}`,
+        locationId,
+        partnerId,
+        createUuidV7(),
+        new Date('2026-08-28T18:00:00.000Z'),
+      ],
+    );
+    const nextDayIst = await service.summary({
+      context: context('delivery_partner', partnerId),
+      now: new Date('2026-08-28T18:45:00.000Z'),
+    });
+    const sameDayIst = await service.summary({
+      context: context('delivery_partner', partnerId),
+      now: new Date('2026-08-28T18:10:00.000Z'),
+    });
+    check(
+      nextDayIst.trips_today === '0' && sameDayIst.trips_today === '1',
+      `Trips are not counted in the partner's day (${nextDayIst.trips_today} after midnight IST, ${sameDayIst.trips_today} before)`,
+    );
+    // And a delivery at 00:30 IST is that day's too, though it is the previous
+    // day's date in UTC: read at 08:30 IST the same day, both count.
+    await pool.query(
+      `INSERT INTO marketplace.delivery_assignments
+        (delivery_assignment_id, source_order_reference, vendor_location_id, partner_user_id,
+         assignment_state, custody_state, package_count, approximate_pickup_area,
+         approximate_drop_area, request_id, correlation_id, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,'DELIVERED','DELIVERED',1,'SYNTH Pickup','SYNTH Drop',$5,$5,$6,$6)`,
+      [
+        createUuidV7(),
+        `SYNTH-ORDER-AV2-${Date.now()}`,
+        locationId,
+        partnerId,
+        createUuidV7(),
+        new Date('2026-08-27T19:00:00.000Z'),
+      ],
+    );
+    const morningIst = await service.summary({
+      context: context('delivery_partner', partnerId),
+      now: new Date('2026-08-28T03:00:00.000Z'),
+    });
+    check(
+      morningIst.trips_today === '2',
+      `A delivery just after midnight IST was not counted in its day (${morningIst.trips_today})`,
+    );
+
+    // 9.2 -- who is offered: by configured radius, by vehicle for the load,
+    // by account, and under no incident control. Until audit run 57 the
+    // radius was a constant, the load and the account were not looked at, and
+    // a paused delivery network still offered work.
+    const later = new Date(dayTwo.getTime() + 60_000);
+    const byDefaultRadius = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      now: later,
+    });
+    check(
+      byDefaultRadius.some((candidate) => candidate.partner_user_id === partnerId),
+      'A partner within the default radius was not offered',
+    );
+    // A tighter configured radius leaves them out (they are ~30 m away; the
+    // configured floor is 100 m, so move them first).
+    await service.heartbeat({
+      context: context('delivery_partner', partnerId),
+      latitude: 26.925,
+      longitude: 75.81,
+      now: later,
+    });
+    const proposerId = createUuidV7();
+    const approverId = createUuidV7();
+    for (const actorId of [proposerId, approverId]) {
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [actorId]);
+    }
+    const radiusDraft = await createConfigurationDraft(pool, {
+      actor_id: proposerId,
+      configuration_key: 'dispatch.offer_radius_metres',
+      configuration_kind: 'SETTING',
+      configuration_value: 1_000,
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: proposerId,
+      configuration_version_id: radiusDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: radiusDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: approverId,
+      configuration_version_id: radiusDraft.configuration_version_id,
+      effective_from: new Date(now.getTime() - 1_000),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: approverId,
+      at: now,
+      configuration_version_id: radiusDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    const byConfiguredRadius = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      now: later,
+    });
+    const byWiderRadius = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      now: later,
+    });
+    check(
+      !byConfiguredRadius.some((candidate) => candidate.partner_user_id === partnerId) &&
+        byWiderRadius.some((candidate) => candidate.partner_user_id === partnerId),
+      'The configured offer radius was not applied',
+    );
+    // Vehicle: this partner applied on a bicycle; a heavy or large load goes
+    // past them.
+    await pool.query(
+      `INSERT INTO marketplace.partner_applications
+         (partner_application_id, applicant_user_id, identity_reference, vehicle_reference,
+          vehicle_kind, bank_account_reference, insurance_reference, emergency_contact_reference,
+          training_reference, home_zone_name, lifecycle_state, request_id, correlation_id,
+          identity_expires_at, vehicle_expires_at, insurance_expires_at,
+          reviewer_user_id, decided_at, submitted_at)
+       VALUES ($1,$2,'SYNTH-PARTNER-IDENTITY-AV01','SYNTH-PARTNER-VEHICLE-AV01','BICYCLE',
+               'SYNTH-PARTNER-BANK-AV01','SYNTH-PARTNER-INSURANCE-AV01',
+               'SYNTH-PARTNER-EMERGENCY-AV01','SYNTH-PARTNER-TRAINING-AV01','SYNTH Jaipur',
+               'APPROVED',$3,$3,$4,$4,$4,$5,$6,$6)`,
+      [
+        createUuidV7(),
+        partnerId,
+        createUuidV7(),
+        new Date(now.getTime() + 365 * 86_400_000),
+        adminId,
+        now,
+      ],
+    );
+    const lightLoad = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      package_count: 2,
+      handling_flags: ['FRAGILE'],
+      now: later,
+    });
+    const heavyLoad = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      package_count: 1,
+      handling_flags: ['HEAVY'],
+      now: later,
+    });
+    const bigLoad = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      package_count: BICYCLE_PACKAGE_LIMIT + 1,
+      now: later,
+    });
+    check(
+      lightLoad.some((candidate) => candidate.partner_user_id === partnerId) &&
+        !heavyLoad.some((candidate) => candidate.partner_user_id === partnerId) &&
+        !bigLoad.some((candidate) => candidate.partner_user_id === partnerId),
+      'A bicycle was offered a load it cannot carry, or refused one it can',
+    );
+    // Incident control: a paused delivery network offers nobody; revoked, it
+    // offers them again.
+    const controlId = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.incident_controls
+         (incident_control_id, control_key, scope_kind, scope_reference, lifecycle_state,
+          reason_code, owner_user_id, expires_at, review_at, obligations, request_id, correlation_id)
+       VALUES ($1,'DELIVERY_PAUSE','GLOBAL','global','ACTIVE','WEATHER',$2,$3,$3,'{}'::jsonb,$4,$4)`,
+      // The row's own check compares against the database's clock, so the
+      // control expires an hour from real now; the search compares against
+      // the walk's synthetic instant, which is earlier still.
+      [controlId, adminId, new Date(Date.now() + 3_600_000), createUuidV7()],
+    );
+    const underPause = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      now: later,
+    });
+    await pool.query(
+      `UPDATE marketplace.incident_controls SET lifecycle_state='REVOKED' WHERE incident_control_id=$1`,
+      [controlId],
+    );
+    const afterPause = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      now: later,
+    });
+    check(
+      underPause.length === 0 &&
+        afterPause.some((candidate) => candidate.partner_user_id === partnerId),
+      `A paused delivery network still offered work, or a revoked pause kept blocking (${underPause.length}/${afterPause.length})`,
+    );
+    // Account: a disabled user is offered nothing.
+    await pool.query(`UPDATE marketplace.users SET state='DISABLED' WHERE user_id=$1`, [partnerId]);
+    const disabled = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      now: later,
+    });
+    check(
+      !disabled.some((candidate) => candidate.partner_user_id === partnerId),
+      'A disabled account was still offered work',
+    );
   } finally {
     await service.close();
     await pool.end();
