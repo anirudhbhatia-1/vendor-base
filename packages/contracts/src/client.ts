@@ -717,6 +717,17 @@ export function createApiClient(options: ApiClientOptions) {
             method: 'POST',
             json: body,
           }),
+
+        /** The store is running late (9.5): more time on the estimate, with a reason. */
+        reportDelay: (
+          vendorLocationId: string,
+          orderId: string,
+          body: { expected_version: number; additional_seconds: number; reason_code: string },
+        ) =>
+          r<VendorOrder>(`/vendor/locations/${vendorLocationId}/orders/${orderId}/report-delay`, {
+            method: 'POST',
+            json: body,
+          }),
       },
 
       inventory: {

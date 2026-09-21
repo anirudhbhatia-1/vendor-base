@@ -116,6 +116,12 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   rider is here", which posts `confirm-partner-arrival` — staff of this store only, for a claimed
   arrival only. The store also carries a `landmark` (settings, 2–120 characters) for the partner
   heading to it: the written way to find the door.
+- **Running late is said (9.5, audit run 60).** `reportDelay` (ACCEPTED or PICKING only; 1 min to
+  2 h; a reason from `DELAY_REASONS`) adds the time to `preparation_estimate_seconds`, so every
+  reading of "ready by" — the offer, the waiting partner, the customer — moves with it; the reason
+  and the time are on the order (`delay_reason_code`, `delay_reported_at`, 0102), a
+  `DELAY_REPORTED` event is in its history, and `vendor_order.delayed` is on the outbox for the
+  notifications slice. The console offers "Running late?" with the minutes and the reason.
 
 ## Deliberate scope decisions
 
@@ -215,7 +221,7 @@ collected and the self-delivered order and no partner earning for either.
 - **`vendor/locations/:vendor_location_id/orders`** (`vendor.order.fulfil`): `accept`, `decline`,
   `start-picking`, `lines/:id/found`, `lines/:id/missing`, `lines/:id/propose-substitution`,
   `lines/:id/propose-weight`, `ready`, `pickup-otp`, `complete-pickup`, `self-delivery/start`,
-  `self-delivery/complete`, `confirm-partner-arrival`, `picks` (list).
+  `self-delivery/complete`, `confirm-partner-arrival`, `report-delay`, `picks` (list).
 - **`customer/decisions/:decision_id/answer`** (`customer.order.decide`).
 - **`customer/orders`** (`customer.order.read`): list groups + vendor_orders; `receipt`; and,
   behind distinct capabilities, `rating` (`customer.order.rate`) and `support`

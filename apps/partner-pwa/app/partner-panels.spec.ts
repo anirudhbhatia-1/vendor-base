@@ -280,7 +280,8 @@ test('an emergency is never offered the options a delivery hiccup gets', () => {
 
 test('a wait that has ended stops counting', () => {
   const source = fs.readFileSync(
-    path.join(directory, '..', '..', '..', 'database', 'src', 'partner-wait-policy.ts'),
+    // The arithmetic moved to the shared wait-timer module in audit run 60.
+    path.join(directory, '..', '..', '..', 'database', 'src', 'wait-timer.ts'),
     'utf8',
   );
   assert.ok(
@@ -428,5 +429,22 @@ test('the store is shown in words with its landmark, and the arrival waits for t
     source.includes('recallAssignments<Assignment>(') &&
       source.includes('staleSentence(staleSince, now)'),
     'the last server-confirmed job is shown, and said to be, when nothing fresher can be had',
+  );
+});
+
+test('the store’s estimate is read to the waiting partner with its reason (9.5)', async () => {
+  const { readyBySentence } = await import('./field-ops-panel.js');
+  const now = Date.parse('2026-09-21T10:00:00.000Z');
+  assert.equal(
+    readyBySentence('2026-09-21T10:12:00.000Z', null, now),
+    'The store says about 12 min more',
+  );
+  assert.equal(
+    readyBySentence('2026-09-21T10:12:00.000Z', 'ITEM_BEING_SOURCED', now),
+    'The store says about 12 min more — running late: item being sourced',
+  );
+  assert.equal(
+    readyBySentence('2026-09-21T09:50:00.000Z', null, now),
+    'The store says it should be ready now',
   );
 });

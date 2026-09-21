@@ -348,6 +348,30 @@ export class VendorOrderFulfilmentController {
     }
   }
 
+  /** The store is running late (9.5): more time on the estimate, with a reason. */
+  @Post(':vendor_order_id/report-delay')
+  @vendorFulfil
+  @HttpCode(200)
+  async reportDelay(
+    @Param('vendor_location_id') locationId: string,
+    @Param('vendor_order_id') orderId: string,
+    @Body() raw: unknown,
+  ) {
+    const body = object(raw);
+    try {
+      return await this.fulfilment.reportDelay({
+        context: currentRequestContext(),
+        vendor_order_id: uuid(orderId),
+        vendor_location_id: uuid(locationId),
+        expected_version: integerField(body, 'expected_version'),
+        additional_seconds: integerField(body, 'additional_seconds'),
+        reason_code: stringField(body, 'reason_code'),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
   @Post(':vendor_order_id/ready')
   @vendorFulfil
   async markReady(

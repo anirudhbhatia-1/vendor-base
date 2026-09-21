@@ -41,6 +41,9 @@ type Order = {
   route_seconds?: number | null;
   route_source?: 'ESTIMATE' | 'MAPBOX' | null;
   delivery_otp_attempts: number;
+  /** The store said it is running late (9.5): why and when. */
+  delay_reason_code?: string | null;
+  delay_reported_at?: string | null;
   collection: {
     readonly delivery_assignment_id?: string;
     readonly assignment_version?: number;
@@ -66,6 +69,15 @@ type Order = {
  * already left after waiting — so an order needing re-dispatch looked exactly
  * like one about to be collected.
  */
+/** Why a store runs late, in the shopkeeper's words (9.5); the codes are the API's. */
+const DELAY_REASON_LABELS: readonly (readonly [string, string])[] = [
+  ['STORE_BUSY', 'We are busy'],
+  ['ITEM_BEING_SOURCED', 'Fetching an item'],
+  ['STAFF_SHORT', 'Short of staff'],
+  ['WEIGHING_OR_PACKING', 'Weighing or packing'],
+  ['OTHER', 'Something else'],
+];
+
 const COLLECTION_LABEL: Record<string, string> = {
   UNASSIGNED: 'Finding a delivery partner',
   OFFERED: 'Offered to a delivery partner',
@@ -307,6 +319,8 @@ function OrderCard({
   const [substituteFor, setSubstituteFor] = useState<Pick | null>(null);
   const [substituteVariant, setSubstituteVariant] = useState('');
   const [preparationMinutes, setPreparationMinutes] = useState('15');
+  const [delayMinutes, setDelayMinutes] = useState(10);
+  const [delayReason, setDelayReason] = useState<string>('STORE_BUSY');
   const [packageCount, setPackageCount] = useState('1');
   const [conditionNote, setConditionNote] = useState('');
   const [handling, setHandling] = useState<readonly string[]>([]);
@@ -522,6 +536,67 @@ function OrderCard({
           >
             Start picking
           </Button>
+        ) : null}
+
+        {/* 9.5: running late is said, not discovered. The extra time moves the
+            estimate the partner and the customer see; the reason goes on the
+            order. Only while the bag is being prepared. */}
+        {order.lifecycle_state === 'ACCEPTED' || order.lifecycle_state === 'PICKING' ? (
+          <div className="ns-row">
+            <label className="ns-field">
+              <span className="ns-field__label">Running late?</span>
+              <select
+                className="ns-input"
+                onChange={(event) => setDelayMinutes(Number(event.target.value))}
+                value={delayMinutes}
+              >
+                <option value={5}>Another 5 min</option>
+                <option value={10}>Another 10 min</option>
+                <option value={15}>Another 15 min</option>
+                <option value={30}>Another 30 min</option>
+              </select>
+            </label>
+            <label className="ns-field">
+              <span className="ns-field__label">Because</span>
+              <select
+                className="ns-input"
+                onChange={(event) => setDelayReason(event.target.value)}
+                value={delayReason}
+              >
+                {DELAY_REASON_LABELS.map(([code, label]) => (
+                  <option key={code} value={code}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Button
+              busy={busy}
+              onClick={() =>
+                void act(
+                  'report-delay',
+                  {
+                    additional_seconds: delayMinutes * 60,
+                    expected_version: order.version,
+                    reason_code: delayReason,
+                  },
+                  'delay',
+                )
+              }
+              variant="secondary"
+            >
+              Tell the partner and customer
+            </Button>
+          </div>
+        ) : null}
+        {order.delay_reason_code ? (
+          <Notice tone="warning">
+            Running late: {humaniseEnum(order.delay_reason_code)}
+            {order.delay_reported_at
+              ? `, said at ${new Date(order.delay_reported_at).toLocaleTimeString()}`
+              : ''}
+            .
+          </Notice>
         ) : null}
 
         {order.lifecycle_state === 'PICKING' ||

@@ -663,6 +663,8 @@ export type DeliveryAssignment = {
   /** When the bag is ready to collect, and the waiting terms, on an offer (9.3). */
   expected_ready_at?: string | null;
   promise_at?: string | null;
+  /** Why the store said it is running late, while the partner is heading there or waiting (9.5). */
+  delay_reason_code?: string | null;
   wait_policy?: {
     included_seconds: number;
     per_completed_minute_minor: number;

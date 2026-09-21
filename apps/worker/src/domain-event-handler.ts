@@ -93,6 +93,9 @@ export const ACKNOWLEDGED_WITHOUT_REACTION: ReadonlySet<string> = new Set([
   'partner.reinstated',
   'vendor.reinstated',
   'vendor.suspended',
+  // The store's delay (9.5): the revised estimate is on the order already;
+  // telling the customer is the notifications slice's.
+  'vendor_order.delayed',
 ]);
 
 /** How long an operator has to answer a returned delivery. */

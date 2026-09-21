@@ -218,6 +218,9 @@ export interface VendorOrderSummary {
    */
   readonly promise_at: Date | null;
   readonly preparation_estimate_seconds: number | null;
+  /** The store said it is running late (9.5): why and when. The estimate carries the revision. */
+  readonly delay_reason_code: string | null;
+  readonly delay_reported_at: Date | null;
   readonly pickup_otp_expires_at: Date | null;
   readonly pickup_otp_attempts: number;
   /**
@@ -389,6 +392,15 @@ interface Ids {
 }
 
 const reasonCode = /^[A-Z][A-Z0-9_]{2,63}$/;
+
+/** Why a store runs late, in the words it can choose from (9.5). */
+export const DELAY_REASONS: readonly string[] = Object.freeze([
+  'STORE_BUSY',
+  'ITEM_BEING_SOURCED',
+  'STAFF_SHORT',
+  'WEIGHING_OR_PACKING',
+  'OTHER',
+]);
 
 function contextIds(context: RequestContext): Ids {
   return {
@@ -911,7 +923,8 @@ const VENDOR_ORDER_SUMMARY_SQL = `
          o.total_minor::text AS total_minor,
          o.version, o.accept_by, o.accepted_at, o.ready_at, o.picked_up_at, o.package_count,
          o.package_condition_note, o.handling_flags, o.pickup_promise_at,
-         o.preparation_estimate_seconds, o.pickup_otp_expires_at,
+         o.preparation_estimate_seconds, o.delay_reason_code, o.delay_reported_at,
+         o.pickup_otp_expires_at,
          o.pickup_otp_attempts, o.out_for_delivery_at, o.delivery_otp_expires_at,
          o.delivery_otp_attempts, o.decline_reason_code,
          method.fulfilment_method, method.route_metres, method.route_seconds, method.route_source,
@@ -991,6 +1004,8 @@ function projectSummary(row: Record<string, unknown>): VendorOrderSummary {
     handling_flags: Object.freeze([...((row['handling_flags'] as string[] | null) ?? [])]),
     promise_at: (row['pickup_promise_at'] as Date | null) ?? null,
     preparation_estimate_seconds: (row['preparation_estimate_seconds'] as number | null) ?? null,
+    delay_reason_code: (row['delay_reason_code'] as string | null) ?? null,
+    delay_reported_at: (row['delay_reported_at'] as Date | null) ?? null,
     pickup_otp_expires_at: (row['pickup_otp_expires_at'] as Date | null) ?? null,
     pickup_otp_attempts: row['pickup_otp_attempts'] as number,
     out_for_delivery_at: (row['out_for_delivery_at'] as Date | null) ?? null,
@@ -1936,6 +1951,80 @@ export class VendorFulfilmentService {
         timedOut.push(parseUuidV7(row.decision_id));
       }
       return Object.freeze(timedOut);
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // 9.5 -- the store is running late
+  // -----------------------------------------------------------------------
+
+  /**
+   * The store says the bag will take longer (9.5, DLP-23/DLP-36). The extra
+   * time lands on the preparation estimate, so every reading of "ready by" --
+   * the offer, the partner waiting at the counter, the customer's tracking --
+   * moves with it; the reason is on the order and in its history. Only while
+   * the bag is being prepared: a READY order has nothing to be late for.
+   */
+  async reportDelay(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly vendor_location_id: UuidV7;
+    readonly expected_version: number;
+    readonly additional_seconds: number;
+    readonly reason_code: string;
+    readonly now?: Date;
+  }): Promise<VendorOrderSummary> {
+    if (
+      !Number.isSafeInteger(input.additional_seconds) ||
+      input.additional_seconds < 60 ||
+      input.additional_seconds > 7_200
+    ) {
+      throw new FulfilmentInputError('A delay is between one minute and two hours');
+    }
+    if (!DELAY_REASONS.includes(input.reason_code)) {
+      throw new FulfilmentInputError(`Delay reason must be among ${DELAY_REASONS.join(', ')}`);
+    }
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const { userId } = await requireVendorMember(client, input.context, input.vendor_location_id);
+      const order = await lockOrder(client, input.vendor_order_id);
+      if (order.vendor_location_id !== input.vendor_location_id)
+        throw new FulfilmentNotFoundError();
+      if (!['ACCEPTED', 'PICKING'].includes(order.lifecycle_state))
+        throw new FulfilmentConflictError('Only an order being prepared can be delayed');
+      if (order.version !== input.expected_version)
+        throw new FulfilmentConflictError('Vendor order version has advanced', 'VERSION_CONFLICT');
+      const version = order.version + 1;
+      const ids = contextIds(input.context);
+      await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET preparation_estimate_seconds = COALESCE(preparation_estimate_seconds, 0) + $2,
+                delay_reason_code=$3, delay_reported_at=$4, version=$5, updated_at=$4
+          WHERE vendor_order_id=$1`,
+        [input.vendor_order_id, input.additional_seconds, input.reason_code, now, version],
+      );
+      await appendEvent(client, {
+        vendor_order_id: input.vendor_order_id,
+        event_type: 'DELAY_REPORTED',
+        actor_id: userId,
+        actor_kind: 'vendor_staff',
+        previous_state: order.lifecycle_state,
+        resulting_state: order.lifecycle_state,
+        reason_code: input.reason_code,
+        note: `Another ${Math.round(input.additional_seconds / 60)} min`,
+        ids,
+      });
+      await publishVendorOrderTransition(client, {
+        context: input.context,
+        event_type: 'vendor_order.delayed',
+        now,
+        payload: { additional_seconds: input.additional_seconds, reason_code: input.reason_code },
+        reason_code: input.reason_code,
+        source: 'vendor_fulfilment',
+        to_state: order.lifecycle_state,
+        vendor_order_id: input.vendor_order_id,
+      });
+      return orderSummary(client, input.vendor_order_id);
     });
   }
 

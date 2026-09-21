@@ -115,6 +115,8 @@ type Assignment = {
     readonly longitude: number;
   } | null;
   readonly arrival_kind?: 'TRUSTED_LOCATION' | 'VENDOR_CONFIRMED' | null;
+  /** Why the store is late, if it said so (9.5); the estimate above moves with it. */
+  readonly delay_reason_code?: string | null;
   /** An arrival the phone could not vouch for, waiting for the store to confirm. */
   readonly arrival_claim?: {
     readonly claimed_at: string;
@@ -479,6 +481,8 @@ function ActiveJob({
       <FieldOpsPanel
         assignmentId={assignment.delivery_assignment_id}
         atVendor={assignment.assignment_state === 'AT_VENDOR'}
+        delayReasonCode={assignment.delay_reason_code ?? null}
+        expectedReadyAt={assignment.expected_ready_at ?? null}
         onChanged={onRefresh}
       />
 

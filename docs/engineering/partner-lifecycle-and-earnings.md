@@ -95,7 +95,8 @@ without touching that aggregate:
   approximate areas, the road it was priced on with its travel time, when the bag is ready to
   collect (`expected_ready_at`: the store's ready time, or its acceptance plus its estimate) and
   the pickup promise, the waiting terms (`wait_policy`: included minutes, the per-minute rate and
-  the cap, from the financial policy) and the handling needs.
+  the cap, from the financial policy in force — resolved, not the compiled-in constant, since run
+  60) and the handling needs.
 - **Acceptance is atomic (9.3).** `accept` locks the attempt row, checks the version, the state,
   the partner and the expiry, then inserts the one ACTIVE membership; two accepts arriving
   together settle to exactly one winner and one ACCEPTED event, the other refused as stale. A
@@ -133,6 +134,28 @@ without touching that aggregate:
   (`VENDOR_CONFIRMED`). Nothing that needs the partner at the counter — the handover, the wait
   timer — happens on a claim. Until run 59 the partner's word from anywhere moved the attempt to
   `AT_VENDOR`. The Android shell has no device fix yet, so its arrivals are claims.
+- **The vendor wait is the server's, and it is paid (9.5, audit run 60).** A trusted or confirmed
+  arrival opens the wait itself (`wait-timer.ts`, one row per partner per attempt since 0102),
+  under the financial policy in force — paid after `wait_included_seconds` at
+  `wait_per_completed_minute_minor`, up to `wait_cap_minor` (the row's `max_credit_seconds` carries
+  the cap as time) — with the leave threshold from `assignment.wait_leave_seconds` (a SETTING,
+  5–60 min, default 600 s). The handover closes it (`RESOLVED`) and writes the
+  `partner_wait_earning_adjustments` row; the settlement carries that amount into the earning's
+  `wait_minor`, the settlement's `PARTNER / WAIT` line and the net, capped by the policy the order
+  was sold under. `credit_minor` on the wait read is the same arithmetic, so the screen's number is
+  the ledger's. Until run 60 the timer was the partner's to remember to start, nothing closed it,
+  and the pay the screen counted never reached an earning.
+- **Leaving the store under the policy (9.5, DLP-36).** At `THRESHOLD_TWO` the partner may leave:
+  `leaveStoreAfterWait` closes the wait (`LEFT_POLICY`) with its pay on record, ends the
+  membership, appends `LEFT_AFTER_WAIT` naming them, and returns the attempt to `UNASSIGNED` for
+  dispatch, which does not offer it to them again; the store keeps its order. Before the threshold
+  the request is refused. The API's `wait/leave` routes by where the partner is: the store (this)
+  or the customer's door (`PartnerWaitPolicyService.leave`, DLP-38). Until run 60 the button the
+  app showed at the store was refused every time.
+- **The store's delay reaches the partner (9.5).** `VendorFulfilmentService.reportDelay` adds
+  time to the preparation estimate with a reason (`DELAY_REASONS`), so the active record's
+  `expected_ready_at` and `delay_reason_code` move with it and the wait card reads "The store says
+  about N min more — running late: …" beside the thresholds, the pay so far and the cap.
 - **Support and the emergency control travel with the job (9.4).** The field-ops panel with its
   reports and the always-visible Emergency control sit on the active job; an open safety report
   holds the job's next step.

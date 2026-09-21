@@ -87,6 +87,8 @@ type WaitTimer = {
   readonly leave_threshold_seconds: number;
   readonly rate_minor_per_minute: number;
   readonly max_credit_seconds: number;
+  /** What the wait is owed so far, by the server's arithmetic (9.5). */
+  readonly credit_minor?: number;
   readonly wait_adjustment_minor: number | null;
   readonly version: number;
 };
@@ -155,6 +157,26 @@ const KIND_LABEL: Readonly<Record<string, string>> = Object.fromEntries(
  * an hour: a timer that had been open a few days showed as `5902:48`, which is
  * not a number anybody can act on.
  */
+/** The store's estimate as the partner reads it, with its reason when it is late (9.5). */
+export function readyBySentence(
+  expectedReadyAt: string,
+  delayReasonCode: string | null,
+  now: number,
+): string {
+  const at = Date.parse(expectedReadyAt);
+  if (Number.isNaN(at)) return 'The store has not said when it will be ready';
+  const remaining = Math.round((at - now) / 60_000);
+  const when =
+    remaining <= 0
+      ? 'The store says it should be ready now'
+      : `The store says about ${remaining} min more`;
+  const because =
+    delayReasonCode === null
+      ? ''
+      : ` — running late: ${delayReasonCode.toLowerCase().replaceAll('_', ' ')}`;
+  return `${when}${because}`;
+}
+
 function minutes(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(safe / 3600);
@@ -167,11 +189,16 @@ function minutes(seconds: number): string {
 export function FieldOpsPanel({
   assignmentId,
   atVendor,
+  expectedReadyAt = null,
+  delayReasonCode = null,
   onChanged,
 }: {
   readonly assignmentId: string;
   /** Drives whether the vendor wait timer is relevant at all (DLP-23). */
   readonly atVendor: boolean;
+  /** The store's own estimate, revised if it reported a delay (9.5). */
+  readonly expectedReadyAt?: string | null;
+  readonly delayReasonCode?: string | null;
   readonly onChanged: () => void;
 }) {
   const [exceptions, setExceptions] = useState<readonly ExceptionEvent[]>([]);
@@ -227,20 +254,24 @@ export function FieldOpsPanel({
 
   const open = exceptions.filter((entry) => entry.resolution_state === 'OPEN');
   const heldHere = proofs.filter((proof) => proof.delivery_assignment_id === assignmentId);
-  // The same arithmetic the server settles with, so the figure on the partner's
-  // screen is the figure they are paid. This used to bill from the first second
-  // and ignore the included period, which over-stated the credit by that period
-  // on every wait until the cap absorbed the difference — a promise about money
-  // that the ledger would not keep.
+  // The server's own figure (9.5): the number the handover records and the
+  // settlement pays. The screen used to round up where the ledger rounds down,
+  // a promise about money the ledger would not keep.
   const waitCredit =
     wait === null
       ? 0
-      : Math.ceil(
+      : (wait.credit_minor ??
+        Math.floor(
           Math.min(
-            wait.max_credit_seconds,
+            wait.max_credit_seconds - wait.first_threshold_seconds,
             Math.max(0, wait.elapsed_seconds - wait.first_threshold_seconds),
           ) / 60,
-        ) * wait.rate_minor_per_minute;
+        ) * wait.rate_minor_per_minute);
+  const capMinor =
+    wait === null
+      ? 0
+      : Math.floor((wait.max_credit_seconds - wait.first_threshold_seconds) / 60) *
+        wait.rate_minor_per_minute;
 
   return (
     <div className="field-ops">
@@ -357,11 +388,22 @@ export function FieldOpsPanel({
                 ? `${formatMoneyMinor(waitCredit)} waiting pay so far`
                 : `Waiting pay starts after ${minutes(wait.first_threshold_seconds)}`}
             </p>
+            {/* The terms, all of them (9.5): when pay starts, when leaving is
+                allowed, and the most a wait pays. */}
+            <p className="ns-field__hint">
+              Paid after {minutes(wait.first_threshold_seconds)} · you may leave after{' '}
+              {minutes(wait.leave_threshold_seconds)} · up to {formatMoneyMinor(capMinor)}
+            </p>
+            {expectedReadyAt ? (
+              <p className="ns-field__hint">
+                {readyBySentence(expectedReadyAt, delayReasonCode, Date.now())}
+              </p>
+            ) : null}
             {wait.elapsed_seconds >= wait.leave_threshold_seconds ? (
               <>
                 <Notice tone="warning">
                   You have waited long enough that you may leave without it counting against you.
-                  Operations will find another partner for this order.
+                  The order goes back to dispatch for another partner; your waiting pay stands.
                 </Notice>
                 <Button
                   busy={busy}
@@ -381,7 +423,7 @@ export function FieldOpsPanel({
                   }
                   variant="secondary"
                 >
-                  Leave and keep my waiting pay
+                  Leave — hand this back to dispatch
                 </Button>
               </>
             ) : null}

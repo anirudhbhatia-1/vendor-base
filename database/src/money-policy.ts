@@ -117,16 +117,18 @@ export function calculateCommissionAmount(itemTotalMinor: number, basisPoints: n
   return safeInteger(Math.min(Number(commission), itemTotalMinor), 'commission amount');
 }
 
-export function calculateWaitingAmount(waitSeconds: number): number {
+export function calculateWaitingAmount(
+  waitSeconds: number,
+  policy: FinancialPolicy = SYNTHETIC_FINANCIAL_POLICY,
+): number {
   safeInteger(waitSeconds, 'wait seconds');
   const completedPaidMinutes = Math.max(
     0,
-    Math.floor(waitSeconds / 60) -
-      Math.floor(SYNTHETIC_FINANCIAL_POLICY.wait_included_seconds / 60),
+    Math.floor(waitSeconds / 60) - Math.floor(policy.wait_included_seconds / 60),
   );
   return Math.min(
-    completedPaidMinutes * SYNTHETIC_FINANCIAL_POLICY.wait_per_completed_minute_minor,
-    SYNTHETIC_FINANCIAL_POLICY.wait_cap_minor,
+    completedPaidMinutes * policy.wait_per_completed_minute_minor,
+    policy.wait_cap_minor,
   );
 }
 

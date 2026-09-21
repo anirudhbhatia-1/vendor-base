@@ -236,6 +236,17 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
         trustedEvent.rows[0]?.reason_code === 'TRUSTED_VENDOR_ARRIVAL',
       `A fix at the counter was not recorded as a trusted arrival (${JSON.stringify({ atVendor, event: trustedEvent.rows[0] })})`,
     );
+    // 9.5 -- the arrival opened the wait itself, under the policy.
+    const waitOpened = await pool.query<{ wait_state: string; started_at: Date }>(
+      `SELECT wait_state, started_at FROM marketplace.partner_wait_timers
+        WHERE delivery_assignment_id=$1 AND partner_user_id=$2`,
+      [first.delivery_assignment_id, partnerOneId],
+    );
+    check(
+      waitOpened.rows[0]?.wait_state === 'RUNNING' &&
+        waitOpened.rows[0].started_at.getTime() === now.getTime() + 10_000,
+      `A trusted arrival did not open the wait (${JSON.stringify(waitOpened.rows[0])})`,
+    );
     let packageMismatchRejected = false;
     try {
       await service.confirmPickup({
@@ -265,6 +276,18 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       vendor_confirmed: true,
     });
     check(pickedUp.custody_state === 'IN_CUSTODY', 'Pickup did not start custody');
+    // 9.5 -- and the handover closed it: two seconds waited, nothing owed, on record.
+    const waitClosed = await pool.query<{ wait_state: string; amount_minor: string | null }>(
+      `SELECT timer.wait_state, owed.amount_minor::text
+         FROM marketplace.partner_wait_timers timer
+         LEFT JOIN marketplace.partner_wait_earning_adjustments owed USING (partner_wait_timer_id)
+        WHERE timer.delivery_assignment_id=$1 AND timer.partner_user_id=$2`,
+      [first.delivery_assignment_id, partnerOneId],
+    );
+    check(
+      waitClosed.rows[0]?.wait_state === 'RESOLVED' && waitClosed.rows[0].amount_minor === '0',
+      `The handover did not close the wait (${JSON.stringify(waitClosed.rows[0])})`,
+    );
     const carrying = (await service.listActiveForPartner({ partner_user_id: partnerOneId })).find(
       (job) => job.delivery_assignment_id === first.delivery_assignment_id,
     );
@@ -961,6 +984,153 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
         fence.arrival_claim === null,
       `The configured arrival radius was not applied (${JSON.stringify(fence)})`,
     );
+    // 9.5 -- leaving the store under the policy. Before the leave threshold
+    // the partner stays; at it they may go: the wait closes with its pay on
+    // record, the attempt returns to the pool, and the partner who left is
+    // not offered it again. The next partner's wait is their own.
+    let earlyLeaveRefused = false;
+    try {
+      await service.leaveStoreAfterWait({
+        command_reference: 'SYNTH-CMD-LEAVE-EARLY-E001',
+        context: partnerTwo,
+        delivery_assignment_id: fence.delivery_assignment_id,
+        expected_version: fence.version,
+        now: new Date(now.getTime() + 65_000 + 9 * 60_000),
+        reason_code: 'PARTNER_LEFT_AFTER_WAIT',
+      });
+    } catch (error) {
+      earlyLeaveRefused = error instanceof AssignmentConflictError;
+    }
+    check(earlyLeaveRefused, 'A partner left the store before the leave threshold');
+    const leaveInput = {
+      command_reference: 'SYNTH-CMD-LEAVE-E001',
+      context: partnerTwo,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: fence.version,
+      now: new Date(now.getTime() + 65_000 + 11 * 60_000),
+      reason_code: 'PARTNER_LEFT_AFTER_WAIT',
+    } as const;
+    const left = await service.leaveStoreAfterWait(leaveInput);
+    const leftAgain = await service.leaveStoreAfterWait({
+      ...leaveInput,
+      now: new Date(now.getTime() + 65_000 + 12 * 60_000),
+    });
+    const leftTrail = await pool.query<{
+      wait_state: string;
+      amount_minor: string | null;
+      eligible_wait_seconds: number | null;
+      memberships: string;
+      event_partner: string | null;
+    }>(
+      `SELECT timer.wait_state, owed.amount_minor::text, owed.eligible_wait_seconds,
+              (SELECT count(*) FROM marketplace.partner_assignment_memberships
+                WHERE delivery_assignment_id=$1 AND state='ACTIVE')::text AS memberships,
+              (SELECT partner_user_id FROM marketplace.assignment_events
+                WHERE delivery_assignment_id=$1 AND event_type='LEFT_AFTER_WAIT') AS event_partner
+         FROM marketplace.partner_wait_timers timer
+         LEFT JOIN marketplace.partner_wait_earning_adjustments owed USING (partner_wait_timer_id)
+        WHERE timer.delivery_assignment_id=$1 AND timer.partner_user_id=$2`,
+      [fence.delivery_assignment_id, partnerTwoId],
+    );
+    check(
+      left.assignment_state === 'UNASSIGNED' &&
+        left.partner_user_id === null &&
+        left.arrival_kind === null &&
+        leftAgain.version === left.version &&
+        leftTrail.rows[0]?.wait_state === 'LEFT_POLICY' &&
+        leftTrail.rows[0].eligible_wait_seconds === 660 &&
+        leftTrail.rows[0].amount_minor === '600' &&
+        leftTrail.rows[0].memberships === '0' &&
+        leftTrail.rows[0].event_partner === partnerTwoId,
+      `Leaving under the policy did not return the attempt with the wait paid on record (${JSON.stringify({ left, trail: leftTrail.rows[0] })})`,
+    );
+    const afterLeave = await service.offerHistory({
+      delivery_assignment_id: fence.delivery_assignment_id,
+    });
+    check(
+      afterLeave.declined.includes(partnerTwoId),
+      'A partner who left under the policy could be offered the same attempt again',
+    );
+    // Operations lengthen the leave threshold; the next wait opens under it,
+    // and it is the next partner's own row on the same attempt.
+    const leaveProposer = createUuidV7();
+    const leaveApprover = createUuidV7();
+    for (const actorId of [leaveProposer, leaveApprover]) {
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [actorId]);
+    }
+    const leaveDraft = await createConfigurationDraft(pool, {
+      actor_id: leaveProposer,
+      configuration_key: 'assignment.wait_leave_seconds',
+      configuration_kind: 'SETTING',
+      configuration_value: 900,
+      correlation_id: createUuidV7(),
+      request_id: createRequestId(),
+      scope: { kind: 'GLOBAL', reference: 'global' },
+    });
+    await validateConfigurationVersion(pool, {
+      actor_id: leaveProposer,
+      configuration_version_id: leaveDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await approveConfigurationVersion(pool, {
+      actor_id: leaveApprover,
+      configuration_version_id: leaveDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    await scheduleConfigurationVersion(pool, {
+      actor_id: leaveApprover,
+      configuration_version_id: leaveDraft.configuration_version_id,
+      effective_from: new Date(now.getTime() + 65_000 + 13 * 60_000),
+      request_id: createRequestId(),
+    });
+    await activateConfigurationVersion(pool, {
+      actor_id: leaveApprover,
+      at: new Date(now.getTime() + 65_000 + 13 * 60_000),
+      configuration_version_id: leaveDraft.configuration_version_id,
+      request_id: createRequestId(),
+    });
+    const secondOffer = await service.offer({
+      command_reference: 'SYNTH-CMD-OFFER-FENCE-E002',
+      context: admin,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: left.version,
+      expires_at: new Date(now.getTime() + 65_000 + 15 * 60_000),
+      now: new Date(now.getTime() + 65_000 + 14 * 60_000),
+      partner_user_id: partnerOneId,
+      reason_code: 'SYNTH_OFFER_CREATED',
+    });
+    fence = await service.accept({
+      command_reference: 'SYNTH-CMD-ACCEPT-FENCE-E002',
+      context: partnerOne,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: secondOffer.version,
+      now: new Date(now.getTime() + 65_000 + 14 * 60_000 + 1_000),
+      reason_code: 'PARTNER_ACCEPTED',
+    });
+    fence = await service.arriveAtVendor({
+      command_reference: 'SYNTH-CMD-ARRIVE-FENCE-E002',
+      context: partnerOne,
+      delivery_assignment_id: fence.delivery_assignment_id,
+      expected_version: fence.version,
+      now: new Date(now.getTime() + 65_000 + 14 * 60_000 + 2_000),
+      position: AT_THE_COUNTER,
+      reason_code: 'PARTNER_CONFIRMED',
+    });
+    const secondWait = await pool.query<{ leave_threshold_seconds: number; count: string }>(
+      `SELECT leave_threshold_seconds,
+              (SELECT count(*) FROM marketplace.partner_wait_timers
+                WHERE delivery_assignment_id=$1)::text AS count
+         FROM marketplace.partner_wait_timers
+        WHERE delivery_assignment_id=$1 AND partner_user_id=$2`,
+      [fence.delivery_assignment_id, partnerOneId],
+    );
+    check(
+      fence.assignment_state === 'AT_VENDOR' &&
+        secondWait.rows[0]?.leave_threshold_seconds === 900 &&
+        secondWait.rows[0].count === '2',
+      `The next partner's wait was not their own, under the configured leave threshold (${JSON.stringify(secondWait.rows[0])})`,
+    );
+
     // Leave nothing active: the operator takes the attempt back.
     await service.reassign({
       command_reference: 'SYNTH-CMD-REASSIGN-FENCE-E001',
@@ -968,7 +1138,7 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       context: admin,
       delivery_assignment_id: fence.delivery_assignment_id,
       expected_version: fence.version,
-      now: new Date(now.getTime() + 66_000),
+      now: new Date(now.getTime() + 65_000 + 15 * 60_000),
       reason_code: 'OPERATOR_REASSIGNED',
     });
 

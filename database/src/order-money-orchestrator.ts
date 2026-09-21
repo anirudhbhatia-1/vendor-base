@@ -169,9 +169,17 @@ export class OrderMoneyOrchestrator {
       refunded_minor: string;
       policy_version_reference: string;
       quoted_at: Date;
+      wait_minor: string;
     }>(
       `SELECT assignment.delivery_assignment_id, assignment.partner_user_id,
               assignment.package_count,
+              -- What the partner's wait at the counter was owed (9.5), as the
+              -- handover recorded it; nothing when there was no wait to pay.
+              COALESCE((SELECT wait.amount_minor
+                          FROM marketplace.partner_wait_earning_adjustments wait
+                         WHERE wait.delivery_assignment_id = assignment.delivery_assignment_id
+                           AND wait.partner_user_id = assignment.partner_user_id), 0)::text
+                AS wait_minor,
               -- The road the order was priced on, from the quote (0085). A quote
               -- older than routing carries none and falls back to the line.
               COALESCE(quote_group.route_metres::bigint,
@@ -227,6 +235,7 @@ export class OrderMoneyOrchestrator {
     const tip = Number(row.tip_minor ?? '0');
     let earningPosted = false;
     let outbound = 0;
+    let waitMinor = 0;
 
     if (row.delivery_assignment_id && row.partner_user_id) {
       const metres = Math.min(
@@ -241,7 +250,11 @@ export class OrderMoneyOrchestrator {
         policy,
       );
       outbound = earning.total_minor;
-      const net = earning.base_minor + earning.distance_minor + tip;
+      // The wait was measured and priced at the counter under the policy in
+      // force then; the settlement carries it, capped by the policy the order
+      // was sold under so a later change cannot inflate it.
+      waitMinor = Math.min(Math.max(Number(row.wait_minor), 0), policy.wait_cap_minor);
+      const net = earning.base_minor + earning.distance_minor + waitMinor + tip;
       // The unique key on delivery_assignment_id makes a replayed delivery
       // harmless: the second attempt inserts nothing and posts nothing.
       const inserted = await this.#pool.query<{ partner_earnings_record_id: string }>(
@@ -249,7 +262,7 @@ export class OrderMoneyOrchestrator {
           (partner_earnings_record_id,delivery_assignment_id,partner_user_id,outcome,
            base_minor,distance_minor,time_minor,wait_minor,return_minor,incentive_minor,
            tip_minor,adjustment_minor,net_minor,request_id,correlation_id,created_at,updated_at)
-         VALUES ($1,$2,$3,'DELIVERED',$4,$5,0,0,0,0,$6,0,$7,$8,$9,$10,$10)
+         VALUES ($1,$2,$3,'DELIVERED',$4,$5,0,$11,0,0,$6,0,$7,$8,$9,$10,$10)
          ON CONFLICT (delivery_assignment_id) DO NOTHING
          RETURNING partner_earnings_record_id`,
         [
@@ -263,6 +276,7 @@ export class OrderMoneyOrchestrator {
           request,
           correlation,
           now,
+          waitMinor,
         ],
       );
       const record = inserted.rows[0];
@@ -286,9 +300,7 @@ export class OrderMoneyOrchestrator {
       partner_outbound_minor: outbound,
       partner_return_minor: 0,
       partner_tip_minor: tip,
-      // Waiting time is measured by the partner wait policy and is not yet
-      // carried into the earning; it stays zero rather than being guessed.
-      partner_wait_minor: 0,
+      partner_wait_minor: waitMinor,
       payment_transaction_id: parseUuidV7(row.payment_transaction_id),
       source_order_reference: row.order_reference,
       successful_refunds_minor: Number(row.refunded_minor),

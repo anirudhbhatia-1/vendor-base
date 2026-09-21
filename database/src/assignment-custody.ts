@@ -8,12 +8,14 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { randomInt } from 'node:crypto';
-import { calculatePartnerOfferEarning, SYNTHETIC_FINANCIAL_POLICY } from './money-policy.js';
+import { calculatePartnerOfferEarning } from './money-policy.js';
 import { completeVendorOrder } from './vendor-order-completion.js';
 import { Pool, type PoolClient } from 'pg';
 import { transaction } from './transaction.js';
 import { handoverCodeDigest, handoverDigestsMatch } from './handover-code.js';
 import { resolveConfiguration } from './versioned-configuration.js';
+import { resolveFinancialPolicy } from './financial-policy.js';
+import { closeWaitTimer, openWaitTimer, waitStage, waitLeaveSeconds } from './wait-timer.js';
 
 export type AssignmentState =
   | 'ARRIVED'
@@ -59,6 +61,8 @@ export interface DeliveryAssignmentRecord {
   readonly expected_ready_at?: Date | null;
   /** When the order is promised to the customer, once the shop has made the promise. */
   readonly promise_at?: Date | null;
+  /** Why the store said it is running late, while the partner is heading there or waiting (9.5). */
+  readonly delay_reason_code?: string | null;
   /** The waiting policy the partner is paid under, from the financial policy in force. */
   readonly wait_policy?: {
     readonly included_seconds: number;
@@ -304,6 +308,11 @@ function assignmentRecord(row: AssignmentRow): DeliveryAssignmentRecord {
     vendor_order_id: row.vendor_order_id ? parseUuidV7(row.vendor_order_id) : null,
     version: row.version,
   });
+}
+
+function displaced_partner(assignment: AssignmentRow): UuidV7 {
+  if (!assignment.partner_user_id) throw new AssignmentConflictError('The attempt has no partner');
+  return parseUuidV7(assignment.partner_user_id);
 }
 
 /** The states in which the assigned partner is on their way to, or at, the store. */
@@ -617,6 +626,9 @@ export class AssignmentCustodyService {
     readonly now?: Date;
   }): Promise<readonly DeliveryAssignmentRecord[]> {
     const now = input.now ?? new Date();
+    // The waiting terms on the offer are the policy in force (9.3, 9.5): the
+    // same terms the wait is opened under at the counter.
+    const { policy } = await resolveFinancialPolicy(this.#pool, { at: now });
     const rows = await this.#pool.query<{
       delivery_assignment_id: string;
       source_order_reference: string;
@@ -698,9 +710,9 @@ export class AssignmentCustodyService {
         expected_ready_at: row.expected_ready_at ?? null,
         promise_at: row.promise_at ?? null,
         wait_policy: Object.freeze({
-          included_seconds: SYNTHETIC_FINANCIAL_POLICY.wait_included_seconds,
-          per_completed_minute_minor: SYNTHETIC_FINANCIAL_POLICY.wait_per_completed_minute_minor,
-          cap_minor: SYNTHETIC_FINANCIAL_POLICY.wait_cap_minor,
+          included_seconds: policy.wait_included_seconds,
+          per_completed_minute_minor: policy.wait_per_completed_minute_minor,
+          cap_minor: policy.wait_cap_minor,
         }),
         delivery_assignment_id: parseUuidV7(row.delivery_assignment_id),
         source_order_reference: row.source_order_reference,
@@ -744,10 +756,19 @@ export class AssignmentCustodyService {
         store_description: string | null;
         store_latitude: string | null;
         store_longitude: string | null;
+        expected_ready_at: Date | null;
+        delay_reason_code: string | null;
       }
     >(
       `SELECT assignment.*,
               ${OPEN_EMERGENCY_SQL.replaceAll('$2', '$3')} AS open_emergency,
+              CASE WHEN assignment.assignment_state = ANY($4::text[])
+                   THEN COALESCE(orders.ready_at,
+                                 orders.accepted_at
+                                   + make_interval(secs => COALESCE(orders.preparation_estimate_seconds, 0)))
+                   END AS expected_ready_at,
+              CASE WHEN assignment.assignment_state = ANY($4::text[])
+                   THEN orders.delay_reason_code END AS delay_reason_code,
               CASE WHEN assignment.assignment_state = ANY($4::text[])
                    THEN store.location_name END AS store_name,
               CASE WHEN assignment.assignment_state = ANY($4::text[])
@@ -798,6 +819,9 @@ export class AssignmentCustodyService {
       const record = Object.freeze({
         ...assignmentRecord(row),
         open_emergency: row.open_emergency,
+        ...(row.expected_ready_at !== null
+          ? { expected_ready_at: row.expected_ready_at, delay_reason_code: row.delay_reason_code }
+          : {}),
         ...(row.store_name !== null && row.store_latitude !== null && row.store_longitude !== null
           ? {
               pickup_location: Object.freeze({
@@ -1195,7 +1219,8 @@ export class AssignmentCustodyService {
         WHERE delivery_assignment_id=$1
           AND ((event_type='DECLINED' AND actor_kind='delivery_partner')
                OR (event_type='OFFER_EXPIRED' AND partner_user_id IS NOT NULL)
-               OR (event_type='REASSIGNED' AND actor_kind='admin' AND partner_user_id IS NOT NULL))`,
+               OR (event_type='REASSIGNED' AND actor_kind='admin' AND partner_user_id IS NOT NULL)
+               OR (event_type='LEFT_AFTER_WAIT' AND partner_user_id IS NOT NULL))`,
       [input.delivery_assignment_id],
     );
     const declined = new Set<UuidV7>();
@@ -1203,7 +1228,10 @@ export class AssignmentCustodyService {
     for (const row of rows.rows) {
       if (row.event_type === 'DECLINED') {
         declined.add(parseUuidV7(row.actor_id));
-      } else if (row.event_type === 'REASSIGNED' && row.partner_user_id) {
+      } else if (
+        (row.event_type === 'REASSIGNED' || row.event_type === 'LEFT_AFTER_WAIT') &&
+        row.partner_user_id
+      ) {
         declined.add(parseUuidV7(row.partner_user_id));
       } else if (row.partner_user_id) {
         const partner = parseUuidV7(row.partner_user_id);
@@ -1380,6 +1408,7 @@ export class AssignmentCustodyService {
             WHERE delivery_assignment_id=$1 RETURNING *`,
           [assignment.delivery_assignment_id, now, distance],
         );
+        await this.#openWait(client, input.context, assignment, who.id, now);
         return assignmentRecord(requiredRow(result.rows, 'Arrived attempt was not returned'));
       }
       const reasonForClaim: ArrivalClaimReason =
@@ -1475,7 +1504,103 @@ export class AssignmentCustodyService {
           WHERE delivery_assignment_id=$1 RETURNING *`,
         [assignment.delivery_assignment_id, now],
       );
+      await this.#openWait(client, input.context, assignment, displaced_partner(assignment), now);
       return assignmentRecord(requiredRow(result.rows, 'Confirmed attempt was not returned'));
+    });
+  }
+
+  /**
+   * The vendor wait starts when the arrival is recorded (9.5): the server's
+   * clock, under the policy in force, from the moment presence was trusted
+   * or confirmed. Until audit run 60 it was the partner's to remember to
+   * start, so a partner who did not press the button waited unpaid.
+   */
+  async #openWait(
+    client: PoolClient,
+    context: RequestContext,
+    assignment: AssignmentRow,
+    partnerUserId: UuidV7,
+    now: Date,
+  ): Promise<void> {
+    const { policy } = await resolveFinancialPolicy(client, { at: now });
+    await openWaitTimer(client, {
+      context,
+      delivery_assignment_id: parseUuidV7(assignment.delivery_assignment_id),
+      partner_user_id: partnerUserId,
+      policy,
+      leave_threshold_seconds: await waitLeaveSeconds(client, now),
+      reason_code: 'ARRIVAL_AT_STORE',
+      now,
+    });
+  }
+
+  /**
+   * Leaving the store under the policy (9.5, DLP-36). Once the wait has
+   * reached its leave threshold the partner may go: the wait closes with what
+   * it is owed on record, the membership ends, the attempt returns to the
+   * pool for another partner -- not this one -- and the store keeps its order.
+   * Until audit run 60 the only "leave" was the customer's door, so at the
+   * store the button the app showed was refused.
+   */
+  async leaveStoreAfterWait(input: TransitionInput): Promise<DeliveryAssignmentRecord> {
+    const who = actor(input.context, ['delivery_partner']);
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const prior = await replay(client, {
+        command_reference: input.command_reference,
+        delivery_assignment_id: input.delivery_assignment_id,
+        event_type: 'LEFT_AFTER_WAIT',
+      });
+      if (prior) return prior;
+      const assignment = await lockAssignment(
+        client,
+        input.delivery_assignment_id,
+        input.expected_version,
+      );
+      this.#assertPartner(assignment, who.id);
+      if (assignment.assignment_state !== 'AT_VENDOR' || assignment.custody_state !== 'NONE') {
+        throw new AssignmentConflictError('Leaving under the policy is for a partner at the store');
+      }
+      const wait = await client.query<Parameters<typeof waitStage>[0]>(
+        `SELECT * FROM marketplace.partner_wait_timers
+          WHERE delivery_assignment_id=$1 AND partner_user_id=$2 FOR UPDATE`,
+        [assignment.delivery_assignment_id, who.id],
+      );
+      const open = wait.rows[0];
+      if (!open || waitStage(open, now) !== 'THRESHOLD_TWO') {
+        throw new AssignmentConflictError('Leave policy threshold has not been reached');
+      }
+      await closeWaitTimer(client, {
+        context: input.context,
+        delivery_assignment_id: input.delivery_assignment_id,
+        partner_user_id: who.id,
+        outcome: 'LEFT_POLICY',
+        command_reference: input.command_reference,
+        reason_code: input.reason_code,
+        now,
+      });
+      await endMembership(client, assignment, now, input.reason_code);
+      await appendEvent(client, {
+        assignment,
+        command_reference: input.command_reference,
+        context: input.context,
+        event_type: 'LEFT_AFTER_WAIT',
+        next_custody_state: 'NONE',
+        next_state: 'UNASSIGNED',
+        now,
+        reason_code: input.reason_code,
+        who,
+      });
+      const result = await client.query<AssignmentRow>(
+        `UPDATE marketplace.delivery_assignments
+            SET assignment_state='UNASSIGNED', partner_user_id=NULL, offer_expires_at=NULL,
+                custody_state='NONE', arrival_kind=NULL, arrived_at=NULL,
+                arrival_distance_metres=NULL, arrival_claimed_at=NULL, arrival_claim_reason=NULL,
+                version=version+1, updated_at=$2
+          WHERE delivery_assignment_id=$1 RETURNING *`,
+        [assignment.delivery_assignment_id, now],
+      );
+      return assignmentRecord(requiredRow(result.rows, 'Left attempt was not returned'));
     });
   }
   async beginRoute(input: TransitionInput): Promise<DeliveryAssignmentRecord> {
@@ -1553,6 +1678,17 @@ export class AssignmentCustodyService {
           ],
         );
       }
+      // The vendor wait ends at the handover (9.5): closed by the server with
+      // what it is owed on record, for the settlement to carry.
+      await closeWaitTimer(client, {
+        context: input.context,
+        delivery_assignment_id: input.delivery_assignment_id,
+        partner_user_id: who.id,
+        outcome: 'RESOLVED',
+        command_reference: null,
+        reason_code: 'HANDOVER_COMPLETED',
+        now,
+      });
       return updateAssignment(client, {
         assignment,
         command_reference: input.command_reference,

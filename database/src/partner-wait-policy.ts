@@ -7,26 +7,23 @@ import {
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
+import { resolveFinancialPolicy } from './financial-policy.js';
+import {
+  appendWaitEvent,
+  closeWaitTimer,
+  openWaitTimer,
+  waitCreditMinor,
+  waitElapsedSeconds,
+  waitLeaveSeconds,
+  type WaitTimerRow,
+} from './wait-timer.js';
 
 export class PartnerWaitAuthorizationError extends Error {}
 export class PartnerWaitConflictError extends Error {}
 export class PartnerWaitNotFoundError extends Error {}
 export class PartnerWaitInputError extends Error {}
 
-type WaitState = 'RUNNING' | 'THRESHOLD_ONE' | 'THRESHOLD_TWO' | 'LEFT_POLICY' | 'RESOLVED';
-type WaitRow = {
-  partner_wait_timer_id: string;
-  delivery_assignment_id: string;
-  partner_user_id: string;
-  wait_state: WaitState;
-  started_at: Date;
-  first_threshold_seconds: number;
-  leave_threshold_seconds: number;
-  max_credit_seconds: number;
-  rate_minor_per_minute: number;
-  ended_at: Date | null;
-  version: number;
-};
+type WaitRow = WaitTimerRow;
 
 function actor(context: RequestContext) {
   const found = context.actor;
@@ -60,8 +57,7 @@ function ids(context: RequestContext) {
  * beside it grew with it.
  */
 function elapsed(row: WaitRow, now: Date) {
-  const until = row.ended_at ?? now;
-  return Math.max(0, Math.floor((until.getTime() - row.started_at.getTime()) / 1000));
+  return waitElapsedSeconds(row, now);
 }
 function project(row: WaitRow, now: Date, adjustmentMinor?: number) {
   return {
@@ -72,9 +68,19 @@ function project(row: WaitRow, now: Date, adjustmentMinor?: number) {
     started_at: row.started_at.toISOString(),
     ended_at: row.ended_at?.toISOString() ?? null,
     elapsed_seconds: elapsed(row, now),
+    // What the wait is owed so far, by the same arithmetic the handover and
+    // the settlement use (9.5): the screen's number is the ledger's number.
+    credit_minor: waitCreditMinor(row, now),
     wait_adjustment_minor: adjustmentMinor ?? null,
   };
 }
+/**
+ * This partner's wait on this attempt -- or, for operations, the latest. An
+ * attempt is re-offered after a partner leaves, so the wait is keyed by both.
+ */
+const WAIT_FOR_ACTOR_SQL = `SELECT * FROM marketplace.partner_wait_timers
+  WHERE delivery_assignment_id=$1 AND ($2::uuid IS NULL OR partner_user_id=$2::uuid)
+  ORDER BY started_at DESC LIMIT 1`;
 function requiredRow<T>(row: T | undefined, message: string): T {
   if (!row) throw new Error(message);
   return row;
@@ -93,6 +99,12 @@ export class PartnerWaitPolicyService {
     await this.#pool.end();
   }
 
+  /**
+   * Starts a wait where the server has not already (9.5). At the store the
+   * arrival opens the wait itself; this remains for the customer's door
+   * (DLP-38) and for an attempt that reached the counter before that rule.
+   * A wait already open is returned, not refused.
+   */
   async start(input: {
     context: RequestContext;
     delivery_assignment_id: UuidV7;
@@ -103,7 +115,7 @@ export class PartnerWaitPolicyService {
     const who = actor(input.context);
     if (who.actor_kind !== 'delivery_partner') throw new PartnerWaitAuthorizationError();
     const now = input.now ?? new Date();
-    const contextIds = ids(input.context);
+    command(input.command_reference);
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
@@ -114,51 +126,25 @@ export class PartnerWaitPolicyService {
       const assigned = assignment.rows[0];
       if (!assigned) throw new PartnerWaitNotFoundError();
       if (assigned.partner_user_id !== who.actor_id) throw new PartnerWaitNotFoundError();
-      // Waiting happens at two real points, and this only ever admitted the
-      // second one. DLP-23 and DLP-36 are the *vendor* wait — architecture
-      // §10.1 puts WAITING between AT_VENDOR and PICKUP_VERIFIED — so a partner
-      // standing in a shop that is not ready could never start their timer and
-      // never accrued waiting pay. ARRIVED stays valid because a customer who
-      // cannot be reached is also a wait the partner is owed for (DLP-38).
+      // Waiting happens at two real points: the store (AT_VENDOR, DLP-23 and
+      // DLP-36) and the customer's door (ARRIVED, DLP-38).
       if (!['AT_VENDOR', 'ARRIVED'].includes(assigned.assignment_state)) {
         throw new PartnerWaitConflictError(
           'Waiting can start once you are at the store or at the customer',
         );
       }
-      const timerId = createUuidV7({ now_ms: now.getTime() });
-      let inserted;
-      try {
-        inserted = await client.query<WaitRow>(
-          `INSERT INTO marketplace.partner_wait_timers
-            (partner_wait_timer_id,delivery_assignment_id,partner_user_id,started_at,
-             first_threshold_seconds,leave_threshold_seconds,max_credit_seconds,
-             rate_minor_per_minute,request_id,correlation_id,created_at,updated_at)
-           VALUES($1,$2,$3,$4,300,600,3600,100,$5,$6,$4,$4) RETURNING *`,
-          [
-            timerId,
-            input.delivery_assignment_id,
-            who.actor_id,
-            now,
-            contextIds.request,
-            contextIds.correlation,
-          ],
-        );
-      } catch (error) {
-        if ((error as { code?: string }).code === '23505') {
-          throw new PartnerWaitConflictError('A wait timer already exists for this assignment');
-        }
-        throw error;
-      }
-      const created = requiredRow(inserted.rows[0], 'Wait timer insert returned no row');
-      await this.#event(client, created, input.context, {
-        event_type: 'STARTED',
-        elapsed_seconds: 0,
-        command_reference: command(input.command_reference),
+      const { policy } = await resolveFinancialPolicy(client, { at: now });
+      const row = await openWaitTimer(client, {
+        context: input.context,
+        delivery_assignment_id: input.delivery_assignment_id,
+        partner_user_id: parseUuidV7(who.actor_id),
+        policy,
+        leave_threshold_seconds: await waitLeaveSeconds(client, now),
         reason_code: reason(input.reason_code),
         now,
       });
       await client.query('COMMIT');
-      return project(created, now);
+      return project(row, now);
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -173,14 +159,13 @@ export class PartnerWaitPolicyService {
       `SELECT timer.*,adjustment.amount_minor::text
          FROM marketplace.partner_wait_timers timer
          LEFT JOIN marketplace.partner_wait_earning_adjustments adjustment USING(partner_wait_timer_id)
-        WHERE timer.delivery_assignment_id=$1`,
-      [input.delivery_assignment_id],
+        WHERE timer.delivery_assignment_id=$1
+          AND ($2::uuid IS NULL OR timer.partner_user_id=$2::uuid)
+        ORDER BY timer.started_at DESC LIMIT 1`,
+      [input.delivery_assignment_id, who.actor_kind === 'delivery_partner' ? who.actor_id : null],
     );
     const row = result.rows[0];
     if (!row) throw new PartnerWaitNotFoundError();
-    if (who.actor_kind === 'delivery_partner' && row.partner_user_id !== who.actor_id) {
-      throw new PartnerWaitNotFoundError();
-    }
     return project(
       row,
       input.now ?? new Date(),
@@ -220,15 +205,12 @@ export class PartnerWaitPolicyService {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const found = await client.query<WaitRow>(
-        'SELECT * FROM marketplace.partner_wait_timers WHERE delivery_assignment_id=$1 FOR UPDATE',
-        [input.delivery_assignment_id],
-      );
+      const found = await client.query<WaitRow>(`${WAIT_FOR_ACTOR_SQL} FOR UPDATE`, [
+        input.delivery_assignment_id,
+        who.actor_kind === 'delivery_partner' ? who.actor_id : null,
+      ]);
       const row = found.rows[0];
       if (!row) throw new PartnerWaitNotFoundError();
-      if (who.actor_kind === 'delivery_partner' && row.partner_user_id !== who.actor_id) {
-        throw new PartnerWaitNotFoundError();
-      }
       const updated = await this.#advanceLocked(client, row, input.context, now);
       await client.query('COMMIT');
       return project(updated, now);
@@ -253,15 +235,20 @@ export class PartnerWaitPolicyService {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const found = await client.query<WaitRow>(
-        'SELECT * FROM marketplace.partner_wait_timers WHERE delivery_assignment_id=$1 FOR UPDATE',
-        [input.delivery_assignment_id],
-      );
+      const found = await client.query<WaitRow>(`${WAIT_FOR_ACTOR_SQL} FOR UPDATE`, [
+        input.delivery_assignment_id,
+        who.actor_id,
+      ]);
       let row = found.rows[0];
-      if (!row || row.partner_user_id !== who.actor_id) throw new PartnerWaitNotFoundError();
+      if (!row) throw new PartnerWaitNotFoundError();
       if (row.wait_state === 'LEFT_POLICY') {
+        const owed = await client.query<{ amount_minor: string }>(
+          `SELECT amount_minor::text FROM marketplace.partner_wait_earning_adjustments
+            WHERE partner_wait_timer_id=$1`,
+          [row.partner_wait_timer_id],
+        );
         await client.query('COMMIT');
-        return project(row, now);
+        return project(row, now, Number(owed.rows[0]?.amount_minor ?? '0'));
       }
       row = await this.#advanceLocked(client, row, input.context, now);
       if (row.wait_state !== 'THRESHOLD_TWO') {
@@ -276,6 +263,9 @@ export class PartnerWaitPolicyService {
         [input.delivery_assignment_id],
       );
       const assigned = assignment.rows[0];
+      // This is the customer's door (DLP-38). Leaving the *store* under the
+      // policy returns the attempt to the pool and is the custody service's
+      // (`leaveStoreAfterWait`, 9.5); the API routes by where the partner is.
       if (
         !assigned ||
         assigned.assignment_state !== 'ARRIVED' ||
@@ -283,31 +273,19 @@ export class PartnerWaitPolicyService {
       ) {
         throw new PartnerWaitConflictError('Assignment is no longer eligible for policy leave');
       }
-      const seconds = Math.min(
-        row.max_credit_seconds,
-        Math.max(0, elapsed(row, now) - row.first_threshold_seconds),
-      );
-      const amount = Math.ceil(seconds / 60) * row.rate_minor_per_minute;
       const contextIds = ids(input.context);
-      await client.query(
-        `INSERT INTO marketplace.partner_wait_earning_adjustments
-          (partner_wait_earning_adjustment_id,partner_wait_timer_id,delivery_assignment_id,
-           partner_user_id,eligible_wait_seconds,amount_minor,reason_code,request_id,correlation_id,created_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(delivery_assignment_id) DO NOTHING`,
-        [
-          createUuidV7({ now_ms: now.getTime() }),
-          row.partner_wait_timer_id,
-          row.delivery_assignment_id,
-          row.partner_user_id,
-          seconds,
-          amount,
-          reason(input.reason_code),
-          contextIds.request,
-          contextIds.correlation,
-          now,
-        ],
-      );
       const commandRef = command(input.command_reference);
+      const closed = await closeWaitTimer(client, {
+        context: input.context,
+        delivery_assignment_id: input.delivery_assignment_id,
+        partner_user_id: parseUuidV7(row.partner_user_id),
+        outcome: 'LEFT_POLICY',
+        command_reference: commandRef,
+        reason_code: reason(input.reason_code),
+        now,
+      });
+      if (!closed) throw new PartnerWaitNotFoundError();
+      const amount = closed.amount_minor;
       await client.query(
         `INSERT INTO marketplace.assignment_events
           (assignment_event_id,delivery_assignment_id,assignment_version,event_type,
@@ -334,19 +312,7 @@ export class PartnerWaitPolicyService {
           version=version+1,updated_at=$2 WHERE delivery_assignment_id=$1`,
         [row.delivery_assignment_id, now],
       );
-      const closed = await client.query<WaitRow>(
-        `UPDATE marketplace.partner_wait_timers SET wait_state='LEFT_POLICY',ended_at=$2,
-          version=version+1,updated_at=$2 WHERE partner_wait_timer_id=$1 RETURNING *`,
-        [row.partner_wait_timer_id, now],
-      );
-      row = requiredRow(closed.rows[0], 'Wait timer close returned no row');
-      await this.#event(client, row, input.context, {
-        event_type: 'LEFT_POLICY',
-        elapsed_seconds: elapsed(row, now),
-        command_reference: commandRef,
-        reason_code: input.reason_code,
-        now,
-      });
+      row = closed.row;
       await client.query('COMMIT');
       return project(row, now, amount);
     } catch (error) {
@@ -386,16 +352,6 @@ export class PartnerWaitPolicyService {
     return requiredRow(updated.rows[0], 'Wait timer advance returned no row');
   }
 
-  /**
-   * Appends one wait event, idempotently.
-   *
-   * The conflict target used to name only (timer, event type), which left the
-   * separate unique index on `command_reference` uncovered: replaying a command
-   * — the exact thing a command reference exists to make safe (§15) — raised an
-   * unhandled duplicate-key error and surfaced to the partner as a server
-   * fault. Untargeted `DO NOTHING` covers every unique constraint on the table,
-   * so a repeat is a no-op rather than a crash.
-   */
   async #event(
     client: PoolClient,
     row: WaitRow,
@@ -408,26 +364,10 @@ export class PartnerWaitPolicyService {
       now: Date;
     },
   ) {
-    const who = actor(context);
-    const contextIds = ids(context);
-    await client.query(
-      `INSERT INTO marketplace.partner_wait_timer_events
-        (partner_wait_timer_event_id,partner_wait_timer_id,event_type,elapsed_seconds,
-         actor_id,actor_kind,command_reference,reason_code,request_id,correlation_id,occurred_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
-      [
-        createUuidV7({ now_ms: input.now.getTime() }),
-        row.partner_wait_timer_id,
-        input.event_type,
-        input.elapsed_seconds,
-        who.actor_id,
-        who.actor_kind,
-        input.command_reference,
-        reason(input.reason_code),
-        contextIds.request,
-        contextIds.correlation,
-        input.now,
-      ],
-    );
+    actor(context);
+    await appendWaitEvent(client, row, context, {
+      ...input,
+      reason_code: reason(input.reason_code),
+    });
   }
 }

@@ -29,6 +29,7 @@ export * from './vendor-fulfilment.js';
 export * from './partner-lifecycle.js';
 export * from './partner-availability.js';
 export * from './partner-wait-policy.js';
+export * from './wait-timer.js';
 export * from './local-notifications.js';
 export * from './partner-field-ops.js';
 export * from './assignment-custody.js';

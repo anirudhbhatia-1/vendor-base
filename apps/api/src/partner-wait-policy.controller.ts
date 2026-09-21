@@ -8,11 +8,11 @@ import {
   Param,
   Post,
 } from '@nestjs/common';
-import { PartnerWaitPolicyService } from '@neighbourhood-store/database';
+import { AssignmentCustodyService, PartnerWaitPolicyService } from '@neighbourhood-store/database';
 import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
-import { PARTNER_WAIT_POLICY } from './tokens.js';
+import { ASSIGNMENT_CUSTODY, PARTNER_WAIT_POLICY } from './tokens.js';
 import { object, stringField } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const act = RequireAuthorization({
@@ -23,7 +23,10 @@ const act = RequireAuthorization({
 
 @Controller('partner/assignments/:delivery_assignment_id/wait')
 export class PartnerWaitPolicyController {
-  constructor(@Inject(PARTNER_WAIT_POLICY) private readonly service: PartnerWaitPolicyService) {}
+  constructor(
+    @Inject(PARTNER_WAIT_POLICY) private readonly service: PartnerWaitPolicyService,
+    @Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService,
+  ) {}
 
   @Get()
   @act
@@ -78,9 +81,25 @@ export class PartnerWaitPolicyController {
   async leave(@Param('delivery_assignment_id') assignmentId: string, @Body() raw: unknown) {
     const input = object(raw);
     try {
+      const context = currentRequestContext();
+      const id = parseUuidV7(assignmentId);
+      // Where the partner is decides what leaving means (9.5): at the store the
+      // attempt goes back to the pool with the wait paid; at the customer's
+      // door the delivery fails under the policy (DLP-38). The custody
+      // service checks the state again under its lock.
+      const current = await this.assignments.get({ context, delivery_assignment_id: id });
+      if (current.assignment_state === 'AT_VENDOR') {
+        return await this.assignments.leaveStoreAfterWait({
+          command_reference: stringField(input, 'command_reference'),
+          context,
+          delivery_assignment_id: id,
+          expected_version: current.version,
+          reason_code: stringField(input, 'reason_code'),
+        });
+      }
       return await this.service.leave({
-        context: currentRequestContext(),
-        delivery_assignment_id: parseUuidV7(assignmentId),
+        context,
+        delivery_assignment_id: id,
         command_reference: stringField(input, 'command_reference'),
         reason_code: stringField(input, 'reason_code'),
       });

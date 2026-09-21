@@ -3768,7 +3768,7 @@
       "name": "Vendor wait timer",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Wait timer started, refreshed and left from the app, with accrued waiting pay and the leave threshold shown",
+      "notes": "The wait opens with the trusted or confirmed arrival under the policy in force, shows thresholds, the cap, the pay so far by the server's arithmetic and the store's revised estimate, and closes at the handover with its pay carried into the earning and the settlement (audit run 60 -- until then it was the partner's to start, never closed and never paid)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3847,7 +3847,7 @@
       "name": "Server-confirmed custody",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Atomic custody commitment. Client shows server state",
+      "notes": "Atomic custody commitment. Client shows server state; the handover also closes the vendor wait and records its pay in the same transaction (audit run 60)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4087,7 +4087,7 @@
       "name": "Guided vendor-delay flow",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Vendor delay reports, then the wait timer offers keep-waiting or leave-with-pay at the published threshold",
+      "notes": "Vendor delay reports move the estimate the partner and customer see; at the leave threshold the partner hands the attempt back to dispatch with the waiting pay on record and is not re-offered it (audit run 60 -- until then leaving at the store was refused)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

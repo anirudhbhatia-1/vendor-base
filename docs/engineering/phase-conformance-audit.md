@@ -2027,6 +2027,43 @@ Five requirements. Two held (the resume control; support and emergency controls 
 
 **Step 9.4: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 60 (21 September 2026) — step 9.5, waiting and pickup proof
+
+Five requirements. Two held (the pickup code is validated against the vendor, the order and the assignment; custody begins only after the server has the vendor's handover) and three did not: the wait timer was the partner's to remember to start, nothing ever closed it, and the waiting pay it counted on the screen was never carried into any earning or settlement (`partner_wait_minor: 0` with a comment saying so); the leave the app offered at the store was refused every time, because the only leave path was the customer's door; and the store had no way to say it was running late, so no "revised estimate" existed anywhere. One migration (0102); nineteen connected assertions across three modules, six unit tests; eight mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Start server wait timer at valid arrival | **Not met:** started by the partner's button, not by the arrival; parameters hard-coded (`300,600,3600,100`) against a policy that says cap ₹10; never closed — P60-01. |
+| 2 | Show thresholds, compensation, revised estimate, wait/leave/reassign/support choices | Thresholds and pay shown, **but the pay was never paid, the screen rounded up where the ledger rounds down, no revised estimate existed, and "leave" at the store was refused** — P60-01, P60-02, P60-03. |
+| 3 | Validate QR/OTP and vendor/order/assignment | Met (8.6, run 55): the partner's code is minted on their assignment, stored as a keyed digest on the order, validated by the store at `complete-pickup` with `PARTNER_NOT_PRESENT` until `AT_VENDOR`. |
+| 4 | Agree package count, condition, and handling | Met: the store's count and handling needs are on the attempt (run 53); the partner's `confirmPickup` must match the count and confirm with the store; a damaged or missing package is a field report. |
+| 5 | Begin custody only after server confirmation | Met: `confirmPickup` requires the order `PICKED_UP` (the vendor's validated handover) before custody; the client shows server state. |
+
+**P60-01 — the wait is the server's.** `wait-timer.ts` holds the arithmetic and the two writes: `openWaitTimer` at a trusted or confirmed arrival (same transaction), under `resolveFinancialPolicy` at that instant — included seconds as the first threshold, the rate, `max_credit_seconds` carrying the cap as time — with the leave threshold from `assignment.wait_leave_seconds` (SETTING, default 600); `closeWaitTimer` at the handover (`RESOLVED`) writing `partner_wait_earning_adjustments` with the elapsed seconds and `waitCreditMinor` (completed minutes past the included, at the rate, to the cap). The settlement reads that row into the earning's `wait_minor`, the `PARTNER / WAIT` line and the net, capped by the order's own policy. `credit_minor` on the wait read is the same function, so the partner's screen and the ledger agree; the screen's `Math.ceil` is gone. One wait per partner per attempt (0102 replaces the per-attempt unique keys), because an attempt is re-offered after a leave.
+
+**P60-02 — leaving the store.** `AssignmentCustodyService.leaveStoreAfterWait`: at `THRESHOLD_TWO`, the wait closes `LEFT_POLICY` with its pay on record, the membership ends, a `LEFT_AFTER_WAIT` event names the partner, the attempt returns to `UNASSIGNED` with its arrival cleared, and `offerHistory` keeps that partner off it. Before the threshold: refused. The API's `wait/leave` reads where the partner is and routes to this at the store or to `PartnerWaitPolicyService.leave` at the door (DLP-38, unchanged). The card says what leaving does.
+
+**P60-03 — the store says it is late.** `VendorFulfilmentService.reportDelay` (ACCEPTED/PICKING; 1 min–2 h; a reason from `DELAY_REASONS`) adds the time to `preparation_estimate_seconds` and records `delay_reason_code` / `delay_reported_at` (0102), a `DELAY_REPORTED` event and a `vendor_order.delayed` outbox event (acknowledged; the customer's notice is 11.x's). The active record carries `expected_ready_at` and `delay_reason_code` while the partner is heading there or waiting; the wait card reads "The store says about N min more — running late: item being sourced" beside "Paid after 5 min · you may leave after 10 min · up to ₹10". The console has "Running late?" with minutes and a reason.
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Arrival does not open the wait (old) | *A trusted arrival did not open the wait (undefined)* |
+| Handover does not close it (old) | *The handover did not close the wait ({"wait_state":"RUNNING",…})* |
+| Settlement carries zero (old) | *The waiting pay was counted but not paid ({"wait_minor":"0",…,"settlement_wait":null})* |
+| Leave before the threshold | *A partner left the store before the leave threshold* |
+| Leave keeps the membership | *Leaving under the policy did not return the attempt with the wait paid on record* |
+| `LEFT_AFTER_WAIT` ignored by re-offer | *A partner who left under the policy could be offered the same attempt again* |
+| Estimate not moved by the delay | *The store's delay did not move the estimate with its reason on record* |
+| Leave threshold constant, not the setting | *The next partner's wait was not their own, under the configured leave threshold ({"leave_threshold_seconds":600,…})* |
+
+**Forward findings.** (9.10 / 10.x) A partner who leaves under the policy has their waiting pay on record (`partner_wait_earning_adjustments`) but no earnings record, since the delivery is another partner's; paying it out is the earnings and payout audit's. (11.x) `vendor_order.delayed` reaches the outbox and nobody tells the customer yet. (9.2) The wait-leave and arrival-radius settings leak across verifier modules on one database; the ladder's order keeps them consistent. (carried) `ZONE` scopes by name; branch protection off; Android arrivals are claims.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 103 migration files (0000–0102), full ladder; `assignment_custody` 44 assertions (38 before), `vendor_fulfilment` 270 (265), `partner_wait_policy` 10 (unchanged, now on the shared arithmetic). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 579 pass / 0 fail (575 before: the wait arithmetic, the leave routing, the delay route's scope, the estimate sentence); `pnpm test:integration` exit 0 on a rebuilt test stack; all eight probes on a rebuilt database.
+
+**Step 9.5: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

@@ -1210,13 +1210,38 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     // re-dispatch looked identical to one about to be collected. Asserted on
     // the real assignment while it is genuinely at the counter, with a wait
     // timer at the threshold the shop most needs to see.
+    // 9.5 -- the wait opened with the arrival, under the policy in force:
+    // paid after the included five minutes at the policy's rate, leaving
+    // allowed at ten, the credit running to the cap. Nobody pressed anything.
+    const openedWait = await pool.query<{
+      wait_state: string;
+      first_threshold_seconds: number;
+      leave_threshold_seconds: number;
+      max_credit_seconds: number;
+      rate_minor_per_minute: number;
+      started_at: Date;
+    }>(
+      `SELECT wait_state, first_threshold_seconds, leave_threshold_seconds, max_credit_seconds,
+              rate_minor_per_minute, started_at
+         FROM marketplace.partner_wait_timers
+        WHERE delivery_assignment_id=$1 AND partner_user_id=$2`,
+      [created.delivery_assignment_id, partnerId],
+    );
+    check(
+      openedWait.rows[0]?.wait_state === 'RUNNING' &&
+        openedWait.rows[0].first_threshold_seconds === 300 &&
+        openedWait.rows[0].leave_threshold_seconds === 600 &&
+        openedWait.rows[0].max_credit_seconds === 900 &&
+        openedWait.rows[0].rate_minor_per_minute === 100 &&
+        openedWait.rows[0].started_at.getTime() === now.getTime() + 63_000,
+      `The arrival did not open the wait under the policy (${JSON.stringify(openedWait.rows[0])})`,
+    );
+    // The board is asserted with the wait past the leave threshold, and the
+    // handover below then closes a seven-minute wait: two paid minutes.
     await pool.query(
-      `INSERT INTO marketplace.partner_wait_timers
-         (partner_wait_timer_id, delivery_assignment_id, partner_user_id, wait_state, started_at,
-          first_threshold_seconds, leave_threshold_seconds, max_credit_seconds,
-          rate_minor_per_minute, request_id, correlation_id)
-       VALUES ($1,$2,$3,'THRESHOLD_TWO',$4,300,600,900,200,$5,$5)`,
-      [createUuidV7(), created.delivery_assignment_id, partnerId, now, createUuidV7()],
+      `UPDATE marketplace.partner_wait_timers SET wait_state='THRESHOLD_TWO', started_at=$3
+        WHERE delivery_assignment_id=$1 AND partner_user_id=$2`,
+      [created.delivery_assignment_id, partnerId, new Date(now.getTime() + 63_000 - 420_000)],
     );
     const board = await fulfilment.listVendorOrders({
       context: vendorContext(storeA.ownerUserId),
@@ -1240,13 +1265,8 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       board.every((entry) => !('partner_user_id' in entry)),
       "The vendor board exposed the partner's identity",
     );
-    // The wait ends with the handover below; closing it keeps the fixture's
-    // record honest for the wait-policy reads later in the ladder.
-    await pool.query(
-      `UPDATE marketplace.partner_wait_timers SET wait_state='RESOLVED', ended_at=$2
-        WHERE delivery_assignment_id=$1`,
-      [created.delivery_assignment_id, new Date(now.getTime() + 63_050)],
-    );
+    // The wait ends with the handover below (9.5): the server closes it and
+    // records its pay; nothing here pretends to.
 
     // 8.6 -- at the counter. A stranger cannot mint on this assignment; the
     // shop cannot complete against a code nobody has issued; the partner's
@@ -3397,6 +3417,44 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       })
     )[0];
     check(lineX !== undefined, 'The cancellation order has no line');
+    // 9.5 -- the store says it is running late: the estimate moves, the
+    // reason is on the order and in its history, and the history's own version
+    // advances so a stale intent is refused.
+    const delayedX = await fulfilment.reportDelay({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderX.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: pickingX.version,
+      additional_seconds: 600,
+      reason_code: 'ITEM_BEING_SOURCED',
+      now: new Date(cancelBase.getTime() + 2_300),
+    });
+    const delayEvent = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM marketplace.vendor_order_events
+        WHERE vendor_order_id=$1 AND event_type='DELAY_REPORTED' AND reason_code='ITEM_BEING_SOURCED'`,
+      [orderX.vendor_order_id],
+    );
+    check(
+      delayedX.preparation_estimate_seconds === 600 + 600 &&
+        delayedX.delay_reason_code === 'ITEM_BEING_SOURCED' &&
+        delayedX.version === pickingX.version + 1 &&
+        delayEvent.rows[0]?.count === '1',
+      `The store's delay did not move the estimate with its reason on record (${JSON.stringify(delayedX)})`,
+    );
+    await rejects(
+      () =>
+        fulfilment.reportDelay({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderX.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          expected_version: pickingX.version,
+          additional_seconds: 600,
+          reason_code: 'STORE_BUSY',
+          now: new Date(cancelBase.getTime() + 2_350),
+        }),
+      FulfilmentConflictError,
+      'A stale delay report was applied',
+    );
     await fulfilment.markLineMissing({
       context: vendorContext(storeA.ownerUserId),
       vendor_order_id: orderX.vendor_order_id,
@@ -3411,7 +3469,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           context: vendorContext(storeA.ownerUserId),
           vendor_order_id: orderX.vendor_order_id,
           vendor_location_id: storeA.locationId,
-          expected_version: pickingX.version,
+          expected_version: delayedX.version,
           package_count: 1,
           now: new Date(cancelBase.getTime() + 2_600),
         }),
@@ -3421,7 +3479,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     const cancelledX = await fulfilment.cancelByCustomer({
       context: customerContext(customerId),
       vendor_order_id: orderX.vendor_order_id,
-      expected_version: pickingX.version,
+      expected_version: delayedX.version,
       reason_code: 'CHANGED_MIND',
       now: new Date(cancelBase.getTime() + 3_000),
     });
@@ -3556,6 +3614,26 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       reason_code: 'VENDOR_HANDOVER_VERIFIED',
       vendor_confirmed: true,
     });
+    // 9.5 -- the handover closes the wait, and what it is owed is on record.
+    const closedWait = await pool.query<{
+      wait_state: string;
+      ended_at: Date | null;
+      amount_minor: string | null;
+      eligible_wait_seconds: number | null;
+    }>(
+      `SELECT timer.wait_state, timer.ended_at, owed.amount_minor::text, owed.eligible_wait_seconds
+         FROM marketplace.partner_wait_timers timer
+         LEFT JOIN marketplace.partner_wait_earning_adjustments owed USING (partner_wait_timer_id)
+        WHERE timer.delivery_assignment_id=$1 AND timer.partner_user_id=$2`,
+      [created.delivery_assignment_id, partnerId],
+    );
+    check(
+      closedWait.rows[0]?.wait_state === 'RESOLVED' &&
+        closedWait.rows[0].ended_at?.getTime() === now.getTime() + 64_000 &&
+        closedWait.rows[0].amount_minor === '200' &&
+        closedWait.rows[0].eligible_wait_seconds === 421,
+      `The handover did not close the wait with its pay on record (${JSON.stringify(closedWait.rows[0])})`,
+    );
     const inCustodyList = await assignments.listActiveForPartner({
       partner_user_id: partnerId,
     });
@@ -3795,6 +3873,36 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           earning.rows[0]?.ledger !== null,
         'The partner’s earning was not recorded and posted to the ledger',
       );
+      // 9.5 -- the waiting pay counted at the counter is the waiting pay paid:
+      // on the earning, in the settlement's own line, and in the net.
+      const waitPaid = await pool.query<{
+        wait_minor: string;
+        base_minor: string;
+        distance_minor: string;
+        tip_minor: string;
+        net_minor: string;
+        settlement_wait: string | null;
+      }>(
+        `SELECT e.wait_minor::text, e.base_minor::text, e.distance_minor::text, e.tip_minor::text,
+                e.net_minor::text,
+                (SELECT line.amount_minor::text FROM marketplace.settlement_lines line
+                   JOIN marketplace.settlements s USING (settlement_id)
+                  WHERE s.source_order_reference=$2
+                    AND line.participant_kind='PARTNER' AND line.component='WAIT') AS settlement_wait
+           FROM marketplace.partner_earnings_records e WHERE e.partner_user_id=$1`,
+        [partnerId, orderA.order_reference],
+      );
+      const paid = waitPaid.rows[0];
+      check(
+        paid?.wait_minor === '200' &&
+          paid.settlement_wait === '200' &&
+          Number(paid.net_minor) ===
+            Number(paid.base_minor) +
+              Number(paid.distance_minor) +
+              Number(paid.wait_minor) +
+              Number(paid.tip_minor),
+        `The waiting pay was counted but not paid (${JSON.stringify(paid)})`,
+      );
       // D-17: the earning is computed on the road the order was priced on --
       // the route the quote stored -- not on a straight line drawn at
       // settlement. The two differ by the road factor, so a settlement that
@@ -3822,8 +3930,10 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           pricedMetres > 0 &&
           pricedMetres !== Number(pricedRoute.rows[0]?.line) &&
           pricedMetres === Math.round(Number(pricedRoute.rows[0]?.line) * ESTIMATE_ROAD_FACTOR) &&
+          // The net is the road's earning plus the two paid minutes at the
+          // counter (9.5), asserted as its own line above.
           Number(earning.rows[0]?.net_minor) ===
-            expectedEarning.base_minor + expectedEarning.distance_minor,
+            expectedEarning.base_minor + expectedEarning.distance_minor + 200,
         `The partner was paid on a distance other than the road the order was priced on (net ${earning.rows[0]?.net_minor}, road ${pricedMetres}, line ${pricedRoute.rows[0]?.line})`,
       );
 

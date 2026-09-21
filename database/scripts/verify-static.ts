@@ -174,6 +174,7 @@ assert(
       '0099_partner_documents',
       '0100_attempt_reassignment',
       '0101_trusted_arrival',
+      '0102_wait_at_arrival',
     ]),
   'Unexpected reviewed migrations',
 );
