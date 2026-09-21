@@ -7,11 +7,12 @@ import {
   type RequestContext,
   type UuidV7,
 } from '@neighbourhood-store/domain-types';
-import { createHash, randomInt } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import { calculatePartnerOfferEarning } from './money-policy.js';
 import { completeVendorOrder } from './vendor-order-completion.js';
 import { Pool, type PoolClient } from 'pg';
 import { transaction } from './transaction.js';
+import { handoverCodeDigest, handoverDigestsMatch } from './handover-code.js';
 
 export type AssignmentState =
   | 'ARRIVED'
@@ -482,13 +483,27 @@ async function updateAssignment(
 
 export class AssignmentCustodyService {
   readonly #pool: Pool;
-  constructor(input: { readonly connection_string: string }) {
+  readonly #hashKey: string | null;
+
+  constructor(input: {
+    readonly connection_string: string;
+    /** Material the delivery codes are keyed with (8.6); absent, none can be minted or checked. */
+    readonly hash_key?: string;
+  }) {
     this.#pool = createDatabasePool({
       application_name: 'neighbourhood-store-assignment-custody',
       connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 12,
     });
+    this.#hashKey = input.hash_key ?? null;
+  }
+
+  #codeDigest(code: string): string {
+    if (this.#hashKey === null) {
+      throw new Error('A hash key is required to issue or check a delivery code');
+    }
+    return handoverCodeDigest(this.#hashKey, code);
   }
 
   async close() {
@@ -1123,7 +1138,7 @@ export class AssignmentCustodyService {
         );
       }
       const otp = String(randomInt(100000, 1000000));
-      const hash = createHash('sha256').update(otp).digest('hex');
+      const hash = this.#codeDigest(otp);
       const expiresAt = new Date(now.getTime() + DELIVERY_OTP_LIFETIME_SECONDS * 1000);
       await client.query(
         `UPDATE marketplace.delivery_assignments
@@ -1181,8 +1196,8 @@ export class AssignmentCustodyService {
       if (assignment.delivery_otp_expires_at <= now) {
         throw new DeliveryOtpExpiredError('That code has expired; ask the customer to refresh it');
       }
-      const attempted = createHash('sha256').update(input.otp).digest('hex');
-      if (attempted !== assignment.delivery_otp_hash) {
+      const attempted = this.#codeDigest(input.otp);
+      if (!handoverDigestsMatch(assignment.delivery_otp_hash, attempted)) {
         await client.query(
           `UPDATE marketplace.delivery_assignments
               SET delivery_otp_attempts = delivery_otp_attempts + 1, updated_at = $2

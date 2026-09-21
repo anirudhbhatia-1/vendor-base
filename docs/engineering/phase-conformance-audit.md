@@ -1811,6 +1811,38 @@ Five requirements. Two held (every line and decision resolved — `PICKING_INCOM
 
 **Step 8.5: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 54 (21 September 2026) — step 8.6, customer pickup
+
+Five requirements. Four held in their mechanism — a 15-minute code that rotates; actor, order, location, state, attempt, expiry and replay checks with each failed attempt committed on its own; completion once by the state gate and the 0026 shape constraint; capture (at ready, since run 52), settlement and the customer's `PICKED_UP` notice on the outbox — but two of them had never been walked (the attempt limit and expiry), the code was stored as the plain SHA-256 of six digits (run 47's forward finding), and the "proof" was the shop's free-text note. No migration; nine connected assertions; five mutation probes, all caught.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Time-limited pickup OTP | Met, and now walked: expiry at issue + 15 minutes. **Stored unkeyed** — P54-01. |
+| 2 | Validate actor, order, state, attempts, expiry, replay | Met in code; attempts and expiry had no proof. Now: five wrong codes count, the sixth — the right one — is refused; an expired right code is refused without counting; a fresh code counts afresh; a completed order refuses the same code again with nothing moved. |
+| 3 | Server-confirmed pickup proof | **The note stood alone.** `picked_up_at` and the reason were the server's, but the event's note was whatever the shop typed — P54-02. |
+| 4 | Complete fulfilment and order once | Met (state gate; `vendor_order_pickup_completes_once`); now walked with the replay leaving one `PICKED_UP` record and the version unmoved. |
+| 5 | Capture/ledger/receipt events | Met: `vendor_order.picked_up` on the outbox drives inventory settlement (a backstop since run 50) and, for a collected order, the settlement lines; capture happened at ready (run 52); the notice reaches the customer through the history sync. The receipt is 8.7's. |
+
+**P54-01 — the code that was its own hash.** `handover-code.ts`: `handoverCodeDigest(hashKey, code)` is HMAC-SHA-256 under a key derived from the material with the label `handover-code` (so it is not the sign-in OTP key), and `handoverDigestsMatch` compares in constant time. Both services that mint or check a code — `VendorFulfilmentService` (collection and self-delivery codes) and `AssignmentCustodyService` (the partner's delivery code) — take `hash_key`; the API passes its `otpHashKey`; the worker passes none and never needs to. A code issued before this deploy will not validate after it (its life is fifteen minutes; re-issue). The walk pins that the stored digest is neither the plain SHA-256 of the code nor another key's.
+
+**P54-02 — the proof.** The `PICKED_UP` event's note is written by the server: `Code validated at <time>, issued by CUSTOMER | PARTNER | VENDOR_FALLBACK`, and only then the shop's note. Support reads which code was validated, not just that the shop said it handed the bag over.
+
+**Mutation results.** Five probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| No attempt limit | *The right code was accepted after 5 wrong ones* |
+| No expiry check | *An expired collection code was accepted* |
+| The shop's note as the proof (old) | *The handover proof is not the server's ([{… "note":"Handed to the customer."}])* |
+| A fresh code keeps the old count | *A fresh code did not reset the attempt count* |
+| Plain SHA-256 (old) | *The collection code is stored as an unkeyed digest* — after the walk was told to check the digest against the plain hash and another key; its first form let this one through |
+
+**Forward findings.** (8.7) The receipt still shows the ordered total and the refunds, not the pre-capture adjustments (carried). (9.x) `confirmPickup` compares the partner's typed package count with the attempt's (carried). (carried) The console does not say a change was applied without asking; no vendor cancellation after acceptance.
+
+**Verification.** `pnpm db:verify` exit 0 — 98 migration files (0000–0097), full ladder; `vendor_fulfilment` 253 assertions (237 after run 53). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 565 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 8.6: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

@@ -46,6 +46,10 @@ import {
   FulfilmentAuthorizationError,
   FulfilmentConflictError,
   FulfilmentInputError,
+  PICKUP_OTP_LIFETIME_SECONDS,
+  PICKUP_OTP_MAX_ATTEMPTS,
+  PickupOtpExhaustedError,
+  PickupOtpExpiredError,
   PickupOtpAlreadyIssuedError,
   FulfilmentNotFoundError,
   PickupOtpMismatchError,
@@ -53,6 +57,7 @@ import {
   VendorDeliveryOtpMismatchError,
   VendorFulfilmentService,
 } from '../src/vendor-fulfilment.js';
+import { handoverCodeDigest } from '../src/handover-code.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
 import {
   check,
@@ -67,6 +72,7 @@ import {
 export async function verifyVendorFulfilment(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, max: 4 });
   const access = new IdentityAccessService({ connection_string: connectionString });
+  const HASH_KEY = 'synthetic-verifier-handover-code-material';
   const inventory = new InventoryReservationService({ connection_string: connectionString });
   const catalogue = new CatalogueProductService({ connection_string: connectionString });
   const carts = new CustomerCartService({ connection_string: connectionString });
@@ -74,8 +80,12 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
   const fulfilment = new VendorFulfilmentService({
     connection_string: connectionString,
     inventory,
+    hash_key: HASH_KEY,
   });
-  const assignments = new AssignmentCustodyService({ connection_string: connectionString });
+  const assignments = new AssignmentCustodyService({
+    connection_string: connectionString,
+    hash_key: HASH_KEY,
+  });
   const notifications = new LocalNotificationService({ connection_string: connectionString });
   const money = new MoneyLifecycleService({ connection_string: connectionString });
   const completeMoney = new CompleteMoneyLifecycleService({
@@ -1276,8 +1286,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     );
     check(
       partnerIssuer.rows[0]?.issuer === 'PARTNER' &&
-        partnerIssuer.rows[0]?.hash ===
-          createHash('sha256').update(partnerCode.plaintext_otp).digest('hex'),
+        partnerIssuer.rows[0]?.hash === handoverCodeDigest(HASH_KEY, partnerCode.plaintext_otp),
       "The partner's code was not stored as the partner's, hashed",
     );
     const partnerIssueEvent = await pool.query<{ actor_kind: string; reason_code: string }>(
@@ -1546,6 +1555,50 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_order_id: orderP.vendor_order_id,
       now: new Date(collectionBase.getTime() + 6_000),
     });
+    // 8.6 -- the code is time-limited and attempt-limited, and the digest
+    // stored is keyed, not the six digits' own hash.
+    check(
+      customerCode.expires_at.getTime() ===
+        collectionBase.getTime() + 6_000 + PICKUP_OTP_LIFETIME_SECONDS * 1000,
+      `The collection code's life is not ${PICKUP_OTP_LIFETIME_SECONDS}s from issue`,
+    );
+    const wrongCollectionCode = customerCode.plaintext_otp === '000000' ? '000001' : '000000';
+    for (let attempt = 0; attempt < PICKUP_OTP_MAX_ATTEMPTS; attempt += 1) {
+      await rejects(
+        () =>
+          fulfilment.completePickup({
+            context: vendorContext(storeA.ownerUserId),
+            vendor_order_id: orderP.vendor_order_id,
+            vendor_location_id: storeA.locationId,
+            otp: wrongCollectionCode,
+            now: new Date(collectionBase.getTime() + 6_010 + attempt),
+          }),
+        PickupOtpMismatchError,
+        `Wrong attempt ${attempt + 1} was not refused as a mismatch`,
+      );
+    }
+    await rejects(
+      () =>
+        fulfilment.completePickup({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderP.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          otp: customerCode.plaintext_otp,
+          now: new Date(collectionBase.getTime() + 6_020),
+        }),
+      PickupOtpExhaustedError,
+      `The right code was accepted after ${PICKUP_OTP_MAX_ATTEMPTS} wrong ones`,
+    );
+    const exhausted = await pool.query<{ attempts: number; state: string }>(
+      `SELECT pickup_otp_attempts AS attempts, lifecycle_state AS state
+         FROM marketplace.vendor_orders WHERE vendor_order_id=$1`,
+      [orderP.vendor_order_id],
+    );
+    check(
+      exhausted.rows[0]?.attempts === PICKUP_OTP_MAX_ATTEMPTS &&
+        exhausted.rows[0]?.state === 'READY',
+      `Wrong attempts were not each counted, or one changed the order (${JSON.stringify(exhausted.rows)})`,
+    );
     await rejects(
       () =>
         fulfilment.issuePickupOtp({
@@ -1564,10 +1617,19 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       [orderP.vendor_order_id],
     );
     check(
-      survived.rows[0]?.hash ===
-        createHash('sha256').update(customerCode.plaintext_otp).digest('hex') &&
+      survived.rows[0]?.hash === handoverCodeDigest(HASH_KEY, customerCode.plaintext_otp) &&
         survived.rows[0]?.issuer === 'CUSTOMER',
       "The customer's collection code did not survive the vendor's attempt",
+    );
+    // 8.6 -- the stored digest is keyed: it is neither the six digits' own
+    // SHA-256 nor what another key would give. Until audit run 54 it was the
+    // former, and a leaked digest was the code.
+    check(
+      survived.rows[0]?.hash !==
+        createHash('sha256').update(customerCode.plaintext_otp).digest('hex') &&
+        survived.rows[0]?.hash !==
+          handoverCodeDigest('another-key-material-entirely', customerCode.plaintext_otp),
+      'The collection code is stored as an unkeyed digest',
     );
 
     // Once that code is gone, the fallback is available — a customer with a
@@ -1597,6 +1659,32 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_location_id: storeA.locationId,
       now: new Date(collectionBase.getTime() + 6_300),
     });
+    // A fresh code starts its attempts afresh, and dies at its own deadline:
+    // the right code, too late, is refused without counting as an attempt.
+    const reissued = await pool.query<{ attempts: number }>(
+      `SELECT pickup_otp_attempts AS attempts FROM marketplace.vendor_orders WHERE vendor_order_id=$1`,
+      [orderP.vendor_order_id],
+    );
+    check(reissued.rows[0]?.attempts === 0, 'A fresh code did not reset the attempt count');
+    await rejects(
+      () =>
+        fulfilment.completePickup({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderP.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          otp: fallback.plaintext_otp,
+          now: new Date(
+            collectionBase.getTime() + 6_300 + PICKUP_OTP_LIFETIME_SECONDS * 1000 + 1_000,
+          ),
+        }),
+      PickupOtpExpiredError,
+      'An expired collection code was accepted',
+    );
+    const afterExpiry = await pool.query<{ attempts: number }>(
+      `SELECT pickup_otp_attempts AS attempts FROM marketplace.vendor_orders WHERE vendor_order_id=$1`,
+      [orderP.vendor_order_id],
+    );
+    check(afterExpiry.rows[0]?.attempts === 0, 'An expired attempt was counted as a wrong one');
     const fallbackIssuer = await pool.query<{ issuer: string; reason_code: string }>(
       `SELECT o.pickup_otp_issued_by AS issuer,
               (SELECT e.reason_code FROM marketplace.vendor_order_events e
@@ -1618,8 +1706,8 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       proof_note: 'Handed to the customer.',
       now: new Date(collectionBase.getTime() + 7_000),
     });
-    const collectionRecord = await pool.query<{ reason_code: string }>(
-      `SELECT reason_code FROM marketplace.vendor_order_events
+    const collectionRecord = await pool.query<{ reason_code: string; note: string | null }>(
+      `SELECT reason_code, note FROM marketplace.vendor_order_events
         WHERE vendor_order_id=$1 AND event_type='PICKED_UP'`,
       [orderP.vendor_order_id],
     );
@@ -1627,6 +1715,44 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       collected.lifecycle_state === 'PICKED_UP' &&
         collectionRecord.rows[0]?.reason_code === 'CUSTOMER_PICKUP_COMPLETED',
       'A customer collection was not completed and recorded as one',
+    );
+    // 8.6 -- the proof is the server's: which code was validated, when, and
+    // then the shop's note. Until audit run 54 the note stood alone.
+    check(
+      collectionRecord.rows.length === 1 &&
+        collectionRecord.rows[0]?.note ===
+          `Code validated at ${new Date(collectionBase.getTime() + 7_000).toISOString()}, issued by VENDOR_FALLBACK; Handed to the customer.`,
+      `The handover proof is not the server's (${JSON.stringify(collectionRecord.rows)})`,
+    );
+    check(
+      collected.picked_up_at?.getTime() === collectionBase.getTime() + 7_000 &&
+        collected.pickup_otp_expires_at === null,
+      'The completed collection did not stamp the server time and clear the code',
+    );
+    // Once: the same code again is refused for the order's state, and
+    // nothing about the completion moves.
+    await rejects(
+      () =>
+        fulfilment.completePickup({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderP.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          otp: fallback.plaintext_otp,
+          now: new Date(collectionBase.getTime() + 7_100),
+        }),
+      FulfilmentConflictError,
+      'A completed collection was completed again',
+    );
+    const onceRecord = await pool.query<{ events: string; version: number }>(
+      `SELECT (SELECT count(*)::text FROM marketplace.vendor_order_events e
+                WHERE e.vendor_order_id=o.vendor_order_id AND e.event_type='PICKED_UP') AS events,
+              o.version
+         FROM marketplace.vendor_orders o WHERE o.vendor_order_id=$1`,
+      [orderP.vendor_order_id],
+    );
+    check(
+      onceRecord.rows[0]?.events === '1' && onceRecord.rows[0]?.version === collected.version,
+      `A replayed completion left a second record (${JSON.stringify(onceRecord.rows)})`,
     );
 
     // 8.5d -- vendor self-delivery (VEN-37, workflow 6.7): the shop's own staff
@@ -3227,7 +3353,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           WHERE delivery_assignment_id=$1`,
       [
         created.delivery_assignment_id,
-        createHash('sha256').update(deliveryOtp).digest('hex'),
+        handoverCodeDigest(HASH_KEY, deliveryOtp),
         new Date(now.getTime() + 900_000),
       ],
     );

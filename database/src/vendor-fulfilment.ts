@@ -1,6 +1,6 @@
 import { deriveCheckoutGroupState } from './checkout-group-state.js';
 import { createDatabasePool } from './database-pool.js';
-import { createHash, randomInt } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import {
   createUuidV7,
   parseRequestId,
@@ -17,6 +17,7 @@ import {
 } from './inventory-reservations.js';
 import { completeVendorOrder, publishVendorOrderTransition } from './vendor-order-completion.js';
 import { transaction as tx } from './transaction.js';
+import { handoverCodeDigest, handoverDigestsMatch } from './handover-code.js';
 import { resolveConfiguration } from './versioned-configuration.js';
 
 export class FulfilmentInputError extends Error {}
@@ -1098,10 +1099,17 @@ function projectDecision(row: Record<string, unknown>): DecisionRecord {
 export class VendorFulfilmentService {
   readonly #pool: Pool;
   readonly #inventory: InventoryReservationService;
+  readonly #hashKey: string | null;
 
   constructor(input: {
     readonly connection_string: string;
     readonly inventory: InventoryReservationService;
+    /**
+     * Material the collection and delivery codes are keyed with. Absent, the
+     * service can do everything but mint or check a code -- the worker never
+     * does either.
+     */
+    readonly hash_key?: string;
   }) {
     this.#pool = createDatabasePool({
       connectionString: input.connection_string,
@@ -1109,6 +1117,14 @@ export class VendorFulfilmentService {
       max: 8,
     });
     this.#inventory = input.inventory;
+    this.#hashKey = input.hash_key ?? null;
+  }
+
+  #codeDigest(code: string): string {
+    if (this.#hashKey === null) {
+      throw new Error('A hash key is required to issue or check a collection code');
+    }
+    return handoverCodeDigest(this.#hashKey, code);
   }
 
   async close(): Promise<void> {
@@ -2106,7 +2122,7 @@ export class VendorFulfilmentService {
         throw new FulfilmentConflictError('A collection code applies once the order is ready');
       }
       const otp = String(randomInt(100000, 1000000));
-      const hash = createHash('sha256').update(otp).digest('hex');
+      const hash = this.#codeDigest(otp);
       const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
       await client.query(
         `UPDATE marketplace.vendor_orders
@@ -2178,7 +2194,7 @@ export class VendorFulfilmentService {
         throw new FulfilmentConflictError('A pickup code applies once the order is ready');
       }
       const otp = String(randomInt(100000, 1000000));
-      const hash = createHash('sha256').update(otp).digest('hex');
+      const hash = this.#codeDigest(otp);
       const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
       await client.query(
         `UPDATE marketplace.vendor_orders
@@ -2250,7 +2266,7 @@ export class VendorFulfilmentService {
         );
       }
       const otp = String(randomInt(100000, 1000000));
-      const hash = createHash('sha256').update(otp).digest('hex');
+      const hash = this.#codeDigest(otp);
       const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
       await client.query(
         `UPDATE marketplace.vendor_orders
@@ -2310,9 +2326,9 @@ export class VendorFulfilmentService {
         throw new PickupOtpMissingError('No pickup OTP has been issued');
       if (order.pickup_otp_attempts >= PICKUP_OTP_MAX_ATTEMPTS) throw new PickupOtpExhaustedError();
       if (order.pickup_otp_expires_at <= now) throw new PickupOtpExpiredError();
-      const attempted = createHash('sha256').update(input.otp).digest('hex');
+      const attempted = this.#codeDigest(input.otp);
       const ids = contextIds(input.context);
-      if (attempted !== order.pickup_otp_hash) {
+      if (!handoverDigestsMatch(order.pickup_otp_hash, attempted)) {
         await client.query(
           `UPDATE marketplace.vendor_orders SET pickup_otp_attempts=pickup_otp_attempts+1, updated_at=$2
             WHERE vendor_order_id=$1`,
@@ -2366,6 +2382,12 @@ export class VendorFulfilmentService {
         reason_code: reasonCode,
         vendor_order_id: input.vendor_order_id,
       });
+      // The proof is the server's (8.6): which code was validated -- the
+      // collector's own, or a fallback the shop minted with a reason -- and
+      // when; the shop's note follows it rather than standing in for it.
+      const proof = `Code validated at ${now.toISOString()}, issued by ${
+        order.pickup_otp_issued_by ?? 'VENDOR'
+      }${input.proof_note ? `; ${input.proof_note}` : ''}`.slice(0, 500);
       await appendEvent(client, {
         vendor_order_id: input.vendor_order_id,
         event_type: 'PICKED_UP',
@@ -2374,7 +2396,7 @@ export class VendorFulfilmentService {
         previous_state: 'READY',
         resulting_state: 'PICKED_UP',
         reason_code: reasonCode,
-        note: input.proof_note ?? null,
+        note: proof,
         ids,
       });
       return orderSummary(client, input.vendor_order_id);
@@ -2489,7 +2511,7 @@ export class VendorFulfilmentService {
         );
       }
       const otp = String(randomInt(100000, 1000000));
-      const hash = createHash('sha256').update(otp).digest('hex');
+      const hash = this.#codeDigest(otp);
       const expiresAt = new Date(now.getTime() + PICKUP_OTP_LIFETIME_SECONDS * 1000);
       await client.query(
         `UPDATE marketplace.vendor_orders
@@ -2549,8 +2571,8 @@ export class VendorFulfilmentService {
       if (order.delivery_otp_attempts >= PICKUP_OTP_MAX_ATTEMPTS)
         throw new VendorDeliveryOtpExhaustedError();
       if (order.delivery_otp_expires_at <= now) throw new VendorDeliveryOtpExpiredError();
-      const attempted = createHash('sha256').update(input.otp).digest('hex');
-      if (attempted !== order.delivery_otp_hash) {
+      const attempted = this.#codeDigest(input.otp);
+      if (!handoverDigestsMatch(order.delivery_otp_hash, attempted)) {
         await client.query(
           `UPDATE marketplace.vendor_orders
               SET delivery_otp_attempts=delivery_otp_attempts+1, updated_at=$2

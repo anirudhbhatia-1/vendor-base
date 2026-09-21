@@ -396,7 +396,14 @@ import {
       useFactory: (
         config: ReturnType<typeof loadRuntimeConfig>,
         inventory: InventoryReservationService,
-      ) => new VendorFulfilmentService({ connection_string: config.databaseUrl, inventory }),
+      ) =>
+        new VendorFulfilmentService({
+          connection_string: config.databaseUrl,
+          inventory,
+          // Collection and delivery codes are keyed under the OTP material,
+          // with their own domain label (8.6).
+          hash_key: config.otpHashKey,
+        }),
     },
     {
       provide: PARTNER_LIFECYCLE,
@@ -444,7 +451,10 @@ import {
       provide: ASSIGNMENT_CUSTODY,
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new AssignmentCustodyService({ connection_string: config.databaseUrl }),
+        new AssignmentCustodyService({
+          connection_string: config.databaseUrl,
+          hash_key: config.otpHashKey,
+        }),
     },
     {
       provide: MONEY_LIFECYCLE,

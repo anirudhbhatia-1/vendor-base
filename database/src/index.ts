@@ -15,6 +15,7 @@ export * from './provider-ports.js';
 export * from './vendor-onboarding.js';
 export * from './vendor-publication.js';
 export * from './inventory-reservations.js';
+export * from './handover-code.js';
 export * from './catalogue-freshness-moderation.js';
 export * from './catalogue-products.js';
 export * from './customer-addresses.js';

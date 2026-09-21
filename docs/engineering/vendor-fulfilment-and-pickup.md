@@ -27,7 +27,7 @@ the vendor_order or line-snapshot invariants Phase 7 established:
 
 | Table | Owns |
 |---|---|
-| `vendor_orders` (extended) | accept_by, accepted_at, preparation_estimate_seconds, decline_reason_code, picking_started_at, ready_at, package_count, package_condition_note, pickup_otp_hash (SHA-256), pickup_otp_expires_at, pickup_otp_attempts, picked_up_at |
+| `vendor_orders` (extended) | accept_by, accepted_at, preparation_estimate_seconds, decline_reason_code, picking_started_at, ready_at, package_count, package_condition_note, pickup_otp_hash (keyed digest since run 54), pickup_otp_expires_at, pickup_otp_attempts, picked_up_at |
 | `vendor_order_line_picks` | one row per touched line: FOUND/MISSING/PROPOSED_SUBSTITUTION/PROPOSED_WEIGHT/SUBSTITUTION_APPROVED/SUBSTITUTION_REJECTED/WEIGHT_APPROVED/WEIGHT_REJECTED, actual_quantity, actual_unit_price_minor |
 | `vendor_order_customer_decisions` | proposal to the customer with decision_deadline_at, one PENDING per pick at a time, authorization_delta_minor; a change applied under the customer's own rule is recorded here too, answered `APPROVED` at once (8.4, audit run 52) |
 | `vendor_order_events` | append-only audit; trigger blocks UPDATE/DELETE |
@@ -91,10 +91,18 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   picks are final, every line that will not be in the bag as ordered -- missing, a refused
   proposal, an approved replacement -- gives its committed units back to the shelf
   (`LINE_NOT_SUPPLIED`); until run 51 they stayed sold to nobody.
-- Pickup OTP is a six-digit random number stored as SHA-256; the plaintext is returned to the
-  vendor caller once. Every failed attempt increments a counter in its **own** transaction so the
-  attempt survives even though the outer pickup transaction rolls back — otherwise
-  `PICKUP_OTP_MAX_ATTEMPTS` would be unenforceable.
+- A collection or delivery code is a six-digit random number that lives `PICKUP_OTP_LIFETIME_SECONDS`
+  (15 minutes) and is stored as a **keyed** digest (`handoverCodeDigest`, `handover-code.ts`:
+  HMAC-SHA-256 under a key derived from the API's OTP hash material with the domain label
+  `handover-code`, compared in constant time) — until audit run 54 it was plain SHA-256 of the six
+  digits, which is the six digits. The plaintext is returned to the caller once. Every failed
+  attempt increments a counter in its **own** transaction so the attempt survives even though the
+  outer pickup transaction rolls back — otherwise `PICKUP_OTP_MAX_ATTEMPTS` (5) would be
+  unenforceable; the right code after five wrong ones is refused, an expired code is refused
+  without counting, and a fresh code starts its count afresh. The `PICKED_UP` event's note is the
+  server's proof — `Code validated at <time>, issued by CUSTOMER | PARTNER | VENDOR_FALLBACK` — with
+  the shop's note after it. The services take `hash_key`; the worker, which never mints or checks
+  a code, passes none.
 - A completed pickup clears the OTP hash and expiry, so a leaked slip cannot pick up the order a
   second time. `settleInventoryOnPickup` commits any `PROVISIONAL` reservation still attached to
   the order (none, for an order accepted since run 50), and the inventory service's own version
@@ -198,7 +206,7 @@ collected and the self-delivered order and no partner earning for either.
 Phase 8: a real two-store checkout is placed, one order is declined and its reservations released
 without touching the sibling's, the other is accepted (with stale-version rejection covered), a
 line is picked, mark-ready fails first while lines are unresolved and succeeds after, an OTP is
-issued and verified against the stored SHA-256 hash, a wrong OTP increments the attempt counter,
+issued and verified against the stored keyed digest, a wrong OTP increments the attempt counter,
 the right OTP completes pickup and clears the hash, inventory commits transition `PROVISIONAL`
 holds to `COMMITTED`, the customer's history and receipt reflect the outcome, rating is
 single-shot, and a support case can be opened. A third store fixture is used to drive the

@@ -1508,7 +1508,7 @@
       "name": "Pickup flow",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Customer requests their own collection code; the vendor validates it at handover",
+      "notes": "Customer requests their own collection code; the vendor validates it at handover. The code is a keyed digest, attempt- and time-limited, and the PICKED_UP event carries the server's proof (audit run 54)",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2834,7 +2834,7 @@
       "name": "Customer pickup handoff",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Pickup OTP generation",
+      "notes": "Pickup OTP generation; stored as a keyed digest and checked in constant time since audit run 54",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {

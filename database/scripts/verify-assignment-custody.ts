@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import {
   createAuthenticatedActor,
   createRequestContext,
@@ -13,6 +12,7 @@ import {
   AssignmentInputError,
   AssignmentNotFoundError,
 } from '../src/assignment-custody.js';
+import { handoverCodeDigest } from '../src/handover-code.js';
 import { check } from './verify-support.js';
 
 function context(kind: ActorKind, actorId: UuidV7) {
@@ -27,7 +27,11 @@ function context(kind: ActorKind, actorId: UuidV7) {
 
 export async function verifyAssignmentCustody(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, max: 4 });
-  const service = new AssignmentCustodyService({ connection_string: connectionString });
+  const HASH_KEY = 'synthetic-verifier-handover-code-material';
+  const service = new AssignmentCustodyService({
+    connection_string: connectionString,
+    hash_key: HASH_KEY,
+  });
   const adminId = createUuidV7();
   const partnerOneId = createUuidV7();
   const partnerTwoId = createUuidV7();
@@ -218,7 +222,7 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
         WHERE delivery_assignment_id = $1`,
       [
         first.delivery_assignment_id,
-        createHash('sha256').update(deliveryOtp).digest('hex'),
+        handoverCodeDigest(HASH_KEY, deliveryOtp),
         new Date(now.getTime() + 900_000),
       ],
     );
