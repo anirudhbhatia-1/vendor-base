@@ -1,0 +1,11 @@
+ALTER TABLE marketplace.delivery_assignments
+  DROP CONSTRAINT delivery_assignment_arrived_is_recorded,
+  DROP CONSTRAINT delivery_assignment_customer_arrival_reason_shape,
+  DROP CONSTRAINT delivery_assignment_customer_arrival_shape,
+  DROP CONSTRAINT delivery_assignment_customer_arrival_claim_reason_allowed,
+  DROP CONSTRAINT delivery_assignment_customer_arrival_distance,
+  DROP CONSTRAINT delivery_assignment_customer_arrival_kind_allowed,
+  DROP COLUMN customer_arrival_claim_reason,
+  DROP COLUMN customer_arrival_distance_metres,
+  DROP COLUMN customer_arrived_at,
+  DROP COLUMN customer_arrival_kind;

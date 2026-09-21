@@ -119,8 +119,12 @@ export class PartnerWaitPolicyService {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const assignment = await client.query<{ partner_user_id: string; assignment_state: string }>(
-        'SELECT partner_user_id,assignment_state FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1 FOR UPDATE',
+      const assignment = await client.query<{
+        partner_user_id: string;
+        assignment_state: string;
+        customer_arrival_kind: string | null;
+      }>(
+        'SELECT partner_user_id,assignment_state,customer_arrival_kind FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1 FOR UPDATE',
         [input.delivery_assignment_id],
       );
       const assigned = assignment.rows[0];
@@ -131,6 +135,17 @@ export class PartnerWaitPolicyService {
       if (!['AT_VENDOR', 'ARRIVED'].includes(assigned.assignment_state)) {
         throw new PartnerWaitConflictError(
           'Waiting can start once you are at the store or at the customer',
+        );
+      }
+      // Paid waiting at the door needs the door (9.6): an arrival the device
+      // could not place at the address is the partner's word, and the
+      // unreachable-customer path is a report to support, not a timer.
+      if (
+        assigned.assignment_state === 'ARRIVED' &&
+        assigned.customer_arrival_kind !== 'TRUSTED_LOCATION'
+      ) {
+        throw new PartnerWaitConflictError(
+          'Waiting pay at the door needs your location at the address; report the customer as unreachable instead',
         );
       }
       const { policy } = await resolveFinancialPolicy(client, { at: now });

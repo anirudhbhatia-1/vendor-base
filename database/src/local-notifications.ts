@@ -364,11 +364,40 @@ export class LocalNotificationService {
         ORDER BY event.occurred_at LIMIT $1`,
       [limit],
     );
+    // The partner at the customer's door (9.6): the customer is told, so the
+    // handover is expected rather than a knock out of nowhere. Nothing of the
+    // partner crosses -- the notice is the event, not the person.
+    const arrivalSignals = await this.#pool.query<{
+      source_id: string;
+      recipient_user_id: string;
+      event_type: string;
+      request_id: string;
+      correlation_id: string;
+      detail: Record<string, unknown> | null;
+    }>(
+      `SELECT event.assignment_event_id source_id, grouping.customer_user_id recipient_user_id,
+              event.event_type, event.request_id, event.correlation_id,
+              jsonb_build_object('order_reference', orders.order_reference) AS detail
+         FROM marketplace.assignment_events event
+         JOIN marketplace.delivery_assignments assignment USING (delivery_assignment_id)
+         JOIN marketplace.vendor_orders orders ON orders.vendor_order_id = assignment.vendor_order_id
+         JOIN marketplace.checkout_groups grouping ON grouping.checkout_group_id = orders.checkout_group_id
+        WHERE event.event_type = 'ARRIVED'
+          AND NOT EXISTS(SELECT 1 FROM marketplace.notification_intents intent
+            WHERE intent.source_kind='assignment_event' AND intent.source_id=event.assignment_event_id)
+        ORDER BY event.occurred_at LIMIT $1`,
+      [limit],
+    );
     let created = 0;
-    for (const signal of [...waitSignals.rows, ...orderSignals.rows]) {
-      const sourceKind = waitSignals.rows.includes(signal)
-        ? 'partner_wait_event'
-        : 'vendor_order_event';
+    const signals: readonly { sourceKind: string; signal: (typeof orderSignals.rows)[number] }[] = [
+      ...waitSignals.rows.map((signal) => ({
+        sourceKind: 'partner_wait_event',
+        signal: { ...signal, detail: null },
+      })),
+      ...orderSignals.rows.map((signal) => ({ sourceKind: 'vendor_order_event', signal })),
+      ...arrivalSignals.rows.map((signal) => ({ sourceKind: 'assignment_event', signal })),
+    ];
+    for (const { sourceKind, signal } of signals) {
       const signalContext: RequestContext = {
         ...input.context,
         request_id: parseRequestId(signal.request_id),
@@ -377,7 +406,7 @@ export class LocalNotificationService {
       await this.enqueue({
         context: signalContext,
         recipient_user_id: parseUuidV7(signal.recipient_user_id),
-        notification_kind: sourceKind === 'vendor_order_event' ? 'ORDER_STATUS' : 'OPERATIONS',
+        notification_kind: sourceKind === 'partner_wait_event' ? 'OPERATIONS' : 'ORDER_STATUS',
         template_key: `${sourceKind}.${signal.event_type.toLowerCase()}`,
         template_payload: {
           event: signal.event_type,

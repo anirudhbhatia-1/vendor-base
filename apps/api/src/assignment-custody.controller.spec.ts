@@ -93,12 +93,15 @@ test('a reassignment is routed to reassign() with its compensation, not to endBe
 
 test('an arrival carries the device fix when there is one, and is a bare claim when there is not (9.4)', async () => {
   const seen: unknown[] = [];
-  const controller = new PartnerAssignmentController({
-    arriveAtVendor: async (input: { position?: unknown }) => {
-      seen.push(input.position ?? 'none');
-      return { assignment_state: 'ASSIGNED' };
-    },
-  } as never);
+  const controller = new PartnerAssignmentController(
+    {
+      arriveAtVendor: async (input: { position?: unknown }) => {
+        seen.push(input.position ?? 'none');
+        return { assignment_state: 'ASSIGNED' };
+      },
+    } as never,
+    {} as never,
+  );
   await requestContextStorage.run(createRequestContext(), async () => {
     await controller.arriveVendor('01a0c40b-070f-7393-8216-0df916eb851f', {
       command_reference: 'SYNTH-CMD-ARRIVE-T1',
@@ -126,5 +129,44 @@ test('an arrival carries the device fix when there is one, and is a bare claim w
     { latitude: 26.91, longitude: 75.81, accuracy_meters: 15 },
     'none',
     { latitude: 26.91, longitude: 75.81, accuracy_meters: 101 },
+  ]);
+});
+
+test('a nudge to the customer is a fixed message the domain admits, carried by a notification (9.6)', async () => {
+  const enqueued: Record<string, unknown>[] = [];
+  const controller = new PartnerAssignmentController(
+    {
+      customerNudge: async (input: { kind: string }) => ({
+        recipient_user_id: '01a0c40b-070f-7393-8216-0df916eb8530',
+        order_reference: 'SYNTH-ORDER-T1',
+        deduplication_key: `partner_nudge:a1:${input.kind}:7`,
+        template_key: `partner_nudge.${input.kind.toLowerCase()}`,
+      }),
+    } as never,
+    {
+      enqueue: async (input: Record<string, unknown>) => {
+        enqueued.push(input);
+        return {};
+      },
+    } as never,
+  );
+  await requestContextStorage.run(createRequestContext(), async () => {
+    const result = await controller.nudgeCustomer('01a0c40b-070f-7393-8216-0df916eb851f', {
+      kind: 'CANNOT_FIND',
+    });
+    assert.deepEqual(result, { sent: true, kind: 'CANNOT_FIND' });
+    await assert.rejects(
+      controller.nudgeCustomer('01a0c40b-070f-7393-8216-0df916eb851f', { kind: 'CALL_ME' }),
+      /Bad Request/,
+    );
+  });
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0]?.['template_key'], 'partner_nudge.cannot_find');
+  assert.equal(enqueued[0]?.['deduplication_key'], 'partner_nudge:a1:CANNOT_FIND:7');
+  assert.equal(enqueued[0]?.['recipient_user_id'], '01a0c40b-070f-7393-8216-0df916eb8530');
+  // Nothing personal travels: no phone, no name, only the order and the message.
+  assert.deepEqual(Object.keys(enqueued[0]?.['template_payload'] as object).sort(), [
+    'kind',
+    'order_reference',
   ]);
 });

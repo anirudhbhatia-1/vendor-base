@@ -59,6 +59,7 @@ import {
   VendorFulfilmentService,
 } from '../src/vendor-fulfilment.js';
 import { handoverCodeDigest } from '../src/handover-code.js';
+import { waitLeaveSeconds } from '../src/wait-timer.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
 import {
   check,
@@ -1189,6 +1190,19 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       atVendor.assignment_state === 'AT_VENDOR' && atVendor.arrival_kind === 'TRUSTED_LOCATION',
       `A fix at the store was not a trusted arrival (${JSON.stringify(atVendor)})`,
     );
+    // 9.6 -- the customer can be reached only while the goods are in hand:
+    // at the counter, before pickup, there is nothing to say to them yet.
+    await rejects(
+      () =>
+        assignments.customerNudge({
+          context: partner,
+          delivery_assignment_id: created.delivery_assignment_id,
+          kind: 'AT_DOOR',
+          now: new Date(now.getTime() + 63_010),
+        }),
+      AssignmentConflictError,
+      'A partner not yet holding the order could nudge the customer',
+    );
     const beforeCustody = await assignments.listActiveForPartner({
       partner_user_id: partnerId,
     });
@@ -1227,11 +1241,14 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         WHERE delivery_assignment_id=$1 AND partner_user_id=$2`,
       [created.delivery_assignment_id, partnerId],
     );
+    // The leave threshold is the setting in force at the arrival (600 unless
+    // an earlier module on this database moved it), read rather than assumed.
+    const leaveInForce = await waitLeaveSeconds(pool, new Date(now.getTime() + 63_000));
     check(
       openedWait.rows[0]?.wait_state === 'RUNNING' &&
         openedWait.rows[0].first_threshold_seconds === 300 &&
-        openedWait.rows[0].leave_threshold_seconds === 600 &&
-        openedWait.rows[0].max_credit_seconds === 900 &&
+        openedWait.rows[0].leave_threshold_seconds === leaveInForce &&
+        openedWait.rows[0].max_credit_seconds === Math.max(900, leaveInForce) &&
         openedWait.rows[0].rate_minor_per_minute === 100 &&
         openedWait.rows[0].started_at.getTime() === now.getTime() + 63_000,
       `The arrival did not open the wait under the policy (${JSON.stringify(openedWait.rows[0])})`,
@@ -3655,13 +3672,105 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       now: new Date(now.getTime() + 65_000),
       reason_code: 'ROUTE_STARTED',
     });
+    // 9.6 -- reaching the customer without their number: a fixed message
+    // the platform carries to the order's customer, once per kind per two
+    // minutes, while the partner holds the goods. Nothing personal crosses.
+    const nudge = await assignments.customerNudge({
+      context: partner,
+      delivery_assignment_id: created.delivery_assignment_id,
+      kind: 'CANNOT_FIND',
+      now: new Date(now.getTime() + 65_500),
+    });
+    check(
+      nudge.recipient_user_id === customerId &&
+        nudge.template_key === 'partner_nudge.cannot_find' &&
+        nudge.order_reference === orderA.order_reference &&
+        Object.keys(nudge).sort().join(',') ===
+          'deduplication_key,order_reference,recipient_user_id,template_key',
+      `The nudge did not name the order's customer and only that (${JSON.stringify(nudge)})`,
+    );
+    await notifications.enqueue({
+      context: systemContext(systemActorId),
+      recipient_user_id: nudge.recipient_user_id,
+      notification_kind: 'ORDER_STATUS',
+      template_key: nudge.template_key,
+      template_payload: { order_reference: nudge.order_reference, kind: 'CANNOT_FIND' },
+      channels: ['IN_APP'],
+      source_kind: 'partner_nudge',
+      source_id: createUuidV7(),
+      source_event_type: 'CANNOT_FIND',
+      deduplication_key: nudge.deduplication_key,
+      now: new Date(now.getTime() + 65_500),
+    });
+    await rejects(
+      () =>
+        assignments.customerNudge({
+          context: partner,
+          delivery_assignment_id: created.delivery_assignment_id,
+          kind: 'CANNOT_FIND',
+          now: new Date(now.getTime() + 65_600),
+        }),
+      AssignmentConflictError,
+      'A second nudge within the interval was admitted',
+    );
+    const strangerNudge = await assignments
+      .customerNudge({
+        context: partnerContext(strangerPartnerId),
+        delivery_assignment_id: created.delivery_assignment_id,
+        kind: 'AT_DOOR',
+        now: new Date(now.getTime() + 65_700),
+      })
+      .then(() => 'admitted')
+      .catch((error: unknown) => (error instanceof AssignmentNotFoundError ? 'hidden' : 'other'));
+    check(
+      strangerNudge === 'hidden',
+      `Another partner could nudge this customer (${strangerNudge})`,
+    );
+
+    // 9.6 -- arrival at the door is trusted by the device's fix against the
+    // delivery address. Until audit run 61 it was the partner's word.
     const atCustomer = await assignments.arriveAtCustomer({
       command_reference: 'SYNTH-CMD-ARRIVE-DELIVERY-CLOSURE',
       context: partner,
       delivery_assignment_id: created.delivery_assignment_id,
       expected_version: enRoute.version,
       now: new Date(now.getTime() + 66_000),
+      position: { latitude: 26.9111, longitude: 75.815, accuracy_meters: 10 },
       reason_code: 'CUSTOMER_LOCATION_ARRIVAL',
+    });
+    check(
+      atCustomer.assignment_state === 'ARRIVED' &&
+        atCustomer.customer_arrival_kind === 'TRUSTED_LOCATION' &&
+        atCustomer.customer_arrival_distance_metres !== null &&
+        atCustomer.customer_arrival_distance_metres < 30 &&
+        atCustomer.customer_arrival_claim_reason === null,
+      `A fix at the door was not a trusted arrival (${JSON.stringify(atCustomer)})`,
+    );
+    // The customer is told the partner is at the door -- the event, not the person.
+    await notifications.syncDomainSignals({
+      context: systemContext(systemActorId),
+      now: new Date(now.getTime() + 66_100),
+    });
+    const arrivalNotice = await pool.query<{
+      template_key: string;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT template_key, template_payload AS payload FROM marketplace.notification_intents
+        WHERE recipient_user_id=$1 AND source_kind='assignment_event'`,
+      [customerId],
+    );
+    check(
+      arrivalNotice.rows.length === 1 &&
+        arrivalNotice.rows[0]?.template_key === 'assignment_event.arrived' &&
+        arrivalNotice.rows[0].payload['order_reference'] === orderA.order_reference &&
+        !('partner_user_id' in arrivalNotice.rows[0].payload),
+      `The customer was not told the partner is at the door (${JSON.stringify(arrivalNotice.rows)})`,
+    );
+    // Delivered here -- the nudge and the arrival -- so nothing is left
+    // pending for the notifications module's own count.
+    await notifications.deliverPending({
+      context: systemContext(systemActorId),
+      now: new Date(now.getTime() + 66_200),
     });
     const deliveryOtp = '515151';
     await pool.query(

@@ -14,8 +14,10 @@ import {
   AssignmentInputError,
   AssignmentNotFoundError,
   AssignmentVersionError,
+  type DeliveryAssignmentRecord,
 } from '../src/assignment-custody.js';
 import { handoverCodeDigest } from '../src/handover-code.js';
+import { PartnerWaitConflictError, PartnerWaitPolicyService } from '../src/partner-wait-policy.js';
 import {
   activateConfigurationVersion,
   approveConfigurationVersion,
@@ -48,6 +50,7 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
     connection_string: connectionString,
     hash_key: HASH_KEY,
   });
+  const waits = new PartnerWaitPolicyService({ connection_string: connectionString });
   const adminId = createUuidV7();
   const partnerOneId = createUuidV7();
   const partnerTwoId = createUuidV7();
@@ -320,14 +323,55 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       now: new Date(now.getTime() + 14_000),
       reason_code: 'ROUTE_STARTED',
     });
+    // 9.6 -- an attempt with no order has no door to measure against: the
+    // arrival stands UNVERIFIED with that reason, the partner proceeds, and
+    // waiting pay at the door is refused until the door is known.
     const arrived = await service.arriveAtCustomer({
       command_reference: 'SYNTH-CMD-ARRIVE-CUSTOMER-A001',
       context: partnerOne,
       delivery_assignment_id: first.delivery_assignment_id,
       expected_version: enRoute.version,
       now: new Date(now.getTime() + 15_000),
+      position: AT_THE_COUNTER,
       reason_code: 'CUSTOMER_LOCATION_ARRIVAL',
     });
+    const arrivedEvent = await pool.query<{ reason_code: string }>(
+      `SELECT reason_code FROM marketplace.assignment_events
+        WHERE delivery_assignment_id=$1 AND event_type='ARRIVED'`,
+      [first.delivery_assignment_id],
+    );
+    check(
+      arrived.assignment_state === 'ARRIVED' &&
+        arrived.customer_arrival_kind === 'UNVERIFIED' &&
+        arrived.customer_arrival_claim_reason === 'NO_DESTINATION' &&
+        arrivedEvent.rows[0]?.reason_code === 'UNVERIFIED_CUSTOMER_ARRIVAL',
+      `An arrival with no door to measure against was not recorded as unverified (${JSON.stringify({ arrived, event: arrivedEvent.rows[0] })})`,
+    );
+    let doorWaitRefused = false;
+    try {
+      await waits.start({
+        context: partnerOne,
+        delivery_assignment_id: first.delivery_assignment_id,
+        command_reference: 'SYNTH-CMD-WAIT-DOOR-A001',
+        reason_code: 'CUSTOMER_WAIT_STARTED',
+        now: new Date(now.getTime() + 15_100),
+      });
+    } catch (error) {
+      doorWaitRefused = error instanceof PartnerWaitConflictError;
+    }
+    check(doorWaitRefused, 'Paid waiting at the door started on an unverified arrival');
+    let noCustomerToNudge = false;
+    try {
+      await service.customerNudge({
+        context: partnerOne,
+        delivery_assignment_id: first.delivery_assignment_id,
+        kind: 'AT_DOOR',
+        now: new Date(now.getTime() + 15_200),
+      });
+    } catch (error) {
+      noCustomerToNudge = error instanceof AssignmentConflictError;
+    }
+    check(noCustomerToNudge, 'A nudge was admitted for an attempt with no customer');
     // Delivery now completes only against the customer's code (DLP-30). The
     // hash is planted directly here because this script builds assignments
     // without a customer session; the control being exercised is the
@@ -369,16 +413,55 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
       'A failed code attempt was not durably counted',
     );
 
-    const delivered = await service.deliver({
-      command_reference: 'SYNTH-CMD-DELIVER-A001',
-      context: partnerOne,
-      delivery_assignment_id: first.delivery_assignment_id,
-      expected_version: arrived.version,
-      now: new Date(now.getTime() + 16_000),
-      otp: deliveryOtp,
-      proof_reference: 'SYNTH-PROOF-DELIVERY-A001',
-      reason_code: 'DELIVERY_PROOF_VERIFIED',
-    });
+    // 9.6 -- completion happens exactly once. Two deliveries of the same code
+    // arriving together (a double tap with two command references) are held
+    // on the row from a third session until both are queued; one completes
+    // and the other is refused, with one DELIVERED event and one closure.
+    const deliverBlocker = await pool.connect();
+    let deliverRace: readonly PromiseSettledResult<DeliveryAssignmentRecord>[] = [];
+    try {
+      await deliverBlocker.query('BEGIN');
+      await deliverBlocker.query(
+        'SELECT 1 FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1 FOR UPDATE',
+        [first.delivery_assignment_id],
+      );
+      const attempts = ['SYNTH-CMD-DELIVER-A001', 'SYNTH-CMD-DELIVER-A002'].map(
+        (commandReference) =>
+          service.deliver({
+            command_reference: commandReference,
+            context: partnerOne,
+            delivery_assignment_id: first.delivery_assignment_id,
+            expected_version: arrived.version,
+            now: new Date(now.getTime() + 16_000),
+            otp: deliveryOtp,
+            proof_reference: 'SYNTH-PROOF-DELIVERY-A001',
+            reason_code: 'DELIVERY_PROOF_VERIFIED',
+          }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await deliverBlocker.query('COMMIT');
+      deliverRace = await Promise.allSettled(attempts);
+    } finally {
+      deliverBlocker.release();
+    }
+    const deliveredOnce = deliverRace.filter(
+      (result): result is PromiseFulfilledResult<DeliveryAssignmentRecord> =>
+        result.status === 'fulfilled',
+    );
+    const deliverTrail = await pool.query<{ events: string; closures: string }>(
+      `SELECT (SELECT count(*) FROM marketplace.assignment_events
+                WHERE delivery_assignment_id=$1 AND event_type='DELIVERED')::text AS events,
+              (SELECT count(*) FROM marketplace.custody_events
+                WHERE delivery_assignment_id=$1 AND custody_state='DELIVERED')::text AS closures`,
+      [first.delivery_assignment_id],
+    );
+    check(
+      deliveredOnce.length === 1 &&
+        deliverTrail.rows[0]?.events === '1' &&
+        deliverTrail.rows[0].closures === '1',
+      `A contested delivery did not complete exactly once (${JSON.stringify({ outcomes: deliverRace.map((r) => (r.status === 'rejected' ? String(r.reason) : 'ok')), trail: deliverTrail.rows[0] })})`,
+    );
+    const delivered = (deliveredOnce[0] as PromiseFulfilledResult<DeliveryAssignmentRecord>).value;
     const spent = await pool.query<{ delivery_otp_hash: string | null }>(
       'SELECT delivery_otp_hash FROM marketplace.delivery_assignments WHERE delivery_assignment_id=$1',
       [first.delivery_assignment_id],
@@ -390,6 +473,13 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
     check(
       delivered.assignment_state === 'DELIVERED' && delivered.custody_state === 'DELIVERED',
       'Delivery did not close custody',
+    );
+    // 9.6 -- the customer's code read to the partner is the door: the
+    // unverified arrival is confirmed by it.
+    check(
+      delivered.customer_arrival_kind === 'CUSTOMER_CONFIRMED' &&
+        delivered.customer_arrival_claim_reason === null,
+      `The customer's code did not confirm the arrival (${JSON.stringify(delivered)})`,
     );
 
     const returnedSeed = await service.create({
@@ -1156,6 +1246,7 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
     check(historyProtected, 'Assignment history was not append-only');
   } finally {
     await service.close();
+    await waits.close();
     await pool
       .query(
         `TRUNCATE marketplace.return_tasks, marketplace.custody_events,

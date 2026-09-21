@@ -122,6 +122,9 @@ type Assignment = {
     readonly claimed_at: string;
     readonly reason: 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
   } | null;
+  /** How the arrival at the customer's door was trusted (9.6). */
+  readonly customer_arrival_kind?: 'TRUSTED_LOCATION' | 'UNVERIFIED' | 'CUSTOMER_CONFIRMED' | null;
+  readonly customer_arrival_claim_reason?: string | null;
 };
 
 type Availability = {
@@ -181,12 +184,17 @@ function ActiveJob({
   busy,
   lastFix,
   onAct,
+  onNudge,
   onRefresh,
 }: {
   readonly assignment: Assignment;
   readonly busy: boolean;
   /** Where the phone last placed the partner, for the written route (9.4). */
   readonly lastFix: { readonly latitude: number; readonly longitude: number } | null;
+  readonly onNudge: (
+    assignment: Assignment,
+    kind: 'AT_DOOR' | 'CANNOT_FIND' | 'WAITING_OUTSIDE',
+  ) => Promise<void>;
   readonly onRefresh: () => void;
   readonly onAct: (
     assignment: Assignment,
@@ -331,7 +339,46 @@ function ActiveJob({
           {dropAddress.delivery_instructions ? (
             <p className="drop-address__instructions">{dropAddress.delivery_instructions}</p>
           ) : null}
+          {/* The route in words to the door too (DLP-46): the map is a handoff. */}
+          {directionSentence(lastFix, dropAddress) ? (
+            <p>{directionSentence(lastFix, dropAddress)}</p>
+          ) : null}
+          {/* Reaching the customer without their number (9.6, DLP-28): three
+              fixed messages the platform carries. Masked calling is gated. */}
+          <div className="ns-row">
+            {(
+              [
+                ['AT_DOOR', 'Tell them I am at the door'],
+                ['CANNOT_FIND', 'Tell them I cannot find the door'],
+                ['WAITING_OUTSIDE', 'Tell them I am waiting outside'],
+              ] as const
+            ).map(([kind, label]) => (
+              <Button
+                busy={busy}
+                key={kind}
+                onClick={() => void onNudge(assignment, kind)}
+                size="small"
+                variant="ghost"
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
         </Card>
+      ) : null}
+
+      {assignment.assignment_state === 'ARRIVED' &&
+      assignment.customer_arrival_kind === 'UNVERIFIED' ? (
+        <Notice live="polite" tone="warning">
+          Your phone could not place you at the address
+          {assignment.customer_arrival_claim_reason === 'POOR_ACCURACY'
+            ? ' precisely'
+            : assignment.customer_arrival_claim_reason === 'OUT_OF_RANGE'
+              ? ' — it puts you away from it'
+              : ''}
+          . The customer’s code confirms the handover. Waiting pay needs your location here; if you
+          cannot reach them, report it below.
+        </Notice>
       ) : null}
 
       {atVendor && !blocked ? (
@@ -794,7 +841,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       // An arrival carries the phone's fix (9.4); the server decides whether
       // it places the partner at the store. Without one it is a claim.
       let fix: Record<string, number> = {};
-      if (action === 'arrive-vendor') {
+      if (action === 'arrive-vendor' || action === 'arrive-customer') {
         const position = await devicePosition();
         if (position) {
           setLastFix({ latitude: position.latitude, longitude: position.longitude });
@@ -817,6 +864,10 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       await refresh();
       if (action === 'arrive-vendor' && outcome.arrival_claim) {
         setMessage('Arrival noted. The store has to confirm you are at the counter.');
+      } else if (action === 'arrive-customer' && outcome.customer_arrival_kind === 'UNVERIFIED') {
+        setMessage(
+          'Arrival noted, but your phone could not place you at the address. The customer’s code will confirm the handover.',
+        );
       } else {
         setMessage(`${describedAs ?? action.replaceAll('-', ' ')} recorded.`);
       }
@@ -882,6 +933,26 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Availability could not be changed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** A fixed message to the customer through the platform (9.6, DLP-28). */
+  async function nudge(
+    assignment: Assignment,
+    kind: 'AT_DOOR' | 'CANNOT_FIND' | 'WAITING_OUTSIDE',
+  ) {
+    setBusy(true);
+    setError(null);
+    try {
+      await partnerRequest(
+        `partner/assignments/${assignment.delivery_assignment_id}/nudge-customer`,
+        { method: 'POST', body: JSON.stringify({ kind }) },
+      );
+      setMessage('The customer has been told.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The customer could not be told.');
     } finally {
       setBusy(false);
     }
@@ -1060,6 +1131,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
                 key={`${activeJob.delivery_assignment_id}:${activeJob.assignment_state}`}
                 lastFix={lastFix}
                 onAct={act}
+                onNudge={nudge}
                 onRefresh={() =>
                   void refresh().catch(() =>
                     setError('Could not refresh this delivery. Try again.'),

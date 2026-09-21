@@ -89,6 +89,25 @@ function describe(notice: Notice, t: (key: string, fallback: string) => string):
       )}`;
     case 'vendor_order_event.picked_up':
       return t('customer.notification.picked_up', 'Your order has left the shop.');
+    // The partner at the door, and what they may say to you without your
+    // number (9.6, DLP-28): the platform carries a fixed message, never a call.
+    case 'assignment_event.arrived':
+      return t(
+        'customer.notification.partner_arrived',
+        'Your delivery partner is at your door. Have your delivery code ready.',
+      );
+    case 'partner_nudge.at_door':
+      return t('customer.notification.nudge_at_door', 'Your delivery partner is at the door.');
+    case 'partner_nudge.cannot_find':
+      return t(
+        'customer.notification.nudge_cannot_find',
+        'Your delivery partner cannot find your door. Check your address instructions or meet them outside.',
+      );
+    case 'partner_nudge.waiting_outside':
+      return t(
+        'customer.notification.nudge_waiting_outside',
+        'Your delivery partner is waiting outside with your order.',
+      );
     case 'delivery.completed':
     case 'vendor_order_event.delivered':
       return t('customer.notification.delivered', 'Your order was delivered.');

@@ -15,12 +15,21 @@ import {
   AssignmentCustodyService,
   AssignmentInputError,
   AssignmentNotFoundError,
+  CUSTOMER_NUDGE_KINDS,
+  LocalNotificationService,
   MAX_TRUSTED_ACCURACY_METRES,
+  type CustomerNudgeKind,
 } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {
+  PLATFORM_SYSTEM_USER_ID,
+  createAuthenticatedActor,
+  createRequestContext,
+  createUuidV7,
+  parseUuidV7,
+} from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
-import { ASSIGNMENT_CUSTODY } from './tokens.js';
+import { ASSIGNMENT_CUSTODY, LOCAL_NOTIFICATIONS } from './tokens.js';
 import {
   booleanField,
   dateField,
@@ -69,7 +78,61 @@ function transition(value: Record<string, unknown>, assignmentId: string) {
 
 @Controller('partner')
 export class PartnerAssignmentController {
-  constructor(@Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService) {}
+  constructor(
+    @Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService,
+    @Inject(LOCAL_NOTIFICATIONS) private readonly notifications: LocalNotificationService,
+  ) {}
+
+  /**
+   * A fixed message to the customer, without their number (9.6, DLP-28):
+   * "at the door", "cannot find you", "waiting outside". The domain says who
+   * and whether; the notification carries it. Masked calling stays gated
+   * (COM-08).
+   */
+  @Post('assignments/:delivery_assignment_id/nudge-customer')
+  @actOnAssignment
+  @HttpCode(200)
+  async nudgeCustomer(@Param('delivery_assignment_id') id: string, @Body() raw: unknown) {
+    const value = object(raw);
+    const kind = stringField(value, 'kind');
+    if (!(CUSTOMER_NUDGE_KINDS as readonly string[]).includes(kind)) {
+      throw new BadRequestException();
+    }
+    try {
+      const context = currentRequestContext();
+      const nudge = await this.assignments.customerNudge({
+        context,
+        delivery_assignment_id: uuid(id),
+        kind: kind as CustomerNudgeKind,
+      });
+      // The platform carries the message: the notification is enqueued under
+      // the system actor, on the partner's request and correlation ids.
+      await this.notifications.enqueue({
+        context: createRequestContext({
+          actor: createAuthenticatedActor({
+            actor_id: PLATFORM_SYSTEM_USER_ID,
+            actor_kind: 'system',
+            session_id: createUuidV7(),
+          }),
+          correlation_id: context.correlation_id,
+          request_id: context.request_id,
+        }),
+        recipient_user_id: nudge.recipient_user_id,
+        notification_kind: 'ORDER_STATUS',
+        template_key: nudge.template_key,
+        template_payload: { order_reference: nudge.order_reference, kind },
+        channels: ['IN_APP', 'PUSH'],
+        source_kind: 'partner_nudge',
+        source_id: createUuidV7(),
+        source_event_type: kind,
+        deduplication_key: nudge.deduplication_key,
+      });
+      return { sent: true, kind };
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
 
   /** What this partner has been recorded as owed for attempts taken from them (9.3). */
   @Get('compensations')
@@ -244,8 +307,26 @@ export class PartnerAssignmentController {
   @actOnAssignment
   @HttpCode(200)
   async arriveCustomer(@Param('delivery_assignment_id') id: string, @Body() raw: unknown) {
+    const value = object(raw);
+    // The device's fix against the delivery address (9.6); without it the
+    // arrival stands unverified until the customer's code confirms the door.
+    const located = typeof value['latitude'] === 'number' && typeof value['longitude'] === 'number';
     try {
-      return await this.assignments.arriveAtCustomer(transition(object(raw), id));
+      return await this.assignments.arriveAtCustomer({
+        ...transition(value, id),
+        ...(located
+          ? {
+              position: {
+                latitude: numberField(value, 'latitude'),
+                longitude: numberField(value, 'longitude'),
+                accuracy_meters:
+                  typeof value['accuracy_meters'] === 'number'
+                    ? numberField(value, 'accuracy_meters')
+                    : MAX_TRUSTED_ACCURACY_METRES + 1,
+              },
+            }
+          : {}),
+      });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();
       translateDomainError(error);

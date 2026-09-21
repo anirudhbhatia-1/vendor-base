@@ -417,7 +417,7 @@ test('the store is shown in words with its landmark, and the arrival waits for t
     'the landmark and a written direction stand beside the map',
   );
   assert.ok(
-    source.includes("if (action === 'arrive-vendor') {") &&
+    source.includes("if (action === 'arrive-vendor' || action === 'arrive-customer') {") &&
       source.includes('const position = await devicePosition();'),
     'an arrival carries the phone’s fix',
   );
@@ -446,5 +446,26 @@ test('the store’s estimate is read to the waiting partner with its reason (9.5
   assert.equal(
     readyBySentence('2026-09-21T09:50:00.000Z', null, now),
     'The store says it should be ready now',
+  );
+});
+
+test('the door is reached by fix and by message, never by number (9.6)', () => {
+  const source = panel('partner-workspace.tsx');
+  assert.ok(
+    source.includes("if (action === 'arrive-vendor' || action === 'arrive-customer') {"),
+    'the arrival at the customer carries the phone’s fix too',
+  );
+  assert.ok(
+    source.includes("['AT_DOOR', 'Tell them I am at the door']") &&
+      source.includes('nudge-customer'),
+    'the partner reaches the customer through fixed platform messages',
+  );
+  assert.ok(
+    !/tel:|phone_number|customer_phone/.test(source),
+    'no phone number is rendered or dialled from the partner app',
+  );
+  assert.ok(
+    source.includes("assignment.customer_arrival_kind === 'UNVERIFIED'"),
+    'an unverified arrival is said, with the code as the proof of the door',
   );
 });

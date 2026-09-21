@@ -1018,11 +1018,24 @@ export function createApiClient(options: ApiClientOptions) {
             json: body,
           }),
 
-        arriveAtCustomer: (assignmentId: string, body: AssignmentTransition) =>
+        arriveAtCustomer: (
+          assignmentId: string,
+          body: AssignmentTransition & Partial<DevicePosition>,
+        ) =>
           r<DeliveryAssignment>(`/partner/assignments/${assignmentId}/arrive-customer`, {
             method: 'POST',
             json: body,
           }),
+
+        /** A fixed message to the customer without their number (9.6, DLP-28). */
+        nudgeCustomer: (
+          assignmentId: string,
+          body: { kind: 'AT_DOOR' | 'CANNOT_FIND' | 'WAITING_OUTSIDE' },
+        ) =>
+          r<{ sent: boolean; kind: string }>(
+            `/partner/assignments/${assignmentId}/nudge-customer`,
+            { method: 'POST', json: body },
+          ),
 
         /**
          * Completion needs the customer's code (CUS-56), not only a proof

@@ -175,6 +175,7 @@ assert(
       '0100_attempt_reassignment',
       '0101_trusted_arrival',
       '0102_wait_at_arrival',
+      '0103_customer_arrival',
     ]),
   'Unexpected reviewed migrations',
 );

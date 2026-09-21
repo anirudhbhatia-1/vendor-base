@@ -690,6 +690,12 @@ export type DeliveryAssignment = {
     claimed_at: string;
     reason: 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
   } | null;
+  /** How the arrival at the customer's door was trusted (9.6), once recorded. */
+  customer_arrival_kind?: 'TRUSTED_LOCATION' | 'UNVERIFIED' | 'CUSTOMER_CONFIRMED' | null;
+  customer_arrived_at?: string | null;
+  customer_arrival_distance_metres?: number | null;
+  customer_arrival_claim_reason?:
+    'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE' | 'NO_DESTINATION' | null;
 };
 
 /** The device's fix, sent with an arrival (9.4); without it the arrival is a claim. */

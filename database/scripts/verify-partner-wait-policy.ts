@@ -41,12 +41,14 @@ export async function verifyPartnerWaitPolicy(connectionString: string): Promise
       [locationId, vendorId, createUuidV7()],
     );
     await pool.query(
+      // A trusted arrival at the door (9.6): only that earns the waiting pay.
       `INSERT INTO marketplace.delivery_assignments
         (delivery_assignment_id,source_order_reference,vendor_location_id,partner_user_id,
          assignment_state,custody_state,package_count,approximate_pickup_area,
-         approximate_drop_area,request_id,correlation_id,created_at,updated_at)
+         approximate_drop_area,customer_arrival_kind,customer_arrived_at,
+         request_id,correlation_id,created_at,updated_at)
        VALUES($1,'SYNTH-ORDER-WAIT-0001',$2,$3,'ARRIVED','IN_CUSTODY',1,
-         'SYNTH Wait Store Jaipur','SYNTH Customer Jaipur',$4,$4,$5,$5)`,
+         'SYNTH Wait Store Jaipur','SYNTH Customer Jaipur','TRUSTED_LOCATION',$5,$4,$4,$5,$5)`,
       [assignmentId, locationId, partnerId, createUuidV7(), startedAt],
     );
     const partner = context('delivery_partner', partnerId);
@@ -58,6 +60,10 @@ export async function verifyPartnerWaitPolicy(connectionString: string): Promise
       now: startedAt,
     });
     check(timer.wait_state === 'RUNNING', 'Wait timer did not start');
+    // The thresholds are the timer's own (9.5): the included minutes from the
+    // policy, the leave threshold from its setting -- read, not assumed.
+    const firstAt = timer.first_threshold_seconds;
+    const leaveAt = timer.leave_threshold_seconds;
     await rejects(
       () =>
         service.leave({
@@ -65,7 +71,7 @@ export async function verifyPartnerWaitPolicy(connectionString: string): Promise
           delivery_assignment_id: assignmentId,
           command_reference: 'SYNTH-CMD-WAIT-EARLY-0001',
           reason_code: 'WAIT_POLICY_LEAVE',
-          now: new Date(startedAt.getTime() + 599_000),
+          now: new Date(startedAt.getTime() + (leaveAt - 1) * 1_000),
         }),
       PartnerWaitConflictError,
       'Policy allowed early leave',
@@ -73,10 +79,10 @@ export async function verifyPartnerWaitPolicy(connectionString: string): Promise
     const first = await service.refresh({
       context: partner,
       delivery_assignment_id: assignmentId,
-      now: new Date(startedAt.getTime() + 300_000),
+      now: new Date(startedAt.getTime() + firstAt * 1_000),
     });
     check(first.wait_state === 'THRESHOLD_ONE', 'First wait threshold was not recorded');
-    const secondAt = new Date(startedAt.getTime() + 660_000);
+    const secondAt = new Date(startedAt.getTime() + (leaveAt + 60) * 1_000);
     const advanced = await service.advanceDue({
       context: context('system', systemId),
       now: secondAt,
@@ -96,7 +102,11 @@ export async function verifyPartnerWaitPolicy(connectionString: string): Promise
       now: secondAt,
     });
     check(left.wait_state === 'LEFT_POLICY', 'Policy leave did not close timer');
-    check(left.wait_adjustment_minor === 600, 'Wait earning adjustment was calculated incorrectly');
+    check(
+      left.wait_adjustment_minor ===
+        Math.floor((leaveAt + 60 - firstAt) / 60) * timer.rate_minor_per_minute,
+      `Wait earning adjustment was calculated incorrectly (${left.wait_adjustment_minor})`,
+    );
     await service.leave({
       context: partner,
       delivery_assignment_id: assignmentId,

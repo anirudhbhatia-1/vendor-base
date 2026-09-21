@@ -106,6 +106,11 @@ export interface DeliveryAssignmentRecord {
     readonly claimed_at: string;
     readonly reason: ArrivalClaimReason;
   } | null;
+  /** How the arrival at the customer's door was trusted (9.6), once recorded. */
+  readonly customer_arrival_kind: CustomerArrivalKind | null;
+  readonly customer_arrived_at: string | null;
+  readonly customer_arrival_distance_metres: number | null;
+  readonly customer_arrival_claim_reason: CustomerArrivalClaimReason | null;
   readonly assignment_state: AssignmentState;
   readonly custody_state: CustodyState;
   readonly delivery_assignment_id: UuidV7;
@@ -121,6 +126,22 @@ export interface DeliveryAssignmentRecord {
 
 export type ArrivalKind = 'TRUSTED_LOCATION' | 'VENDOR_CONFIRMED';
 export type ArrivalClaimReason = 'NO_LOCATION' | 'POOR_ACCURACY' | 'OUT_OF_RANGE';
+/**
+ * How the arrival at the customer's door is trusted (9.6): the device's fix at
+ * the address, or -- failing that -- the customer's own code read to the
+ * partner at the handover. An UNVERIFIED arrival says why the fix fell short.
+ */
+export type CustomerArrivalKind = 'TRUSTED_LOCATION' | 'UNVERIFIED' | 'CUSTOMER_CONFIRMED';
+export type CustomerArrivalClaimReason = ArrivalClaimReason | 'NO_DESTINATION';
+/** What the partner may say to the customer without a number (9.6, DLP-28). */
+export const CUSTOMER_NUDGE_KINDS = Object.freeze([
+  'AT_DOOR',
+  'CANNOT_FIND',
+  'WAITING_OUTSIDE',
+] as const);
+export type CustomerNudgeKind = (typeof CUSTOMER_NUDGE_KINDS)[number];
+/** One nudge of each kind per this many seconds: a doorbell, not a siren. */
+export const CUSTOMER_NUDGE_INTERVAL_SECONDS = 120;
 
 /** The store the assigned partner is heading for: its name, its landmark and its point. */
 export interface PickupLocation {
@@ -248,6 +269,10 @@ interface AssignmentRow {
   arrived_at: Date | null;
   arrival_claimed_at: Date | null;
   arrival_claim_reason: ArrivalClaimReason | null;
+  customer_arrival_kind: CustomerArrivalKind | null;
+  customer_arrived_at: Date | null;
+  customer_arrival_distance_metres: number | null;
+  customer_arrival_claim_reason: CustomerArrivalClaimReason | null;
   package_count: number;
   partner_user_id: string | null;
   correlation_id: string;
@@ -301,6 +326,10 @@ function assignmentRecord(row: AssignmentRow): DeliveryAssignmentRecord {
             reason: row.arrival_claim_reason,
           })
         : null,
+    customer_arrival_kind: row.customer_arrival_kind ?? null,
+    customer_arrived_at: row.customer_arrived_at?.toISOString() ?? null,
+    customer_arrival_distance_metres: row.customer_arrival_distance_metres ?? null,
+    customer_arrival_claim_reason: row.customer_arrival_claim_reason ?? null,
     package_count: row.package_count,
     partner_user_id: row.partner_user_id ? parseUuidV7(row.partner_user_id) : null,
     source_order_reference: row.source_order_reference,
@@ -730,6 +759,10 @@ export class AssignmentCustodyService {
         arrived_at: null,
         arrival_distance_metres: null,
         arrival_claim: null,
+        customer_arrival_kind: null,
+        customer_arrived_at: null,
+        customer_arrival_distance_metres: null,
+        customer_arrival_claim_reason: null,
         vendor_order_id: row.vendor_order_id ? parseUuidV7(row.vendor_order_id) : null,
         version: row.version,
       });
@@ -1606,8 +1639,162 @@ export class AssignmentCustodyService {
   async beginRoute(input: TransitionInput): Promise<DeliveryAssignmentRecord> {
     return this.#partnerTransition(input, 'PICKED_UP', 'EN_ROUTE_TO_CUSTOMER', 'EN_ROUTE');
   }
-  async arriveAtCustomer(input: TransitionInput): Promise<DeliveryAssignmentRecord> {
-    return this.#partnerTransition(input, 'EN_ROUTE_TO_CUSTOMER', 'ARRIVED', 'ARRIVED');
+  /**
+   * Arrival at the customer's door (9.6). The device's fix is measured
+   * against the delivery address: within the arrival radius with a usable
+   * accuracy it is a TRUSTED_LOCATION arrival; otherwise the arrival stands
+   * UNVERIFIED with its reason. Either way the partner proceeds -- the
+   * customer reading their code is the proof of the door, and a delivery
+   * against it makes the arrival CUSTOMER_CONFIRMED -- but only a trusted
+   * arrival earns the customer-unreachable waiting pay. Until audit run 61
+   * the partner's word from anywhere was the arrival.
+   */
+  async arriveAtCustomer(
+    input: TransitionInput & { readonly position?: DevicePosition },
+  ): Promise<DeliveryAssignmentRecord> {
+    const who = actor(input.context, ['delivery_partner']);
+    const fix = position(input.position);
+    const now = input.now ?? new Date();
+    const radius = await this.arrivalRadiusMetres(now);
+    return transaction(this.#pool, async (client) => {
+      const prior = await replay(client, {
+        command_reference: input.command_reference,
+        delivery_assignment_id: input.delivery_assignment_id,
+        event_type: 'ARRIVED',
+      });
+      if (prior) return prior;
+      const assignment = await lockAssignment(
+        client,
+        input.delivery_assignment_id,
+        input.expected_version,
+      );
+      this.#assertPartner(assignment, who.id);
+      if (
+        assignment.assignment_state !== 'EN_ROUTE_TO_CUSTOMER' ||
+        assignment.custody_state !== 'IN_CUSTODY'
+      ) {
+        throw new AssignmentConflictError('Assignment must be EN_ROUTE_TO_CUSTOMER');
+      }
+      // The door, as the quote fixed it. An attempt with no order behind it
+      // has no door to measure against.
+      const destination = await client.query<{ metres: string | null }>(
+        `SELECT CASE WHEN $2::double precision IS NULL THEN NULL
+                     ELSE ST_Distance(address.coordinates,
+                                      ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography)::integer
+                     END::text AS metres
+           FROM marketplace.delivery_assignments assignment
+           JOIN marketplace.vendor_orders orders ON orders.vendor_order_id = assignment.vendor_order_id
+           JOIN marketplace.checkout_groups grouping ON grouping.checkout_group_id = orders.checkout_group_id
+           JOIN marketplace.checkout_quotes quote ON quote.checkout_quote_id = grouping.checkout_quote_id
+           JOIN marketplace.customer_addresses address
+             ON address.customer_address_id = quote.customer_address_id
+          WHERE assignment.delivery_assignment_id = $1`,
+        [assignment.delivery_assignment_id, fix?.longitude ?? null, fix?.latitude ?? null],
+      );
+      const door = destination.rows[0];
+      const distance = door?.metres == null ? null : Number(door.metres);
+      let kind: CustomerArrivalKind = 'UNVERIFIED';
+      let reasonForClaim: CustomerArrivalClaimReason | null = null;
+      if (!door) reasonForClaim = 'NO_DESTINATION';
+      else if (fix === null) reasonForClaim = 'NO_LOCATION';
+      else if (fix.accuracy_meters > MAX_TRUSTED_ACCURACY_METRES) reasonForClaim = 'POOR_ACCURACY';
+      else if (distance === null || distance > radius) reasonForClaim = 'OUT_OF_RANGE';
+      else kind = 'TRUSTED_LOCATION';
+      await appendEvent(client, {
+        assignment,
+        command_reference: input.command_reference,
+        context: input.context,
+        event_type: 'ARRIVED',
+        next_custody_state: 'IN_CUSTODY',
+        next_state: 'ARRIVED',
+        now,
+        reason_code:
+          kind === 'TRUSTED_LOCATION' ? 'TRUSTED_CUSTOMER_ARRIVAL' : 'UNVERIFIED_CUSTOMER_ARRIVAL',
+        who,
+      });
+      const result = await client.query<AssignmentRow>(
+        `UPDATE marketplace.delivery_assignments
+            SET assignment_state='ARRIVED', customer_arrival_kind=$2, customer_arrived_at=$3,
+                customer_arrival_distance_metres=$4, customer_arrival_claim_reason=$5,
+                version=version+1, updated_at=$3
+          WHERE delivery_assignment_id=$1 RETURNING *`,
+        [assignment.delivery_assignment_id, kind, now, distance, reasonForClaim],
+      );
+      return assignmentRecord(requiredRow(result.rows, 'Arrived attempt was not returned'));
+    });
+  }
+
+  /**
+   * What the partner may send the customer, and to whom (9.6, DLP-28). No
+   * number and no name cross: the platform delivers a fixed message to the
+   * order's customer, once per kind per `CUSTOMER_NUDGE_INTERVAL_SECONDS`,
+   * only while the partner is holding the goods. The caller enqueues it; the
+   * deduplication key makes the enqueue idempotent.
+   */
+  async customerNudge(input: {
+    readonly context: RequestContext;
+    readonly delivery_assignment_id: UuidV7;
+    readonly kind: CustomerNudgeKind;
+    readonly now?: Date;
+  }): Promise<{
+    readonly recipient_user_id: UuidV7;
+    readonly order_reference: string;
+    readonly deduplication_key: string;
+    readonly template_key: string;
+  }> {
+    const who = actor(input.context, ['delivery_partner']);
+    if (!CUSTOMER_NUDGE_KINDS.includes(input.kind)) {
+      throw new AssignmentInputError('That is not a message the platform sends');
+    }
+    const now = input.now ?? new Date();
+    const found = await this.#pool.query<{
+      partner_user_id: string | null;
+      assignment_state: AssignmentState;
+      customer_user_id: string | null;
+      order_reference: string | null;
+      last_nudged_at: Date | null;
+    }>(
+      `SELECT assignment.partner_user_id, assignment.assignment_state,
+              grouping.customer_user_id, orders.order_reference,
+              (SELECT max(intent.created_at) FROM marketplace.notification_intents intent
+                WHERE intent.source_kind='partner_nudge'
+                  AND intent.deduplication_key LIKE $2) AS last_nudged_at
+         FROM marketplace.delivery_assignments assignment
+         LEFT JOIN marketplace.vendor_orders orders ON orders.vendor_order_id = assignment.vendor_order_id
+         LEFT JOIN marketplace.checkout_groups grouping ON grouping.checkout_group_id = orders.checkout_group_id
+        WHERE assignment.delivery_assignment_id=$1`,
+      [
+        input.delivery_assignment_id,
+        `partner_nudge:${input.delivery_assignment_id}:${input.kind}:%`,
+      ],
+    );
+    const row = requiredRow(found.rows, 'Delivery assignment was not found');
+    if (row.partner_user_id !== who.id) {
+      throw new AssignmentNotFoundError('Delivery assignment was not found');
+    }
+    if (!CUSTODY_STATES.includes(row.assignment_state)) {
+      throw new AssignmentConflictError(
+        'The customer can be reached while you are holding their order',
+      );
+    }
+    if (!row.customer_user_id || !row.order_reference) {
+      throw new AssignmentConflictError('This attempt has no customer to reach');
+    }
+    if (
+      row.last_nudged_at &&
+      now.getTime() - row.last_nudged_at.getTime() < CUSTOMER_NUDGE_INTERVAL_SECONDS * 1_000
+    ) {
+      throw new AssignmentConflictError(
+        'Give the customer a couple of minutes before asking again',
+      );
+    }
+    const bucket = Math.floor(now.getTime() / (CUSTOMER_NUDGE_INTERVAL_SECONDS * 1_000));
+    return Object.freeze({
+      recipient_user_id: parseUuidV7(row.customer_user_id),
+      order_reference: row.order_reference,
+      deduplication_key: `partner_nudge:${input.delivery_assignment_id}:${input.kind}:${bucket}`,
+      template_key: `partner_nudge.${input.kind.toLowerCase()}`,
+    });
   }
 
   async confirmPickup(
@@ -1851,9 +2038,15 @@ export class AssignmentCustodyService {
       const proofRef = proof(input.proof_reference);
       // The code is spent on success, so it cannot be replayed against a later
       // assignment or a re-opened handoff.
+      // The customer read their code to the partner: that is the door. An
+      // arrival the fix could not vouch for is confirmed by it (9.6).
       await client.query(
         `UPDATE marketplace.delivery_assignments
-            SET delivery_otp_hash = NULL, delivery_otp_expires_at = NULL, updated_at = $2
+            SET delivery_otp_hash = NULL, delivery_otp_expires_at = NULL, updated_at = $2,
+                customer_arrival_kind = CASE WHEN customer_arrival_kind = 'UNVERIFIED'
+                                             THEN 'CUSTOMER_CONFIRMED' ELSE customer_arrival_kind END,
+                customer_arrival_claim_reason = CASE WHEN customer_arrival_kind = 'UNVERIFIED'
+                                                     THEN NULL ELSE customer_arrival_claim_reason END
           WHERE delivery_assignment_id = $1`,
         [input.delivery_assignment_id, now],
       );

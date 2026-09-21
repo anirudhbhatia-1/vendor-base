@@ -3847,7 +3847,7 @@
       "name": "Server-confirmed custody",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Atomic custody commitment. Client shows server state; the handover also closes the vendor wait and records its pay in the same transaction (audit run 60)",
+      "notes": "Atomic custody commitment. Client shows server state; the handover also closes the vendor wait and records its pay in the same transaction (audit run 60); completion verified exactly once under a forced double delivery (audit run 61)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3870,7 +3870,7 @@
       "name": "Customer navigation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Drop area shown post-custody",
+      "notes": "Drop area shown post-custody; the exact address, landmark and instructions are joined only in custody states, with a written direction from the phone's last fix beside the map (audit run 61)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3892,7 +3892,7 @@
       "name": "Masked customer contact",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Unreachable-customer reporting uses the exception kind the schema allows",
+      "notes": "Unreachable-customer reporting uses the exception kind the schema allows; the partner reaches the customer through three fixed platform messages (at the door, cannot find, waiting outside), rate-limited, with no number crossing; the customer is told of the arrival (audit run 61)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3919,7 +3919,7 @@
       "name": "Arrival at customer",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "POST arrive-customer",
+      "notes": "POST arrive-customer with the device fix: trusted at the address or unverified with its reason; the customer's code confirms the door; only a trusted arrival earns the door wait (audit run 61 -- until then the partner's word from anywhere)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {

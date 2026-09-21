@@ -2064,6 +2064,41 @@ Five requirements. Two held (the pickup code is validated against the vendor, th
 
 **Step 9.5: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 61 (21 September 2026) — step 9.6, customer delivery
+
+Five requirements. Three held (the exact address only in custody; the delivery code with expiry, attempts and single use; completion closing custody, the order and the earning trigger in one commit) and two did not: arrival at the door was the partner's word from anywhere, and that word started the paid customer-unreachable wait; and there was no contact at all — the customer heard nothing between "left the shop" and "delivered", and a partner at the wrong gate had no way to say so short of a support report. One migration (0103); fifteen connected assertions, three unit tests; eight mutation probes, seven caught and one survived on a second guard.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Reveal exact customer address only after custody | Met (D-15, run 33): joined in the query for custody states only; no phone anywhere on the record. A written direction to the door now stands beside the map (DLP-46). |
+| 2 | Masked contact and navigation fallback | Navigation met; **no contact existed** — masked calling is gated (COM-08) and nothing stood in for it — P61-02. |
+| 3 | Record arrival | **The partner's word** — `arriveAtCustomer` was a bare transition, and it opened the paid wait — P61-01. |
+| 4 | Validate delivery OTP or approved alternative proof | Met (8.6, run 55): keyed digest, expiry, five attempts counted durably, spent on success; alternative proof stays gated (DLP-31). |
+| 5 | Complete custody, fulfilment, order and earning exactly once | Met: one transaction closes custody, the membership and the vendor order; the outbox event settles the money once. Now verified under a forced double delivery. |
+
+**P61-01 — the door, trusted or confirmed.** 0103 adds `customer_arrival_kind` (`TRUSTED_LOCATION` / `UNVERIFIED` / `CUSTOMER_CONFIRMED`), `customer_arrived_at`, `customer_arrival_distance_metres` and `customer_arrival_claim_reason`; `ARRIVED` now requires a kind (NOT VALID for rows before it). `arriveAtCustomer` measures the fix against the delivery address in PostGIS under the same radius as the store; a trusted fix records the distance, anything else records why (`NO_LOCATION`, `POOR_ACCURACY`, `OUT_OF_RANGE`, or `NO_DESTINATION` for an attempt with no order). The partner proceeds either way — the customer reading their code is the proof of the door, and `deliver` turns an unverified arrival into `CUSTOMER_CONFIRMED`. `PartnerWaitPolicyService.start` at `ARRIVED` refuses unless the arrival is trusted: an unreachable customer without a fix at the address is a report to support, not a timer. The app sends the fix with the arrival and says when it fell short.
+
+**P61-02 — reaching the customer without a number.** The customer is told the partner is at the door: `syncDomainSignals` reads `ARRIVED` assignment events into `assignment_event.arrived` notices for the order's customer (the event and the order reference; nothing of the partner). `customerNudge` admits three fixed messages — at the door, cannot find the door, waiting outside — for the order's customer, once per kind per two minutes, only in custody, only by the partner holding it, and returns who and what with nothing personal; the API enqueues the notification under the platform actor on the partner's request ids. The customer's inbox reads each in words. The partner's card offers the three as buttons under the address. Masked calling remains gated.
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Any arrival is trusted (old) | *An arrival with no door to measure against was not recorded as unverified* |
+| Paid waiting at the door on any arrival (old) | *Paid waiting at the door started on an unverified arrival* |
+| The code does not confirm the door | *The customer's code did not confirm the arrival* |
+| A nudge before custody | *A partner not yet holding the order could nudge the customer* — after the check was moved to an attempt with a customer; on the order-less attempt the "no customer" refusal had made it vacuous |
+| A nudge every second | *A second nudge within the interval was admitted* |
+| Any partner may nudge this customer | *Another partner could nudge this customer (admitted)* |
+| The customer is not told of the arrival (old) | *The customer was not told the partner is at the door ([])* |
+| The delivery's state guard removed | **Survived**: under the forced race the loser is refused as stale by the version check, and a client that refreshed would be refused by the spent code before the state is looked at. The guard is the third layer; exactly-once held on the other two. Kept, recorded. |
+
+**Forward findings.** (11.x) `assignment_event.arrived` and the nudges are IN_APP and PUSH notices; SMS fallback for a customer without the app is COM-03's audit. (COM-08) Masked calling stays gated; the nudges are the launch-scope stand-in. (9.2) The custody module's settings (`assignment.wait_leave_seconds`, `assignment.arrival_radius_metres`) leak to later modules on one database — the wait-policy verifier now reads its thresholds from the timer rather than assuming them, and the fulfilment verifier reads the leave setting in force. (carried) `ZONE` scopes by name; branch protection off; Android arrivals are claims.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 104 migration files (0000–0103), full ladder; `assignment_custody` 49 assertions (44 before), `vendor_fulfilment` 276 (270), `partner_wait_policy` 10, `local_notifications` 7. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 581 pass / 0 fail (579 before: the nudge route and the partner app's door checks); `pnpm test:integration` exit 0 on a rebuilt test stack; all eight probes on a rebuilt database.
+
+**Step 9.6: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

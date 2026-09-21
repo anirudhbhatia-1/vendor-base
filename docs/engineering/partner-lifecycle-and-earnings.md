@@ -156,6 +156,29 @@ without touching that aggregate:
   time to the preparation estimate with a reason (`DELAY_REASONS`), so the active record's
   `expected_ready_at` and `delay_reason_code` move with it and the wait card reads "The store says
   about N min more — running late: …" beside the thresholds, the pay so far and the cap.
+- **The door is reached by fix and by message, never by number (9.6, audit run 61).** The exact
+  address is joined into the partner's record only in custody states (D-15, run 33) and the record
+  carries no phone. `arriveAtCustomer` takes the device's fix and measures it against the delivery
+  address: within `assignment.arrival_radius_metres` with a usable accuracy the arrival is
+  `TRUSTED_LOCATION`; otherwise it stands `UNVERIFIED` with its reason (`NO_LOCATION`,
+  `POOR_ACCURACY`, `OUT_OF_RANGE`, or `NO_DESTINATION` for an attempt with no order behind it) and
+  the partner proceeds — the customer reading their code at the handover is the proof of the door,
+  and a delivery against it makes the arrival `CUSTOMER_CONFIRMED` (0103). Only a trusted arrival
+  may start the paid customer-unreachable wait; an unverified one is a report to support. The
+  customer is told the partner is at the door (`assignment_event.arrived`, the event and the
+  order, never the person). `customerNudge` admits three fixed messages — at the door, cannot
+  find the door, waiting outside — to the order's customer, once per kind per
+  `CUSTOMER_NUDGE_INTERVAL_SECONDS`, only in custody, only by the partner holding it; the API
+  enqueues it under the platform actor. Masked calling stays gated (COM-08). Until run 61 the
+  arrival at the door was the partner's word, it started the paid wait, and the customer heard
+  nothing until "delivered".
+- **Completion happens exactly once (9.6).** `deliver` validates the code in its own transaction
+  (so a wrong attempt is counted even when the caller's transaction unwinds), then locks the row,
+  requires `ARRIVED` with custody, spends the code, closes custody, ends the membership and
+  completes the vendor order in one commit; the `DELIVERED` outbox event settles the money once
+  (unique earning per attempt, settlement replayed by order reference). Verified with two
+  deliveries of the same code forced to arrive together: one completes, one is refused, one
+  event, one closure.
 - **Support and the emergency control travel with the job (9.4).** The field-ops panel with its
   reports and the always-visible Emergency control sit on the active job; an open safety report
   holds the job's next step.
