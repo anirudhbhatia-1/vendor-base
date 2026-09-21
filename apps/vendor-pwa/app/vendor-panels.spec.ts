@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { acceptanceSentence } from './orders-panel.js';
+import { acceptanceSentence, substitutionRuleSentence } from './orders-panel.js';
 import { statementToCsv } from './payouts-panel.js';
 import { verticesToWkt } from './service-area-panel.js';
 
@@ -103,6 +103,23 @@ test('declining states its consequences and records a real reason', () => {
     'the impact is asked of the API',
   );
   assert.ok(source.includes('declinePreview?.reasons'), 'the reasons offered are the API’s');
+});
+
+test('a pick is a draft that names the version it saw, and follows the customer’s rule', () => {
+  const source = code('orders-panel.tsx');
+  // Every line edit carries the pick version it was built against, so a
+  // queued or repeated tap cannot overwrite a newer answer (8.3).
+  assert.equal(
+    (source.match(/expected_version: (pick|weightFor|substituteFor)\.version/g) ?? []).length,
+    4,
+    'found, missing, weigh and substitute all send the pick version',
+  );
+  assert.ok(
+    source.includes("pick.substitution_preference === 'NO_SUBSTITUTION' ? null"),
+    'no replacement is offered on a refund-never-replace line',
+  );
+  assert.equal(substitutionRuleSentence('NO_SUBSTITUTION'), ' · customer: refund, never replace');
+  assert.equal(substitutionRuleSentence(null), '');
 });
 
 test('the acceptance record is stated as counts, before and after the decline', () => {

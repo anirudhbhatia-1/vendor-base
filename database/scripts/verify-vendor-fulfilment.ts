@@ -742,16 +742,119 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       `A stale expected_version did not report a version conflict (got ${staleRefusal})`,
     );
 
-    const found = await fulfilment.markLineFound({
+    // 8.3 -- the ordered lines are the snapshot the customer paid against:
+    // immutable at the database, whoever asks.
+    let lineMutation: unknown = null;
+    try {
+      await pool.query(
+        'UPDATE marketplace.vendor_order_lines SET quantity=quantity+1 WHERE vendor_order_id=$1',
+        [orderA.vendor_order_id],
+      );
+    } catch (error) {
+      lineMutation = error;
+    }
+    check(
+      typeof lineMutation === 'object' &&
+        lineMutation !== null &&
+        (lineMutation as { code?: string }).code === '55000',
+      `An ordered line could be rewritten (${String(lineMutation)})`,
+    );
+
+    // 8.3 -- found is the line as ordered, or fewer of it: not more, and not
+    // at another price -- those are proposals for the customer. And every edit
+    // names the pick version it saw: a stale one is refused, not applied.
+    const foundInput = {
       context: vendorContext(storeA.ownerUserId),
       vendor_order_id: orderA.vendor_order_id,
       vendor_location_id: storeA.locationId,
       vendor_order_line_id: vendorOrderLineId as UuidV7,
+    };
+    await rejects(
+      () =>
+        fulfilment.markLineFound({
+          ...foundInput,
+          actual_quantity: 3,
+          actual_unit_price_minor: 20_000,
+          expected_version: 0,
+        }),
+      FulfilmentInputError,
+      'A found line was recorded with more units than were ordered',
+    );
+    await rejects(
+      () =>
+        fulfilment.markLineFound({
+          ...foundInput,
+          actual_quantity: 2,
+          actual_unit_price_minor: 19_000,
+          expected_version: 0,
+        }),
+      FulfilmentInputError,
+      'A found line was recorded at a price other than the one ordered',
+    );
+    let staleDraft: unknown = null;
+    try {
+      await fulfilment.markLineFound({
+        ...foundInput,
+        actual_quantity: 2,
+        actual_unit_price_minor: 20_000,
+        expected_version: 1,
+      });
+    } catch (error) {
+      staleDraft = error;
+    }
+    check(
+      staleDraft instanceof FulfilmentConflictError && staleDraft.code === 'VERSION_CONFLICT',
+      `A pick sent against a version the line never had was not refused as stale (${String(staleDraft)})`,
+    );
+    const found = await fulfilment.markLineFound({
+      ...foundInput,
       actual_quantity: 2,
       actual_unit_price_minor: 20_000,
+      expected_version: 0,
       now: new Date(now.getTime() + 7_000),
     });
-    check(found.pick_state === 'FOUND', 'Line pick did not persist FOUND state');
+    check(
+      found.pick_state === 'FOUND' && found.version === 1,
+      'Line pick did not persist FOUND state at version 1',
+    );
+    // The same draft again -- a queue built offline replaying, a second tap --
+    // is refused: it was already applied, and a newer answer may stand.
+    let replayedDraft: unknown = null;
+    try {
+      await fulfilment.markLineFound({
+        ...foundInput,
+        actual_quantity: 2,
+        actual_unit_price_minor: 20_000,
+        expected_version: 0,
+        now: new Date(now.getTime() + 7_100),
+      });
+    } catch (error) {
+      replayedDraft = error;
+    }
+    check(
+      replayedDraft instanceof FulfilmentConflictError && replayedDraft.code === 'VERSION_CONFLICT',
+      `A replayed pick draft was applied over the line (${String(replayedDraft)})`,
+    );
+    // With the version it has now, the picker may change their mind, and back.
+    const rethought = await fulfilment.markLineMissing({
+      ...foundInput,
+      expected_version: 1,
+      now: new Date(now.getTime() + 7_200),
+    });
+    const refound = await fulfilment.markLineFound({
+      ...foundInput,
+      actual_quantity: 2,
+      actual_unit_price_minor: 20_000,
+      expected_version: rethought.version,
+      now: new Date(now.getTime() + 7_300),
+    });
+    check(
+      rethought.pick_state === 'MISSING' &&
+        rethought.version === 2 &&
+        refound.pick_state === 'FOUND' &&
+        refound.version === 3,
+      `A picker could not change a found line to missing and back (${rethought.pick_state} v${rethought.version}, ${refound.pick_state} v${refound.version})`,
+    );
 
     // The pick list is the store's own. Store B's owner is a real vendor member
     // and could read A's pick list by order id under B's location -- the route
@@ -764,6 +867,12 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     check(
       ownPicks.some((pick) => pick.pick_state === 'FOUND'),
       'The store could not read its own pick list',
+    );
+    check(
+      ownPicks.every(
+        (pick) => pick.substitution_preference === 'ASK_CUSTOMER' && pick.variable_weight === false,
+      ),
+      `The pick list does not carry the customer's rule and whether the line is weighed (${JSON.stringify(ownPicks)})`,
     );
     await rejects(
       () =>
@@ -1266,6 +1375,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_order_line_id: collectionLine.rows[0].id as UuidV7,
       actual_quantity: 1,
       actual_unit_price_minor: 20_000,
+      expected_version: 0,
       now: new Date(collectionBase.getTime() + 4_000),
     });
     const readyP = await fulfilment.markReady({
@@ -1477,6 +1587,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       vendor_order_line_id: selfLine.rows[0].id as UuidV7,
       actual_quantity: 1,
       actual_unit_price_minor: 20_000,
+      expected_version: 0,
       now: new Date(selfBase.getTime() + 4_000),
     });
     const readyV = await fulfilment.markReady({
@@ -1907,6 +2018,9 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         vendor_location_id: storeA.locationId,
         catalogue_variant_id: product.catalogue_variant_id,
         quantity: 1,
+        // The third line is "refund, never replace": the store may weigh it
+        // but may not offer a replacement (8.3).
+        ...(index === 2 ? { substitution_preference: 'NO_SUBSTITUTION' as const } : {}),
         now: decisionBase,
       });
     }
@@ -1941,16 +2055,80 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       expected_version: acceptedC.version,
       now: new Date(decisionBase.getTime() + 3_000),
     });
-    const decisionLines = await pool.query<{ id: string }>(
-      `SELECT vendor_order_line_id AS id FROM marketplace.vendor_order_lines
-        WHERE vendor_order_id=$1 ORDER BY vendor_order_line_id`,
-      [orderC.vendor_order_id],
-    );
-    check(decisionLines.rows.length === 3, 'Decision order did not have three lines');
-    const [line1, line2, line3] = decisionLines.rows.map((r) => r.id as UuidV7);
+    // The lines by the customer's rule: the two "ask me" lines take the
+    // proposals below; the "refund, never replace" line is the third.
+    const decisionPicks = await fulfilment.listPicks({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+    });
+    check(decisionPicks.length === 3, 'Decision order did not have three lines');
+    const askLines = decisionPicks
+      .filter((pick) => pick.substitution_preference === 'ASK_CUSTOMER')
+      .map((pick) => pick.vendor_order_line_id);
+    const [line1, line2] = askLines;
+    const line3 = decisionPicks.find(
+      (pick) => pick.substitution_preference === 'NO_SUBSTITUTION',
+    )?.vendor_order_line_id;
     check(
       line1 !== undefined && line2 !== undefined && line3 !== undefined,
-      'Decision line ids missing',
+      `The order lines do not carry the rules the basket lines were given (${JSON.stringify(decisionPicks.map((pick) => pick.substitution_preference))})`,
+    );
+
+    // 8.3 -- a replacement is one of this store's own live products, and a
+    // line the customer asked to have refunded takes no proposal at all.
+    const foreignVariant = products[1];
+    check(foreignVariant !== undefined, 'Store B product missing');
+    await rejects(
+      () =>
+        fulfilment.proposeSubstitution({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderC.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+          vendor_order_line_id: line1,
+          substitution_variant_id: foreignVariant.catalogue_variant_id,
+          proposed_quantity: 1,
+          proposed_unit_price_minor: 18_000,
+          reason_note: "SYNTH another store's product offered as a replacement.",
+          expected_version: 0,
+          now: new Date(decisionBase.getTime() + 3_500),
+        }),
+      FulfilmentInputError,
+      "A replacement from another store's catalogue was proposed",
+    );
+    let ruleRefusal: unknown = null;
+    try {
+      await fulfilment.proposeSubstitution({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderC.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        vendor_order_line_id: line3,
+        substitution_variant_id: substitutionTarget.catalogue_variant_id,
+        proposed_quantity: 1,
+        proposed_unit_price_minor: 18_000,
+        reason_note: 'SYNTH replacement offered against a refund-only line.',
+        expected_version: 0,
+        now: new Date(decisionBase.getTime() + 3_600),
+      });
+    } catch (error) {
+      ruleRefusal = error;
+    }
+    check(
+      ruleRefusal instanceof FulfilmentConflictError &&
+        ruleRefusal.code === 'SUBSTITUTION_NOT_ALLOWED',
+      `A replacement was offered on a refund-never-replace line (${String(ruleRefusal)})`,
+    );
+    const rulePicks = await fulfilment.listPicks({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderC.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+    });
+    check(
+      rulePicks.find((pick) => pick.vendor_order_line_id === line3)?.substitution_preference ===
+        'NO_SUBSTITUTION' &&
+        rulePicks.find((pick) => pick.vendor_order_line_id === line1)?.substitution_preference ===
+          'ASK_CUSTOMER',
+      `The pick list does not carry each line's own rule (${JSON.stringify(rulePicks.map((pick) => pick.substitution_preference))})`,
     );
 
     // Line 1: substitution proposal -> customer APPROVES.
@@ -1963,11 +2141,34 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       proposed_quantity: 1,
       proposed_unit_price_minor: 18_000,
       reason_note: 'SYNTH out of the exact item, close substitute available.',
+      expected_version: 0,
       now: new Date(decisionBase.getTime() + 4_000),
     });
     check(
       subProposal.decision.authorization_delta_minor === 3_000,
       'Substitution authorization delta was not recorded (18000 - 15000)',
+    );
+    // 8.3 -- while the customer decides, the line is theirs: the shop cannot
+    // mark it found underneath the proposal.
+    let pendingEdit: unknown = null;
+    try {
+      await fulfilment.markLineFound({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderC.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        vendor_order_line_id: line1,
+        actual_quantity: 1,
+        actual_unit_price_minor: 15_000,
+        expected_version: subProposal.pick.version,
+        now: new Date(decisionBase.getTime() + 4_200),
+      });
+    } catch (error) {
+      pendingEdit = error;
+    }
+    check(
+      pendingEdit instanceof FulfilmentConflictError &&
+        pendingEdit.code === 'LINE_AWAITING_CUSTOMER',
+      `A line with a pending decision was edited by the shop (${String(pendingEdit)})`,
     );
     // The customer's own pending list is what their app polls on every orders
     // page. It had never been read here, and it was a 500 on every call: the
@@ -2056,6 +2257,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       proposed_quantity: 1,
       proposed_unit_price_minor: 16_500,
       reason_note: 'SYNTH weighed heavier than ordered.',
+      expected_version: 0,
       now: new Date(decisionBase.getTime() + 6_000),
     });
     await rejects(
@@ -2087,6 +2289,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       proposed_unit_price_minor: 16_000,
       reason_note: 'SYNTH weight proposal that the customer never sees.',
       decision_deadline_seconds: 60,
+      expected_version: 0,
       now: new Date(decisionBase.getTime() + 8_000),
     });
     const timedOut = await fulfilment.timeoutOverdueDecisions({
@@ -2122,6 +2325,40 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     check(
       readyC.lifecycle_state === 'READY',
       'Order with resolved decisions could not reach ready',
+    );
+    // 8.3 -- none of the three ordered lines is in the bag as ordered: one
+    // was replaced (approved), two proposals were refused. Their committed
+    // units go back to the shelf when the picks become final at ready. Until
+    // audit run 51 they stayed sold to nobody.
+    const releasedC = await pool.query<{ state: string; shelf: string; reason: string | null }>(
+      `SELECT ir.reservation_state AS state, i.exact_available_quantity::text AS shelf,
+              (SELECT e.reason_code FROM marketplace.inventory_events e
+                WHERE e.reservation_id = ir.reservation_id AND e.event_type='RELEASED'
+                ORDER BY e.reservation_version DESC LIMIT 1) AS reason
+         FROM marketplace.vendor_order_lines l
+         JOIN marketplace.inventory_reservations ir ON ir.reservation_id=l.inventory_reservation_id
+         JOIN marketplace.inventory_items i ON i.inventory_item_id=ir.inventory_item_id
+        WHERE l.vendor_order_id=$1`,
+      [orderC.vendor_order_id],
+    );
+    check(
+      releasedC.rows.length === 3 &&
+        releasedC.rows.every(
+          (row) =>
+            row.state === 'RELEASED' && row.shelf === '5' && row.reason === 'LINE_NOT_SUPPLIED',
+        ),
+      `Lines that will not be in the bag kept their units at ready (${JSON.stringify(releasedC.rows)})`,
+    );
+    // And the found line of order A kept its commitment: it is in the bag.
+    const keptA = await pool.query<{ state: string }>(
+      `SELECT ir.reservation_state AS state FROM marketplace.vendor_order_lines l
+         JOIN marketplace.inventory_reservations ir ON ir.reservation_id=l.inventory_reservation_id
+        WHERE l.vendor_order_id=$1`,
+      [orderA.vendor_order_id],
+    );
+    check(
+      keptA.rows.length >= 1 && keptA.rows.every((row) => row.state === 'COMMITTED'),
+      `A found line lost its commitment at ready (${JSON.stringify(keptA.rows)})`,
     );
 
     // Confirm the immutable event trail was written.

@@ -2695,7 +2695,7 @@
       "name": "Picking checklist",
       "status": "complete_local_synthetic",
       "target_stage": "5",
-      "notes": "PWA loads picks and resolves each line. Android missing",
+      "notes": "PWA loads picks and resolves each line; every edit carries the pick version it saw, found is bounded to the line as ordered, a replacement follows the customer's rule and must be the store's own product, and a line with the customer takes no edit (audit run 51). Android missing",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2950,7 +2950,7 @@
       "name": "Low-connectivity recovery",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Actions taken on a dropped connection are queued with their own version and replayed on reconnect",
+      "notes": "Actions taken on a dropped connection are queued with their own version and replayed on reconnect; since audit run 51 pick edits carry the pick version too, so a replayed draft cannot overwrite a newer answer",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {

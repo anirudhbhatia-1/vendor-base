@@ -230,6 +230,7 @@ export class VendorOrderFulfilmentController {
         vendor_order_line_id: uuid(lineId),
         actual_quantity: integerField(body, 'actual_quantity'),
         actual_unit_price_minor: integerField(body, 'actual_unit_price_minor'),
+        expected_version: integerField(body, 'expected_version', 0),
       });
     } catch (error) {
       translateDomainError(error);
@@ -242,13 +243,16 @@ export class VendorOrderFulfilmentController {
     @Param('vendor_location_id') locationId: string,
     @Param('vendor_order_id') orderId: string,
     @Param('vendor_order_line_id') lineId: string,
+    @Body() raw: unknown,
   ) {
+    const body = object(raw);
     try {
       return await this.fulfilment.markLineMissing({
         context: currentRequestContext(),
         vendor_order_id: uuid(orderId),
         vendor_location_id: uuid(locationId),
         vendor_order_line_id: uuid(lineId),
+        expected_version: integerField(body, 'expected_version', 0),
       });
     } catch (error) {
       translateDomainError(error);
@@ -274,6 +278,7 @@ export class VendorOrderFulfilmentController {
         proposed_quantity: integerField(body, 'proposed_quantity'),
         proposed_unit_price_minor: integerField(body, 'proposed_unit_price_minor'),
         reason_note: stringField(body, 'reason_note'),
+        expected_version: integerField(body, 'expected_version', 0),
       });
     } catch (error) {
       translateDomainError(error);
@@ -298,6 +303,7 @@ export class VendorOrderFulfilmentController {
         proposed_quantity: integerField(body, 'proposed_quantity'),
         proposed_unit_price_minor: integerField(body, 'proposed_unit_price_minor'),
         reason_note: stringField(body, 'reason_note'),
+        expected_version: integerField(body, 'expected_version', 0),
       });
     } catch (error) {
       translateDomainError(error);

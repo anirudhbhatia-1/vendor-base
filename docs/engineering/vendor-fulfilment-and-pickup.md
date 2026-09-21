@@ -64,8 +64,22 @@ the vendor_order or line-snapshot invariants Phase 7 established:
   console sounds and acknowledges the alerts for the orders it shows, and an alert nobody opened
   within `vendor.order_alert_escalation` (default 60 s) is escalated once to the owners on the
   configured channels, SMS among them. See `local-notification-delivery.md`.
+- The ordered lines are the snapshot the customer paid against and are immutable at the database
+  (0095, the same guard as the order history). The shop's answers are the picks, one per line, and
+  each is a draft that names the pick version it was read at (8.3, audit run 51): a queued or
+  repeated edit that arrives after a newer answer is refused as `VERSION_CONFLICT`, never applied
+  over it. Found is the line as ordered or fewer of it, at the snapshot's price; a changed price or
+  weight is a proposal for the customer. A replacement must be one of this store's own live
+  products and is refused outright (`SUBSTITUTION_NOT_ALLOWED`) on a line the customer marked
+  "refund, never replace"; the pick list carries each line's rule and whether it is sold by weight,
+  and the console hides the offer accordingly. A line with a proposal pending, or one the customer
+  approved, takes no edit from the shop (`LINE_AWAITING_CUSTOMER`); a rejected one may be marked
+  again.
 - Mark-ready refuses if any line row is missing a pick or any proposal is still `PENDING`; a
-  proposal must be answered (or timed-out) before its vendor_order can leave picking.
+  proposal must be answered (or timed-out) before its vendor_order can leave picking. Once the
+  picks are final, every line that will not be in the bag as ordered -- missing, a refused
+  proposal, an approved replacement -- gives its committed units back to the shelf
+  (`LINE_NOT_SUPPLIED`); until run 51 they stayed sold to nobody.
 - Pickup OTP is a six-digit random number stored as SHA-256; the plaintext is returned to the
   vendor caller once. Every failed attempt increments a counter in its **own** transaction so the
   attempt survives even though the outer pickup transaction rolls back — otherwise

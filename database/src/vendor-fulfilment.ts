@@ -81,7 +81,12 @@ export interface DeclineImpact {
  * version checks name VERSION_CONFLICT explicitly.
  */
 export type FulfilmentConflictCode =
-  'ORDER_STATE_CONFLICT' | 'PARTNER_NOT_PRESENT' | 'PICKING_INCOMPLETE' | 'VERSION_CONFLICT';
+  | 'LINE_AWAITING_CUSTOMER'
+  | 'ORDER_STATE_CONFLICT'
+  | 'PARTNER_NOT_PRESENT'
+  | 'PICKING_INCOMPLETE'
+  | 'SUBSTITUTION_NOT_ALLOWED'
+  | 'VERSION_CONFLICT';
 
 export class FulfilmentConflictError extends Error {
   readonly code: FulfilmentConflictCode;
@@ -258,6 +263,10 @@ export interface PickRecord {
   readonly product_title: string | null;
   readonly ordered_quantity: number | null;
   readonly ordered_unit_price_minor: number | null;
+  /** The customer's rule for this line: ask, let the store choose, or refund. */
+  readonly substitution_preference: string | null;
+  /** Whether the line is sold by weight, which is what "weigh" is for. */
+  readonly variable_weight: boolean | null;
 }
 
 export interface DecisionRecord {
@@ -338,6 +347,69 @@ function requireSystemOrVendor(context: RequestContext): UuidV7 {
     throw new FulfilmentAuthorizationError();
   }
   return context.actor.actor_id;
+}
+
+/**
+ * The ordered line, locked, with its pick as it stands (8.3).
+ *
+ * A pick is a draft the console may send again -- from a queue it built while
+ * offline, or a second tap -- so each edit names the pick version it saw
+ * (0 before any pick) and a stale one is refused rather than applied over a
+ * newer answer. A line that is with the customer, or that the customer has
+ * approved, takes no edit from the shop; a rejected proposal, a found or a
+ * missing line may be marked again. Until audit run 51 any pick overwrote
+ * any other, a pending decision included.
+ */
+async function lockLine(
+  client: PoolClient,
+  vendorOrderId: UuidV7,
+  vendorOrderLineId: UuidV7,
+  expectedVersion: number,
+): Promise<{
+  readonly quantity: number;
+  readonly unit_price_minor: number;
+  readonly substitution_preference: string;
+  readonly pick_state: PickState | null;
+  readonly pick_version: number;
+}> {
+  const found = await client.query<{
+    vendor_order_id: string;
+    quantity: number;
+    unit_price_minor: string;
+    substitution_preference: string;
+    pick_state: PickState | null;
+    pick_version: number | null;
+  }>(
+    `SELECT l.vendor_order_id, l.quantity, l.unit_price_minor::text AS unit_price_minor,
+            l.substitution_preference, p.pick_state, p.version AS pick_version
+       FROM marketplace.vendor_order_lines l
+       LEFT JOIN marketplace.vendor_order_line_picks p USING (vendor_order_line_id)
+      WHERE l.vendor_order_line_id=$1
+      FOR UPDATE OF l`,
+    [vendorOrderLineId],
+  );
+  const row = found.rows[0];
+  if (!row || row.vendor_order_id !== vendorOrderId) throw new FulfilmentNotFoundError();
+  const pickVersion = row.pick_version ?? 0;
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion !== pickVersion)
+    throw new FulfilmentConflictError('The line was changed since it was read', 'VERSION_CONFLICT');
+  if (
+    row.pick_state === 'PROPOSED_SUBSTITUTION' ||
+    row.pick_state === 'PROPOSED_WEIGHT' ||
+    row.pick_state === 'SUBSTITUTION_APPROVED' ||
+    row.pick_state === 'WEIGHT_APPROVED'
+  )
+    throw new FulfilmentConflictError(
+      'The line is with the customer or was answered by them',
+      'LINE_AWAITING_CUSTOMER',
+    );
+  return {
+    quantity: row.quantity,
+    unit_price_minor: Number(row.unit_price_minor),
+    substitution_preference: row.substitution_preference,
+    pick_state: row.pick_state,
+    pick_version: pickVersion,
+  };
 }
 
 async function lockOrder(
@@ -745,6 +817,8 @@ function projectPick(row: Record<string, unknown>): PickRecord {
     ordered_quantity: row['ordered_quantity'] == null ? null : Number(row['ordered_quantity']),
     ordered_unit_price_minor:
       row['ordered_unit_price_minor'] == null ? null : Number(row['ordered_unit_price_minor']),
+    substitution_preference: (row['substitution_preference'] as string | null) ?? null,
+    variable_weight: (row['variable_weight'] as boolean | null) ?? null,
   });
 }
 
@@ -1249,6 +1323,12 @@ export class VendorFulfilmentService {
     });
   }
 
+  /**
+   * Found: the line as ordered, or fewer of it. The quantity is bounded by
+   * what was ordered and the price is the snapshot's -- a changed price or a
+   * heavier weight is a proposal for the customer (8.4), never a "found".
+   * Until audit run 51 any quantity and any price were recorded as found.
+   */
   async markLineFound(input: {
     readonly context: RequestContext;
     readonly vendor_order_id: UuidV7;
@@ -1256,8 +1336,11 @@ export class VendorFulfilmentService {
     readonly vendor_order_line_id: UuidV7;
     readonly actual_quantity: number;
     readonly actual_unit_price_minor: number;
+    readonly expected_version: number;
     readonly now?: Date;
   }): Promise<PickRecord> {
+    if (!Number.isSafeInteger(input.actual_quantity) || input.actual_quantity < 1)
+      throw new FulfilmentInputError('A found line has at least one unit');
     return this.#recordPick({
       ...input,
       pick_state: 'FOUND',
@@ -1274,6 +1357,7 @@ export class VendorFulfilmentService {
     readonly vendor_order_id: UuidV7;
     readonly vendor_location_id: UuidV7;
     readonly vendor_order_line_id: UuidV7;
+    readonly expected_version: number;
     readonly now?: Date;
   }): Promise<PickRecord> {
     return this.#recordPick({
@@ -1296,6 +1380,7 @@ export class VendorFulfilmentService {
     readonly proposed_quantity: number;
     readonly proposed_unit_price_minor: number;
     readonly reason_note: string;
+    readonly expected_version: number;
     readonly decision_deadline_seconds?: number;
     readonly now?: Date;
   }): Promise<{ readonly pick: PickRecord; readonly decision: DecisionRecord }> {
@@ -1324,6 +1409,7 @@ export class VendorFulfilmentService {
     readonly proposed_quantity: number;
     readonly proposed_unit_price_minor: number;
     readonly reason_note: string;
+    readonly expected_version: number;
     readonly decision_deadline_seconds?: number;
     readonly now?: Date;
   }): Promise<{ readonly pick: PickRecord; readonly decision: DecisionRecord }> {
@@ -1640,6 +1726,27 @@ export class VendorFulfilmentService {
           'Unresolved lines cannot reach ready',
           'PICKING_INCOMPLETE',
         );
+      // The picks are final now: a line that will not be in the bag -- missing,
+      // or a proposal the customer refused, or one they approved a replacement
+      // for -- gives its committed units back to the shelf. Until audit run 51
+      // they stayed sold to nobody.
+      const notSupplied = await client.query<{ reservation_id: string }>(
+        `SELECT l.inventory_reservation_id AS reservation_id
+           FROM marketplace.vendor_order_lines l
+           JOIN marketplace.vendor_order_line_picks p USING (vendor_order_line_id)
+          WHERE l.vendor_order_id=$1 AND l.inventory_reservation_id IS NOT NULL
+            AND p.pick_state IN ('MISSING','SUBSTITUTION_REJECTED','WEIGHT_REJECTED',
+                                 'SUBSTITUTION_APPROVED')
+          ORDER BY l.vendor_order_line_id`,
+        [input.vendor_order_id],
+      );
+      await releaseReservationsLocked(client, {
+        context: input.context,
+        now,
+        reason_code: 'LINE_NOT_SUPPLIED',
+        reservation_ids: notSupplied.rows.map((row) => parseUuidV7(row.reservation_id)),
+        states: ['SOFT_HELD', 'PROVISIONAL', 'COMMITTED'],
+      });
       const version = order.version + 1;
       const ids = contextIds(input.context);
       await client.query(
@@ -3212,10 +3319,15 @@ export class VendorFulfilmentService {
               p.actual_unit_price_minor::text AS actual_unit_price_minor,
               p.substitution_variant_id, COALESCE(p.version,0) AS version,
               l.product_title_snapshot AS product_title,
-              l.quantity AS ordered_quantity, l.unit_price_minor::text AS ordered_unit_price_minor
+              l.quantity AS ordered_quantity, l.unit_price_minor::text AS ordered_unit_price_minor,
+              l.substitution_preference, product.variable_weight
          FROM marketplace.vendor_order_lines l
          JOIN marketplace.vendor_orders o USING (vendor_order_id)
          LEFT JOIN marketplace.vendor_order_line_picks p USING(vendor_order_line_id)
+         LEFT JOIN marketplace.catalogue_product_variants variant
+           ON variant.catalogue_variant_id = l.catalogue_variant_id
+         LEFT JOIN marketplace.catalogue_products product
+           ON product.catalogue_product_id = variant.catalogue_product_id
         WHERE l.vendor_order_id=$1 AND o.vendor_location_id=$2
         ORDER BY l.vendor_order_line_id`,
       [input.vendor_order_id, input.vendor_location_id],
@@ -3320,23 +3432,31 @@ export class VendorFulfilmentService {
     readonly substitution_variant_id: UuidV7 | null;
     readonly reason_code: string;
     readonly event_type: string;
+    readonly expected_version: number;
     readonly now?: Date;
   }): Promise<PickRecord> {
     const now = input.now ?? new Date();
     return tx(this.#pool, async (client) => {
       const { userId } = await requireVendorMember(client, input.context, input.vendor_location_id);
-      const line = await client.query<{ vendor_order_id: string }>(
-        `SELECT vendor_order_id FROM marketplace.vendor_order_lines
-          WHERE vendor_order_line_id=$1`,
-        [input.vendor_order_line_id],
-      );
-      if (line.rows[0]?.vendor_order_id !== input.vendor_order_id)
-        throw new FulfilmentNotFoundError();
       const order = await lockOrder(client, input.vendor_order_id);
       if (order.vendor_location_id !== input.vendor_location_id)
         throw new FulfilmentNotFoundError();
       if (order.lifecycle_state !== 'PICKING')
         throw new FulfilmentConflictError('Picking edits require the order to be in PICKING');
+      const line = await lockLine(
+        client,
+        input.vendor_order_id,
+        input.vendor_order_line_id,
+        input.expected_version,
+      );
+      if (input.pick_state === 'FOUND') {
+        if (input.actual_quantity !== null && input.actual_quantity > line.quantity)
+          throw new FulfilmentInputError('A found line cannot exceed the quantity ordered');
+        if (input.actual_unit_price_minor !== line.unit_price_minor)
+          throw new FulfilmentInputError(
+            'A found line is priced as ordered; a changed price or weight is a proposal',
+          );
+      }
       const pickId = createUuidV7({ now_ms: now.getTime() });
       const upserted = await client.query(
         `INSERT INTO marketplace.vendor_order_line_picks
@@ -3395,29 +3515,45 @@ export class VendorFulfilmentService {
     readonly decision_deadline_seconds: number;
     readonly reason_code: string;
     readonly event_type: string;
+    readonly expected_version: number;
     readonly now?: Date;
   }): Promise<{ readonly pick: PickRecord; readonly decision: DecisionRecord }> {
     const now = input.now ?? new Date();
     return tx(this.#pool, async (client) => {
       const { userId } = await requireVendorMember(client, input.context, input.vendor_location_id);
-      const line = await client.query<{
-        vendor_order_id: string;
-        quantity: number;
-        unit_price_minor: string;
-      }>(
-        `SELECT vendor_order_id, quantity, unit_price_minor::text AS unit_price_minor
-           FROM marketplace.vendor_order_lines WHERE vendor_order_line_id=$1`,
-        [input.vendor_order_line_id],
-      );
-      const lineRow = line.rows[0];
-      if (!lineRow || lineRow.vendor_order_id !== input.vendor_order_id)
-        throw new FulfilmentNotFoundError();
       const order = await lockOrder(client, input.vendor_order_id);
       if (order.vendor_location_id !== input.vendor_location_id)
         throw new FulfilmentNotFoundError();
       if (order.lifecycle_state !== 'PICKING')
         throw new FulfilmentConflictError('Picking edits require the order to be in PICKING');
-      const originalTotal = Number(lineRow.unit_price_minor) * lineRow.quantity;
+      const lineRow = await lockLine(
+        client,
+        input.vendor_order_id,
+        input.vendor_order_line_id,
+        input.expected_version,
+      );
+      if (input.proposal_kind === 'SUBSTITUTION') {
+        // The order proceeds under the customer's rule (PRD): a line they
+        // asked to have refunded rather than replaced takes no proposal, and
+        // the replacement is one of this store's own live products.
+        if (lineRow.substitution_preference === 'NO_SUBSTITUTION')
+          throw new FulfilmentConflictError(
+            'The customer asked for no substitution on this line',
+            'SUBSTITUTION_NOT_ALLOWED',
+          );
+        const replacement = await client.query(
+          `SELECT 1 FROM marketplace.catalogue_product_variants variant
+             JOIN marketplace.catalogue_products product USING (catalogue_product_id)
+            WHERE variant.catalogue_variant_id=$1 AND product.vendor_location_id=$2
+              AND variant.lifecycle_state='ACTIVE'`,
+          [input.substitution_variant_id, input.vendor_location_id],
+        );
+        if (replacement.rows.length === 0)
+          throw new FulfilmentInputError(
+            "The replacement must be one of this store's published products",
+          );
+      }
+      const originalTotal = lineRow.unit_price_minor * lineRow.quantity;
       const proposedTotal = input.proposed_unit_price_minor * input.proposed_quantity;
       const delta = proposedTotal - originalTotal;
       const pickId = createUuidV7({ now_ms: now.getTime() });

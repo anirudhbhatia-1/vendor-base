@@ -1697,6 +1697,45 @@ Five requirements. Two held outright (the placed-state, deadline and version gat
 
 **Step 8.2: VERIFIED_LOCAL**, with the three forward findings carried.
 
+## Run 51 (21 September 2026) — step 8.3, picking workflow
+
+Five requirements. One held (unresolved lines cannot reach ready, with its own code since 0073), one held more strictly than asked (edits lock at `READY`, before custody), and three did not hold as written: the snapshot was immutable by convention only; "found" took any quantity at any price, a replacement ignored the customer's rule and the store it came from, and any pick overwrote any other — a pending decision included; and the console's offline queue replayed picks with nothing to say whether they were stale. Migration 0095; twenty connected assertions, one unit test; eight mutation probes, all caught. The run 50 forward finding (a missing line keeps its units) is closed here.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Immutable ordered-line snapshots | Shown from the snapshot; nothing rewrote `vendor_order_lines`, and nothing forbade it — P51-01. |
+| 2 | Mark found, remove, weigh, propose substitution | All four exist. Found took any quantity and price; a substitution ignored the customer's rule and could name another store's variant — P51-02. |
+| 3 | Safe drafts during reconnect | The console queues picks offline (VEN-40) and the pick row is the server-side draft, but a pick carried no version: a queued or repeated tap overwrote whatever had happened since, a pending customer decision included — P51-03. |
+| 4 | Unresolved lines cannot reach ready | Met (run with `PICKING_INCOMPLETE`). |
+| 5 | Lock ordinary edits after custody | Met, more strictly: picks require `PICKING`, so edits lock at `READY`; kept, since money is settled on the picks. |
+
+**P51-01 — the snapshot by convention.** 0095 puts the same append-only guard on `vendor_order_lines` that the order history has (`55000`). The walk tries the rewrite.
+
+**P51-02 — found, and the rule.** `markLineFound` now bounds the pick to the line as ordered: at least one unit, no more than ordered, at the snapshot's price — a changed price or a heavier weight is a proposal for the customer (8.4), never a "found". `proposeSubstitution` reads the line's rule (0088 carried it to the order line; nothing read it): a "refund, never replace" line is refused with `SUBSTITUTION_NOT_ALLOWED`, and the replacement must be one of this store's own `ACTIVE` variants — the FK alone let any store's product be proposed. The pick list carries `substitution_preference` and `variable_weight`; the console shows the rule beside each line, hides Substitute on a refund-only line and Weigh on a line not sold by weight.
+
+**P51-03 — the draft with no version.** `lockLine` locks the ordered line, reads its pick and requires the caller's `expected_version` to equal the pick's version (0 before any pick); the four pick routes take it, the console sends `pick.version` on found, missing, weigh and substitute, and the offline queue therefore replays a draft that is refused as `VERSION_CONFLICT` if a newer answer stands, rather than applied over it. The same lock refuses any edit on a line whose proposal is pending or was approved (`LINE_AWAITING_CUSTOMER`, 0095) — before, a picker could mark a line found under a live proposal and the customer's later approval would have moved money for a line the shop had already packed as ordered. A rejected proposal, a found or a missing line may be marked again with the version it has.
+
+**Closing run 50's finding.** At `markReady`, once every line is resolved, the lines that will not be in the bag as ordered — `MISSING`, `SUBSTITUTION_REJECTED`, `WEIGHT_REJECTED`, `SUBSTITUTION_APPROVED` — give their committed units back to the shelf (`LINE_NOT_SUPPLIED`); a found line keeps its commitment. The decision walk's three lines (one replaced, two refused) end released with the shelf restored.
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| Version check dropped (old) | *A pick sent against a version the line never had was not refused as stale* |
+| Found bounds dropped (old) | *A found line was recorded with more units than were ordered* |
+| The customer's rule ignored (old) | *A replacement was offered on a refund-never-replace line* |
+| The replacement's store not checked (old) | *A replacement from another store's catalogue was proposed* |
+| Pending/approved lines editable (old) | *A line with a pending decision was edited by the shop* |
+| No release at ready (old) | *Lines that will not be in the bag kept their units at ready ([{"state":"COMMITTED","shelf":"4" …}])* |
+| Found lines released too | *Reservations were not committed on pickup* (the run 41 check), and the walk's own *A found line lost its commitment at ready* |
+| 0095's trigger absent | *An ordered line could be rewritten* |
+
+**Forward findings.** (8.4) `proposeWeight` creates a customer decision for every weight, lighter included; the PRD asks for a decision only when the total rises and a plain partial refund when it falls. (8.4) An `ALLOW_SAME_STORE` line still goes to the customer as a proposal; the rule says the store may choose within the price limit. (8.4/8.5) An approved replacement reserves no stock for the replacement variant, and a found line short of the ordered quantity keeps the whole reservation (a reservation is one row). (8.5/8.6) Nothing yet reduces the capture for a missing or short line; the receipt's refund arithmetic is the money step's.
+
+**Verification.** `pnpm db:verify` exit 0 — 96 migration files (0000–0095), full ladder; `vendor_fulfilment` 215 assertions (201 after run 50); launch readiness 78 with the two new codes' keys. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 565 pass / 0 fail; `pnpm test:integration` exit 0.
+
+**Step 8.3: VERIFIED_LOCAL**, with the forward findings carried to 8.4–8.6.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

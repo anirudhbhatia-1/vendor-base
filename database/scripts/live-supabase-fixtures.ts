@@ -71,6 +71,7 @@ async function prepareOrder(
       {
         actual_quantity: integer(pick, 'ordered_quantity'),
         actual_unit_price_minor: integer(pick, 'ordered_unit_price_minor'),
+        expected_version: integer(pick, 'version'),
       },
     );
   }

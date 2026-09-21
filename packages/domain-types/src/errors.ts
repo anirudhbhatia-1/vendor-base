@@ -105,6 +105,27 @@ export const ERROR_DEFINITIONS = {
     retryable: false,
   },
   /**
+   * The customer's substitution rule for this line is "refund, never replace"
+   * (8.3). The shop's console reaches this only by racing its own list; the
+   * sentence tells the picker what to do instead.
+   */
+  SUBSTITUTION_NOT_ALLOWED: {
+    http_status: 409,
+    message_key: 'vendor.substitution_not_allowed',
+    retryable: false,
+  },
+  /**
+   * The line is with the customer, or the customer has answered on it: a
+   * proposal is pending, or was approved. Distinct from a state conflict
+   * because the order is in the right state; it is this line that is spoken
+   * for.
+   */
+  LINE_AWAITING_CUSTOMER: {
+    http_status: 409,
+    message_key: 'vendor.line_awaiting_customer',
+    retryable: false,
+  },
+  /**
    * A platform-delivery order is handed to its partner, and only once the
    * partner has marked arrival. The console offered handover while the job was
    * still being offered, and the refusal read as a generic state conflict.
@@ -201,6 +222,10 @@ export const ERROR_MESSAGES_EN: Readonly<Record<StableErrorCode, string>> = Obje
     'Too many wrong attempts. A fresh collection code has to be issued before trying again.',
   CUSTOMER_OTP_ACTIVE:
     'They already have a live collection code. Ask them to read it from their screen.',
+  SUBSTITUTION_NOT_ALLOWED:
+    'The customer asked for no replacements on this item. Mark it not available and they are refunded for it.',
+  LINE_AWAITING_CUSTOMER:
+    'The customer is deciding on this item, or has already answered. It cannot be changed from here.',
   PARTNER_NOT_PRESENT: 'Hand this order over when the delivery partner is at your counter.',
   DELIVERY_OTP_MISMATCH: 'That delivery code does not match. Check it and try again.',
   DELIVERY_OTP_EXPIRED: 'That delivery code has expired. Ask the customer to open a fresh one.',

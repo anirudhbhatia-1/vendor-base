@@ -105,6 +105,16 @@ type Pick = {
   product_title: string | null;
   ordered_quantity: number | null;
   ordered_unit_price_minor: number | null;
+  /**
+   * The pick's version as read (0 before any pick). Every edit sends it back,
+   * so a queued or repeated tap that arrives after a newer answer is refused
+   * rather than applied over it (8.3).
+   */
+  version: number;
+  /** The customer's rule for this line; NO_SUBSTITUTION hides the offer. */
+  substitution_preference?: string | null;
+  /** Sold by weight, which is what "Weigh" is for. */
+  variable_weight?: boolean | null;
 };
 
 type Variant = {
@@ -129,6 +139,20 @@ const DECLINE_REASONS = [
   ['PROHIBITED_ITEM', 'Something here we may not sell'],
   ['TECHNICAL_ISSUE', 'A technical problem at our end'],
 ] as const;
+
+/** The customer's rule for a line, as the picker reads it beside the quantity. */
+export function substitutionRuleSentence(preference: string | null | undefined): string {
+  switch (preference) {
+    case 'NO_SUBSTITUTION':
+      return ' · customer: refund, never replace';
+    case 'ALLOW_SAME_STORE':
+      return ' · customer: a close match is fine';
+    case 'ASK_CUSTOMER':
+      return ' · customer: ask before replacing';
+    default:
+      return '';
+  }
+}
 
 /** The label for a standard reason; a code the copy does not know is shown as words. */
 function declineReasonLabel(code: string): string {
@@ -766,6 +790,7 @@ function OrderCard({
                       {pick.ordered_unit_price_minor === null
                         ? ''
                         : ` · ${formatMoneyMinor(pick.ordered_unit_price_minor)} each`}
+                      {substitutionRuleSentence(pick.substitution_preference)}
                     </p>
                     <StatusPill
                       label={
@@ -785,12 +810,12 @@ function OrderCard({
                               await act(
                                 `lines/${pick.vendor_order_line_id}/found`,
                                 {
-                                  actual_quantity:
-                                    pick.actual_quantity ?? pick.ordered_quantity ?? 1,
-                                  actual_unit_price_minor:
-                                    pick.actual_unit_price_minor ??
-                                    pick.ordered_unit_price_minor ??
-                                    0,
+                                  // Found is the line as ordered: the
+                                  // snapshot's quantity and price. A changed
+                                  // weight or price goes to the customer.
+                                  actual_quantity: pick.ordered_quantity ?? 1,
+                                  actual_unit_price_minor: pick.ordered_unit_price_minor ?? 0,
+                                  expected_version: pick.version,
                                 },
                                 'line found',
                               );
@@ -801,37 +826,44 @@ function OrderCard({
                         >
                           Found it
                         </Button>
-                        <Button
-                          onClick={() => {
-                            setWeightFor(pick);
-                            setWeightValue(String(pick.ordered_quantity ?? 1));
-                            setWeightPrice(
-                              pick.ordered_unit_price_minor === null
-                                ? ''
-                                : (pick.ordered_unit_price_minor / 100).toFixed(2),
-                            );
-                          }}
-                          size="small"
-                          variant="secondary"
-                        >
-                          Weigh
-                        </Button>
-                        <Button
-                          onClick={() => {
-                            setSubstituteFor(pick);
-                            setSubstituteVariant(variants[0]?.catalogue_variant_id ?? '');
-                          }}
-                          size="small"
-                          variant="secondary"
-                        >
-                          Substitute
-                        </Button>
+                        {pick.variable_weight === false ? null : (
+                          <Button
+                            onClick={() => {
+                              setWeightFor(pick);
+                              setWeightValue(String(pick.ordered_quantity ?? 1));
+                              setWeightPrice(
+                                pick.ordered_unit_price_minor === null
+                                  ? ''
+                                  : (pick.ordered_unit_price_minor / 100).toFixed(2),
+                              );
+                            }}
+                            size="small"
+                            variant="secondary"
+                          >
+                            Weigh
+                          </Button>
+                        )}
+                        {/* The customer's rule decides whether a replacement
+                            may even be offered: "refund, never replace" gets
+                            no Substitute button, and the API refuses one. */}
+                        {pick.substitution_preference === 'NO_SUBSTITUTION' ? null : (
+                          <Button
+                            onClick={() => {
+                              setSubstituteFor(pick);
+                              setSubstituteVariant(variants[0]?.catalogue_variant_id ?? '');
+                            }}
+                            size="small"
+                            variant="secondary"
+                          >
+                            Substitute
+                          </Button>
+                        )}
                         <Button
                           onClick={() =>
                             void (async () => {
                               await act(
                                 `lines/${pick.vendor_order_line_id}/missing`,
-                                {},
+                                { expected_version: pick.version },
                                 'line missing',
                               );
                               await refreshPicks();
@@ -869,6 +901,7 @@ function OrderCard({
                     proposed_quantity: Math.round(Number(weightValue)),
                     proposed_unit_price_minor: unitPrice,
                     reason_note: 'Weighed at the counter; customer decides.',
+                    expected_version: weightFor.version,
                   },
                   'weight proposal',
                 );
@@ -928,6 +961,7 @@ function OrderCard({
                       substituteFor.ordered_unit_price_minor ??
                       0,
                     reason_note: 'Ordered item unavailable; replacement offered.',
+                    expected_version: substituteFor.version,
                   },
                   'substitution proposal',
                 );
