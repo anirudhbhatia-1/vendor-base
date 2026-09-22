@@ -6,6 +6,7 @@
 ## What is complete
 
 - A durable INR chart of accounts covers customer/provider clearing, platform clearing/revenue/subsidy, vendor and partner payables, and tax payable. Every ledger transaction is append-only and database-enforced to balance before commit.
+- The posting engine (10.1, audit run 66): a posting commits in the same transaction as the state it records — a capture, a refund's success, a paid payout — or not at all. Each transaction carries its business reference, the provider operation and the policy version it was made under, and the request/correlation; each entry names the order it divides and, on the vendor and partner payables, the vendor location or partner user the amount belongs to (the catalogue's `owner_dimension`; the schema refuses an entry on those accounts that names nobody, except in a reversal, which mirrors history as posted). A closed account accepts no postings; a transaction with fewer than two entries is refused at commit; the catalogue itself may only be closed or reopened. `GET /admin/finance/v2/ledger` is the trial balance, rendered only when the totals agree, and `GET /admin/finance/v2/ledger/transactions/:id` reads one posting with its entries and references.
 - Payment attempts support deterministic authorization, capture, unused-authorization void, partial/full refund, decline, malformed response, and unknown-outcome containment. Captured and voided amounts are persisted explicitly. The void reaches the provider through the port's `void` operation; a void the provider declines or does not answer leaves the payment `UNKNOWN_REQUIRES_RECONCILIATION` with a `PAYMENT_UNKNOWN` exception (`RECONCILE_VOID_SAME_OPERATION`) rather than `VOIDED` on a result nobody gave. A provider that throws at authorize, capture, refund or payout is contained as `UNKNOWN` with the same exception the provider's own `UNKNOWN` opens.
 - Settlements preserve customer capture/refund, vendor proceeds/fee, partner base/wait/return/tip, and platform adjustment as policy-versioned lines. Completed-order fees are removed from the fully refunded/failed amount path.
 - Vendor and partner payouts can be built once per beneficiary/day. A local durable worker schedules the next run at 18:00 Asia/Kolkata, claims the job safely, builds both batches, and schedules the following run.
@@ -15,7 +16,7 @@
 
 ## Main implementation boundaries
 
-- Migrations: `0028_complete_money_lifecycle` and `0029_durable_ledger_account_catalogue`.
+- Migrations: `0028_complete_money_lifecycle`, `0029_durable_ledger_account_catalogue` and `0108_ledger_posting_engine`.
 - Persistence/services: `MoneyLifecycleService` and `CompleteMoneyLifecycleService`.
 - API: the original `/admin/finance` lifecycle plus `/admin/finance/v2`; read projections live under `/customer/finance`, `/vendor/locations/:vendor_location_id/finance`, and `/partner/finance`.
 - Worker: `FinancePayoutWorkerService`, using the existing PostgreSQL durable-job engine and `finance.payout` queue scope.
@@ -33,7 +34,8 @@ The account catalogue intentionally does not use lifecycle foreign keys from opt
 - idempotent 18:00 payout scheduling and daily batch replay;
 - matched, duplicate, unmatched, amount-mismatch, and status-mismatch statement rows;
 - maker self-approval rejection and checker-posted reversal/adjustment;
-- global zero-sum proof and rejected edits to ledger and provider-statement history.
+- global zero-sum proof and rejected edits to ledger and provider-statement history;
+- (10.1) references and owners on every posting of the walk; an entry naming no vendor, an empty transaction, a posting to a closed account, a retyped or deleted account each refused by the schema; a capture whose posting is refused leaves no capture, and the same command then succeeds whole; the trial balance and a posting read back.
 
 `pnpm db:verify:connected` applies all 30 migrations, executes the full connected suite, rehearses every rollback boundary, migrates forward again, and performs a deterministic rebuild.
 

@@ -40,6 +40,7 @@ export * from './delivery-dispatch.js';
 export * from './money-policy.js';
 export * from './money-lifecycle.js';
 export * from './complete-money-lifecycle.js';
+export * from './ledger-balance.js';
 export * from './admin-control-plane.js';
 export * from './gated-capabilities.js';
 export * from './locale-registry.js';

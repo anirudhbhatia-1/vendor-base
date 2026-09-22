@@ -6175,7 +6175,7 @@
       "name": "Append-only double-entry ledger",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "ledger_transactions/entries; corrections use reversal+adjustment",
+      "notes": "ledger_transactions/entries; corrections use reversal+adjustment. 10.1 (run 66): postings commit with the state they record, carry provider/policy/request references, and name the vendor, partner and order on each entry; the catalogue governs what may be posted and is itself only closable; trial balance and transaction reads under admin.finance.ledger_manage",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6190,7 +6190,9 @@
       "phase_steps": ["10.1"],
       "verified_by": [
         "database/scripts/verify-money-lifecycle.ts",
-        "database/src/money-policy.spec.ts"
+        "database/src/money-policy.spec.ts",
+        "database/src/ledger-balance.spec.ts",
+        "apps/api/src/complete-money-lifecycle.controller.spec.ts"
       ]
     },
     {

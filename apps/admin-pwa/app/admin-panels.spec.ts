@@ -42,7 +42,12 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
   ],
   [
     'finance-queues-panel.tsx',
-    ['admin/finance/payments', 'admin/finance/refunds', 'admin/finance/v2/payout-jobs/daily'],
+    [
+      'admin/finance/payments',
+      'admin/finance/refunds',
+      'admin/finance/v2/payout-jobs/daily',
+      'admin/finance/v2/ledger',
+    ],
   ],
   [
     'order-intervention-panel.tsx',

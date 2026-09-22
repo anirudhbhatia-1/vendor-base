@@ -197,6 +197,32 @@ export class CompleteMoneyAdminController {
       translateDomainError(error);
     }
   }
+
+  /** The trial balance (10.1): the catalogue with its postings, shown only when it balances. */
+  @Get('ledger')
+  @manage
+  async ledger() {
+    try {
+      return await this.money.ledgerTrialBalance({ context: currentRequestContext() });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  @Get('ledger/transactions/:ledger_transaction_id')
+  @manage
+  async ledgerTransaction(@Param('ledger_transaction_id') ledgerTransactionId: string) {
+    try {
+      return await this.money.ledgerTransaction({
+        context: currentRequestContext(),
+        ledger_transaction_id: uuid(ledgerTransactionId),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
 }
 
 @Controller('customer/finance')

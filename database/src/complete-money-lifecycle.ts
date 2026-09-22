@@ -21,6 +21,7 @@ import {
   type MoneyProviderAdapter,
 } from './money-policy.js';
 import { transaction } from './transaction.js';
+import { assembleTrialBalance, type LedgerAccountBalanceRow } from './ledger-balance.js';
 
 type StatementKind = 'PAYMENT' | 'PAYOUT' | 'REFUND';
 type ProviderState = 'FAILED' | 'SUCCEEDED' | 'UNKNOWN';
@@ -936,6 +937,55 @@ export class CompleteMoneyLifecycleService {
     return { exceptions: rows.rows };
   }
 
+  /**
+   * The books as they stand (10.1): every account in the catalogue with its
+   * postings, and the two totals — shown only when they agree.
+   */
+  async ledgerTrialBalance(input: { readonly context: RequestContext }) {
+    admin(input.context);
+    const rows = await this.#pool.query<LedgerAccountBalanceRow>(
+      `SELECT account.account_reference, account.account_type, account.owner_kind,
+              account.owner_dimension, account.normal_side, account.lifecycle_state,
+              COALESCE(sum(entry.debit_minor),0)::text AS debit_minor,
+              COALESCE(sum(entry.credit_minor),0)::text AS credit_minor,
+              count(entry.ledger_entry_id)::text AS entries
+         FROM marketplace.ledger_accounts account
+         LEFT JOIN marketplace.ledger_entries entry USING (account_reference)
+        GROUP BY account.account_reference
+        ORDER BY account.account_reference`,
+    );
+    return assembleTrialBalance(rows.rows);
+  }
+
+  /**
+   * One posting with its entries and the references it was made under, so
+   * a correction (10.6) can name what it reverses and an operator can read
+   * where an amount went.
+   */
+  async ledgerTransaction(input: {
+    readonly context: RequestContext;
+    readonly ledger_transaction_id: UuidV7;
+  }) {
+    admin(input.context);
+    const found = await this.#pool.query<any>(
+      `SELECT ledger_transaction_id, source_reference, transaction_kind, currency, posted_at,
+              provider_operation_reference, policy_version_reference, request_id, correlation_id
+         FROM marketplace.ledger_transactions WHERE ledger_transaction_id=$1`,
+      [input.ledger_transaction_id],
+    );
+    const header = found.rows[0];
+    if (!header) throw new MoneyNotFoundError('Ledger transaction not found');
+    const entries = await this.#pool.query<any>(
+      `SELECT ledger_entry_id, account_reference, component, debit_minor::text AS debit_minor,
+              credit_minor::text AS credit_minor, vendor_location_id, partner_user_id,
+              source_order_reference, created_at
+         FROM marketplace.ledger_entries WHERE ledger_transaction_id=$1
+        ORDER BY ledger_entry_id`,
+      [input.ledger_transaction_id],
+    );
+    return { ...header, entries: entries.rows };
+  }
+
   async #expectedOperation(client: PoolClient, reference: string, kind: StatementKind) {
     const query =
       kind === 'PAYMENT'
@@ -1004,6 +1054,8 @@ export class CompleteMoneyLifecycleService {
       readonly entries: readonly CorrectionEntry[];
       readonly kind: string;
       readonly now: Date;
+      readonly policy_version_reference?: string | undefined;
+      readonly provider_operation_reference?: string | undefined;
       readonly source_reference: string;
     },
   ) {
@@ -1012,8 +1064,9 @@ export class CompleteMoneyLifecycleService {
     const ledgerId = createUuidV7();
     await client.query(
       `INSERT INTO marketplace.ledger_transactions
-        (ledger_transaction_id,source_reference,transaction_kind,posted_at,request_id,correlation_id)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
+        (ledger_transaction_id,source_reference,transaction_kind,posted_at,request_id,correlation_id,
+         provider_operation_reference,policy_version_reference)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         ledgerId,
         input.source_reference,
@@ -1021,6 +1074,8 @@ export class CompleteMoneyLifecycleService {
         input.now,
         contextRefs.request,
         contextRefs.correlation,
+        input.provider_operation_reference ?? null,
+        input.policy_version_reference ?? null,
       ],
     );
     for (const entry of input.entries) {

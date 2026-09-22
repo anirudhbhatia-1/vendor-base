@@ -294,36 +294,81 @@ export class MoneyLifecycleService {
     readonly payment_transaction_id: UuidV7;
     readonly now?: Date;
   }): Promise<PaymentRecord> {
-    const result = await this.#providerTransition(input, 'AUTHORIZED', 'PAYMENT_CAPTURED');
-    if (result.payment_state === 'CAPTURED') {
-      await this.#pool.query(
-        `UPDATE marketplace.payment_transactions SET captured_amount_minor=amount_minor
-          WHERE payment_transaction_id=$1 AND captured_amount_minor=0`,
-        [result.payment_transaction_id],
-      );
-      await this.#postBalanced({
-        context: input.context,
-        entries: [
-          {
-            account: 'SYNTH-ACCOUNT-CUSTOMER-CLEARING',
-            component: 'CUSTOMER_CAPTURE',
-            debit: result.amount_minor,
-            credit: 0,
-          },
-          {
-            account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
-            component: 'PLATFORM_REMAINDER',
-            debit: 0,
-            credit: result.amount_minor,
-          },
-        ],
-        kind: 'CAPTURE',
-        source: `SYNTH-CAPTURE-${result.payment_transaction_id.toUpperCase()}`,
-        now: input.now ?? new Date(),
-      });
-      return Object.freeze({ ...result, captured_amount_minor: result.amount_minor });
-    }
-    return result;
+    // The capture and its posting are one transaction (10.1): the record
+    // says CAPTURED only once the ledger says where the money went. Until
+    // run 66 the posting followed in a second transaction, so a failure
+    // between the two left a captured payment the ledger knew nothing of.
+    return this.#providerTransition(input, 'AUTHORIZED', 'PAYMENT_CAPTURED', (client, payment) =>
+      this.#postCaptureLedger(client, input.context, payment, input.now ?? new Date()),
+    );
+  }
+
+  async #postCaptureLedger(
+    client: PoolClient,
+    context: RequestContext,
+    payment: PaymentRecord,
+    now: Date,
+  ): Promise<PaymentRecord> {
+    await client.query(
+      `UPDATE marketplace.payment_transactions SET captured_amount_minor=amount_minor
+        WHERE payment_transaction_id=$1 AND captured_amount_minor=0`,
+      [payment.payment_transaction_id],
+    );
+    // One credit per allocated order, so the capture is traceable to the
+    // child orders it paid for; the customer side is the whole amount.
+    const allocations = await client.query<{
+      allocated_total_minor: string;
+      policy_version_reference: string;
+      source_order_reference: string;
+      vendor_location_id: string;
+    }>(
+      `SELECT source_order_reference, vendor_location_id, allocated_total_minor::text,
+              policy_version_reference
+         FROM marketplace.payment_allocations
+        WHERE payment_transaction_id=$1 ORDER BY source_order_reference`,
+      [payment.payment_transaction_id],
+    );
+    // An order allocated nothing has no credit to carry; if the allocations
+    // do not account for the whole amount the capture is posted as one
+    // credit, because the ledger balances on the money, not on the split.
+    const perOrder = allocations.rows
+      .filter((allocation) => Number(allocation.allocated_total_minor) > 0)
+      .map((allocation) => ({
+        account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+        component: 'PLATFORM_REMAINDER',
+        debit: 0,
+        credit: Number(allocation.allocated_total_minor),
+        source_order_reference: allocation.source_order_reference,
+        vendor_location_id: allocation.vendor_location_id,
+      }));
+    const allocated = perOrder.reduce((sum, entry) => sum + entry.credit, 0);
+    await this.#insertBalanced(client, {
+      context,
+      entries: [
+        {
+          account: 'SYNTH-ACCOUNT-CUSTOMER-CLEARING',
+          component: 'CUSTOMER_CAPTURE',
+          debit: payment.amount_minor,
+          credit: 0,
+        },
+        ...(allocated === payment.amount_minor
+          ? perOrder
+          : [
+              {
+                account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+                component: 'PLATFORM_REMAINDER',
+                debit: 0,
+                credit: payment.amount_minor,
+              },
+            ]),
+      ],
+      kind: 'CAPTURE',
+      now,
+      policy: allocations.rows[0]?.policy_version_reference,
+      provider: payment.provider_operation_reference,
+      source: `SYNTH-CAPTURE-${payment.payment_transaction_id.toUpperCase()}`,
+    });
+    return Object.freeze({ ...payment, captured_amount_minor: payment.amount_minor });
   }
 
   async createSettlement(input: {
@@ -431,12 +476,20 @@ export class MoneyLifecycleService {
           [createUuidV7(), settlementId, participant, component, lineAmount, policy, now],
         );
       }
-      const entries: { account: string; component: string; credit: number; debit: number }[] = [
+      // Every entry names the order it divides, and an amount owed to a
+      // vendor or a partner names them (10.1): the payable accounts are the
+      // platform's liabilities owed per vendor and per partner, and the
+      // catalogue refuses an entry on them that names nobody.
+      if (partnerPayable > 0 && !input.partner_user_id)
+        throw new MoneyInputError('A partner payable must name the partner it is owed to');
+      const entries: LedgerEntryInput[] = [
         {
           account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
           component: 'PLATFORM_REMAINDER',
           debit: customerNet,
           credit: 0,
+          source_order_reference: sourceOrder,
+          vendor_location_id: input.vendor_location_id,
         },
       ];
       if (vendorPayable > 0)
@@ -445,6 +498,8 @@ export class MoneyLifecycleService {
           component: 'VENDOR_PROCEEDS',
           debit: 0,
           credit: vendorPayable,
+          source_order_reference: sourceOrder,
+          vendor_location_id: input.vendor_location_id,
         });
       if (partnerPayable > 0)
         entries.push({
@@ -452,6 +507,8 @@ export class MoneyLifecycleService {
           component: 'PARTNER_OUTBOUND',
           debit: 0,
           credit: partnerPayable,
+          partner_user_id: input.partner_user_id,
+          source_order_reference: sourceOrder,
         });
       if (platform > 0)
         entries.push({
@@ -459,6 +516,8 @@ export class MoneyLifecycleService {
           component: 'PLATFORM_REMAINDER',
           debit: 0,
           credit: platform,
+          source_order_reference: sourceOrder,
+          vendor_location_id: input.vendor_location_id,
         });
       if (platform < 0)
         entries.push({
@@ -466,12 +525,15 @@ export class MoneyLifecycleService {
           component: 'PLATFORM_REMAINDER',
           debit: -platform,
           credit: 0,
+          source_order_reference: sourceOrder,
+          vendor_location_id: input.vendor_location_id,
         });
       await this.#insertBalanced(client, {
         context: input.context,
         entries,
         kind: 'SETTLEMENT',
         now,
+        policy,
         source: `SYNTH-SETTLEMENT-${sourceOrder.slice('SYNTH-ORDER-'.length)}`,
       });
       return Object.freeze({
@@ -568,8 +630,13 @@ export class MoneyLifecycleService {
       );
       const current = found.rows[0];
       if (!current) throw new MoneyNotFoundError('Payout not found');
-      if (current.payout_state === 'PAID' || current.payout_state === 'SUBMITTED')
+      if (current.payout_state === 'PAID') {
+        // Posted once per payout; a replay heals a payout paid before run 66
+        // whose separate posting was lost.
+        await this.#postPayoutLedger(client, input.context, current, now);
         return Object.freeze(current);
+      }
+      if (current.payout_state === 'SUBMITTED') return Object.freeze(current);
       if (current.payout_state !== 'SCHEDULED' || current.version !== input.expected_version)
         throw new MoneyStateError('Payout state or version does not permit submission');
       const outcome = await providerOutcome(() =>
@@ -597,12 +664,11 @@ export class MoneyLifecycleService {
            VALUES ($1,'PAYOUT_UNKNOWN',$2,$3,'MATCH_PROVIDER_STATEMENT',$4,$4)`,
           [createUuidV7(), current.provider_operation_reference, current.amount_minor, now],
         );
-      return Object.freeze(updated.rows[0]);
+      const paid = Object.freeze(updated.rows[0]);
+      if (paid.payout_state === 'PAID')
+        await this.#postPayoutLedger(client, input.context, paid, now);
+      return paid;
     });
-    if (payout.payout_state === 'PAID') {
-      await this.#postPayoutLedger(input.context, payout, now);
-      await this.#refreshSettlementState(String(payout.settlement_id), now);
-    }
     return payout;
   }
 
@@ -668,12 +734,11 @@ export class MoneyLifecycleService {
           WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
         [current.provider_operation_reference, now],
       );
-      return Object.freeze(updated.rows[0]);
+      const reconciled = Object.freeze(updated.rows[0]);
+      if (reconciled.payout_state === 'PAID')
+        await this.#postPayoutLedger(client, input.context, reconciled, now);
+      return reconciled;
     });
-    if (payout.payout_state === 'PAID') {
-      await this.#postPayoutLedger(input.context, payout, now);
-      await this.#refreshSettlementState(String(payout.settlement_id), now);
-    }
     return payout;
   }
 
@@ -845,31 +910,36 @@ export class MoneyLifecycleService {
           [createUuidV7(), refund.provider_operation_reference, refund.refund_total_minor, now],
         );
       }
-      return Object.freeze(updated.rows[0]);
+      const settled = Object.freeze(updated.rows[0]);
+      // The refund and its posting commit together (10.1), like the capture.
+      if (settled.refund_state === 'SUCCEEDED') {
+        const amount = Number(settled.refund_total_minor);
+        await this.#insertBalanced(client, {
+          context: input.context,
+          entries: [
+            {
+              account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+              component: 'CUSTOMER_REFUND',
+              credit: 0,
+              debit: amount,
+              source_order_reference: String(settled.source_order_reference),
+            },
+            {
+              account: 'SYNTH-ACCOUNT-CUSTOMER-CLEARING',
+              component: 'CUSTOMER_REFUND',
+              credit: amount,
+              debit: 0,
+              source_order_reference: String(settled.source_order_reference),
+            },
+          ],
+          kind: 'REFUND',
+          now,
+          provider: String(settled.provider_operation_reference),
+          source: `SYNTH-REFUND-${String(settled.refund_id).toUpperCase()}`,
+        });
+      }
+      return settled;
     });
-    if (approved.refund_state === 'SUCCEEDED') {
-      const amount = Number(approved.refund_total_minor);
-      await this.#postBalanced({
-        context: input.context,
-        entries: [
-          {
-            account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
-            component: 'CUSTOMER_REFUND',
-            credit: 0,
-            debit: amount,
-          },
-          {
-            account: 'SYNTH-ACCOUNT-CUSTOMER-CLEARING',
-            component: 'CUSTOMER_REFUND',
-            credit: amount,
-            debit: 0,
-          },
-        ],
-        kind: 'REFUND',
-        now,
-        source: `SYNTH-REFUND-${String(approved.refund_id).toUpperCase()}`,
-      });
-    }
     return approved;
   }
 
@@ -883,17 +953,31 @@ export class MoneyLifecycleService {
     },
     expected: string,
     eventType: string,
+    /**
+     * Runs inside the same transaction once the provider has said yes, so
+     * whatever it records (the capture's ledger posting) commits with the
+     * state or not at all. A replay of a successful command runs it too:
+     * it is idempotent, and that heals a record whose posting was made
+     * separately before run 66 and lost.
+     */
+    onSucceeded?: (client: PoolClient, payment: PaymentRecord) => Promise<PaymentRecord>,
   ): Promise<PaymentRecord> {
     const who = financeAutomation(input.context);
     const command = text(input.command_reference, COMMAND, 'Command reference');
     const now = input.now ?? new Date();
     const ids = contextIds(input.context);
+    const successState = expected === 'CREATED' ? 'AUTHORIZED' : 'CAPTURED';
     return tx(this.#pool, async (client) => {
       const replay = await client.query(
         `SELECT payment.* FROM marketplace.payment_events event JOIN marketplace.payment_transactions payment USING (payment_transaction_id) WHERE event.command_reference=$1`,
         [command],
       );
-      if (replay.rows[0]) return record(replay.rows[0]);
+      if (replay.rows[0]) {
+        const replayed = record(replay.rows[0]);
+        return onSucceeded && replayed.payment_state === successState
+          ? onSucceeded(client, replayed)
+          : replayed;
+      }
       const locked = await client.query(
         'SELECT * FROM marketplace.payment_transactions WHERE payment_transaction_id=$1 FOR UPDATE',
         [input.payment_transaction_id],
@@ -942,7 +1026,6 @@ export class MoneyLifecycleService {
           ? this.#provider.authorize(instruction)
           : this.#provider.capture(instruction),
       );
-      const successState = expected === 'CREATED' ? 'AUTHORIZED' : 'CAPTURED';
       const next =
         outcome === 'SUCCEEDED'
           ? successState
@@ -982,52 +1065,68 @@ export class MoneyLifecycleService {
          VALUES ($1,'PAYMENT_UNKNOWN',$2,$3,'RECONCILE_SAME_OPERATION',$4,$4)`,
           [createUuidV7(), payment.provider_operation_reference, payment.amount_minor, now],
         );
-      return record(updated.rows[0]);
+      const settled = record(updated.rows[0]);
+      return onSucceeded && next === successState ? onSucceeded(client, settled) : settled;
     });
   }
 
-  async #postBalanced(input: {
-    readonly context: RequestContext;
-    readonly entries: readonly {
-      account: string;
-      component: string;
-      credit: number;
-      debit: number;
-    }[];
-    readonly kind: string;
-    readonly now: Date;
-    readonly source: string;
-  }) {
-    await tx(this.#pool, async (client) => {
-      await this.#insertBalanced(client, input);
-    });
-  }
-
-  async #postPayoutLedger(context: RequestContext, payout: Record<string, unknown>, now: Date) {
+  /**
+   * A paid payout's posting, in the transaction that marked it paid: the
+   * payable it clears names the beneficiary and the order it settles, and
+   * the settlement's own state is refreshed in the same breath.
+   */
+  async #postPayoutLedger(
+    client: PoolClient,
+    context: RequestContext,
+    payout: Record<string, unknown>,
+    now: Date,
+  ) {
     const amount = Number(payout.amount_minor);
-    const payable =
-      payout.beneficiary_kind === 'VENDOR'
-        ? 'SYNTH-ACCOUNT-VENDOR-PAYABLE'
-        : 'SYNTH-ACCOUNT-PARTNER-PAYABLE';
-    await this.#postBalanced({
+    const settlement = await client.query<{
+      partner_user_id: string | null;
+      source_order_reference: string;
+      vendor_location_id: string;
+    }>(
+      `SELECT source_order_reference, vendor_location_id, partner_user_id
+         FROM marketplace.settlements WHERE settlement_id=$1`,
+      [payout.settlement_id],
+    );
+    const owner = settlement.rows[0];
+    if (!owner) throw new MoneyNotFoundError('Payout settlement not found');
+    const vendorPayout = payout.beneficiary_kind === 'VENDOR';
+    if (!vendorPayout && !owner.partner_user_id)
+      throw new MoneyStateError('A partner payout must clear a settlement that names the partner');
+    await this.#insertBalanced(client, {
       context,
       entries: [
-        { account: payable, component: 'PAYOUT', debit: amount, credit: 0 },
+        {
+          account: vendorPayout ? 'SYNTH-ACCOUNT-VENDOR-PAYABLE' : 'SYNTH-ACCOUNT-PARTNER-PAYABLE',
+          component: 'PAYOUT',
+          debit: amount,
+          credit: 0,
+          source_order_reference: owner.source_order_reference,
+          ...(vendorPayout
+            ? { vendor_location_id: owner.vendor_location_id }
+            : { partner_user_id: owner.partner_user_id ?? undefined }),
+        },
         {
           account: this.#provider.clearingAccountReference(),
           component: 'PAYOUT',
           debit: 0,
           credit: amount,
+          source_order_reference: owner.source_order_reference,
         },
       ],
       kind: 'PAYOUT',
       now,
+      provider: String(payout.provider_operation_reference),
       source: `SYNTH-PAYOUT-${String(payout.payout_id).toUpperCase()}`,
     });
+    await this.#refreshSettlementState(client, String(payout.settlement_id), now);
   }
 
-  async #refreshSettlementState(settlementId: string, now: Date) {
-    await this.#pool.query(
+  async #refreshSettlementState(client: PoolClient, settlementId: string, now: Date) {
+    await client.query(
       `UPDATE marketplace.settlements settlement
           SET settlement_state=CASE
                 WHEN EXISTS (
@@ -1052,25 +1151,31 @@ export class MoneyLifecycleService {
     );
   }
 
+  /**
+   * The posting engine (10.1). One transaction, its entries, the references
+   * it was made under — business (the source), provider operation, policy
+   * version, request and correlation — and on each entry the vendor, partner
+   * and order the amount belongs to. Balanced in code before a row is
+   * written and again by the schema at commit; posted once per source.
+   */
   async #insertBalanced(
     client: PoolClient,
     input: {
       readonly context: RequestContext;
-      readonly entries: readonly {
-        account: string;
-        component: string;
-        credit: number;
-        debit: number;
-      }[];
+      readonly entries: readonly LedgerEntryInput[];
       readonly kind: string;
       readonly now: Date;
+      readonly policy?: string | undefined;
+      readonly provider?: string | undefined;
       readonly source: string;
     },
   ) {
-    const debit = input.entries.reduce((sum, entry) => sum + entry.debit, 0);
-    const credit = input.entries.reduce((sum, entry) => sum + entry.credit, 0);
+    const debit = input.entries.reduce((sum, entry) => sum + minor(entry.debit, 'Debit'), 0);
+    const credit = input.entries.reduce((sum, entry) => sum + minor(entry.credit, 'Credit'), 0);
     if (debit !== credit || debit <= 0)
       throw new MoneyInputError('Ledger transaction is unbalanced');
+    if (input.entries.some((entry) => entry.debit > 0 === entry.credit > 0))
+      throw new MoneyInputError('Every ledger entry must use exactly one side');
     const ids = contextIds(input.context);
     const existing = await client.query(
       'SELECT 1 FROM marketplace.ledger_transactions WHERE source_reference=$1',
@@ -1079,15 +1184,49 @@ export class MoneyLifecycleService {
     if (existing.rows[0]) return;
     const ledgerId = createUuidV7();
     await client.query(
-      'INSERT INTO marketplace.ledger_transactions (ledger_transaction_id,source_reference,transaction_kind,posted_at,request_id,correlation_id) VALUES ($1,$2,$3,$4,$5,$6)',
-      [ledgerId, input.source, input.kind, input.now, ids.request, ids.correlation],
+      `INSERT INTO marketplace.ledger_transactions
+        (ledger_transaction_id,source_reference,transaction_kind,posted_at,request_id,correlation_id,
+         provider_operation_reference,policy_version_reference)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [
+        ledgerId,
+        input.source,
+        input.kind,
+        input.now,
+        ids.request,
+        ids.correlation,
+        input.provider ?? null,
+        input.policy ?? null,
+      ],
     );
     for (const entry of input.entries)
       await client.query(
         `INSERT INTO marketplace.ledger_entries
-          (ledger_entry_id,ledger_transaction_id,account_reference,component,debit_minor,credit_minor)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [createUuidV7(), ledgerId, entry.account, entry.component, entry.debit, entry.credit],
+          (ledger_entry_id,ledger_transaction_id,account_reference,component,debit_minor,credit_minor,
+           vendor_location_id,partner_user_id,source_order_reference)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          createUuidV7(),
+          ledgerId,
+          entry.account,
+          entry.component,
+          entry.debit,
+          entry.credit,
+          entry.vendor_location_id ?? null,
+          entry.partner_user_id ?? null,
+          entry.source_order_reference ?? null,
+        ],
       );
   }
+}
+
+/** One side of a posting, and whose money it is. */
+interface LedgerEntryInput {
+  readonly account: string;
+  readonly component: string;
+  readonly credit: number;
+  readonly debit: number;
+  readonly partner_user_id?: string | undefined;
+  readonly source_order_reference?: string | undefined;
+  readonly vendor_location_id?: string | undefined;
 }

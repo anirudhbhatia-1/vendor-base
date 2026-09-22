@@ -180,6 +180,7 @@ assert(
       '0105_exception_direction',
       '0106_return_receipt',
       '0107_earning_adjustments',
+      '0108_ledger_posting_engine',
     ]),
   'Unexpected reviewed migrations',
 );

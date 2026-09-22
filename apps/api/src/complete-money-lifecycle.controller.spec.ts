@@ -27,6 +27,10 @@ test('maker-checker and reconciliation commands require global finance authority
     'approveCorrection',
     'postPartnerEarning',
     'exceptions',
+    // The books themselves (10.1) are read under the same authority that
+    // may post to them; nothing else reads the ledger.
+    'ledger',
+    'ledgerTransaction',
   ]) {
     const rule = auth(CompleteMoneyAdminController.prototype, method);
     assert.equal(rule?.capability, 'admin.finance.ledger_manage', method);

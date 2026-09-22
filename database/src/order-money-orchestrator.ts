@@ -299,7 +299,11 @@ export class OrderMoneyOrchestrator {
       now,
       partner_outbound_minor: outbound,
       partner_return_minor: 0,
-      partner_tip_minor: tip,
+      // A tip is a partner's only when a partner delivered. On a
+      // self-delivered order (VEN-37) it is not owed to a partner who does
+      // not exist; it stays in the platform remainder, visible on the
+      // settlement's ADJUSTMENT line, until 10.3 decides whose it is.
+      partner_tip_minor: row.partner_user_id ? tip : 0,
       partner_wait_minor: waitMinor,
       payment_transaction_id: parseUuidV7(row.payment_transaction_id),
       source_order_reference: row.order_reference,

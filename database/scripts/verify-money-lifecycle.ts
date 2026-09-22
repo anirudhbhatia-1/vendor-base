@@ -593,6 +593,300 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       protectedStatement = true;
     }
     check(protectedStatement, 'Provider statement history was mutable');
+
+    // 10.1 — the posting engine. Each posting names what it records; the
+    // catalogue governs what may be posted; a posting commits with the state
+    // it records or not at all; the books are shown only when they balance.
+    const refusal = async (sql: string, params: unknown[] = []) => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(sql, params);
+        await client.query('COMMIT');
+        return null;
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        return error instanceof Error ? error.message : String(error);
+      } finally {
+        client.release();
+      }
+    };
+    const posted = await pool.query<{
+      account_reference: string;
+      component: string;
+      partner_user_id: string | null;
+      policy_version_reference: string | null;
+      provider_operation_reference: string | null;
+      source_order_reference: string | null;
+      source_reference: string;
+      transaction_kind: string;
+      vendor_location_id: string | null;
+    }>(
+      `SELECT t.source_reference, t.transaction_kind, t.provider_operation_reference,
+              t.policy_version_reference, e.account_reference, e.component,
+              e.vendor_location_id, e.partner_user_id, e.source_order_reference
+         FROM marketplace.ledger_transactions t
+         JOIN marketplace.ledger_entries e USING (ledger_transaction_id)
+        WHERE t.source_reference IN ($1,$2,$3,$4,'SYNTH-SETTLEMENT-MONEY-0001')`,
+      [
+        `SYNTH-CAPTURE-${payment.payment_transaction_id.toUpperCase()}`,
+        `SYNTH-REFUND-${String(proposedRefund.refund_id).toUpperCase()}`,
+        `SYNTH-PAYOUT-${String(vendorPayout.payout_id).toUpperCase()}`,
+        `SYNTH-PAYOUT-${String(partnerPayout.payout_id).toUpperCase()}`,
+      ],
+    );
+    const of = (kind: string) => posted.rows.filter((row) => row.transaction_kind === kind);
+    check(
+      of('CAPTURE').every(
+        (row) =>
+          row.provider_operation_reference === 'SYNTH-PAY-AUTH-0001' &&
+          row.policy_version_reference === 'SYNTH-POLICY-D05-V1',
+      ) &&
+        of('REFUND').every((row) => row.provider_operation_reference === 'SYNTH-REF-MONEY-0001') &&
+        of('SETTLEMENT').every(
+          (row) => row.policy_version_reference === 'SYNTH-POLICY-FIN-V1-TEST0001',
+        ) &&
+        of('PAYOUT').some(
+          (row) => row.provider_operation_reference === 'SYNTH-PAYOUT-VENDOR-0001',
+        ) &&
+        of('PAYOUT').some(
+          (row) => row.provider_operation_reference === 'SYNTH-PAYOUT-PARTNER-0001',
+        ),
+      `A posting does not carry the provider operation or policy it was made under (${JSON.stringify(
+        posted.rows.map((row) => [
+          row.transaction_kind,
+          row.provider_operation_reference,
+          row.policy_version_reference,
+        ]),
+      )})`,
+    );
+    const owned = (component: string, account: string) =>
+      posted.rows.filter((row) => row.component === component && row.account_reference === account);
+    check(
+      owned('VENDOR_PROCEEDS', 'SYNTH-ACCOUNT-VENDOR-PAYABLE').every(
+        (row) =>
+          row.vendor_location_id === location &&
+          row.source_order_reference === 'SYNTH-ORDER-MONEY-0001',
+      ) &&
+        owned('PARTNER_OUTBOUND', 'SYNTH-ACCOUNT-PARTNER-PAYABLE').every(
+          (row) =>
+            row.partner_user_id === partner &&
+            row.source_order_reference === 'SYNTH-ORDER-MONEY-0001',
+        ) &&
+        owned('PAYOUT', 'SYNTH-ACCOUNT-VENDOR-PAYABLE').every(
+          (row) => row.vendor_location_id === location,
+        ) &&
+        owned('PAYOUT', 'SYNTH-ACCOUNT-PARTNER-PAYABLE').every(
+          (row) => row.partner_user_id === partner,
+        ) &&
+        of('REFUND').every((row) => row.source_order_reference === 'SYNTH-ORDER-MONEY-0001') &&
+        of('CAPTURE').some(
+          (row) =>
+            row.component === 'PLATFORM_REMAINDER' &&
+            row.source_order_reference === 'SYNTH-ORDER-MONEY-0001' &&
+            row.vendor_location_id === location,
+        ),
+      `An amount owed to a vendor or a partner, or paid out to them, names nobody or no order (${JSON.stringify(
+        posted.rows.map((row) => [
+          row.component,
+          row.account_reference,
+          row.vendor_location_id,
+          row.partner_user_id,
+          row.source_order_reference,
+        ]),
+      )})`,
+    );
+
+    // The catalogue governs the posting: no owner, no closed account, no
+    // empty transaction, no rewriting the catalogue.
+    const nobody = await refusal(
+      `WITH t AS (
+         INSERT INTO marketplace.ledger_transactions
+           (ledger_transaction_id,source_reference,transaction_kind,posted_at,request_id,correlation_id)
+         VALUES ($1,'SYNTH-ADJUSTMENT-NOBODY-0001','ADJUSTMENT',$2,$3,$3) RETURNING ledger_transaction_id)
+       INSERT INTO marketplace.ledger_entries
+         (ledger_entry_id,ledger_transaction_id,account_reference,component,debit_minor,credit_minor)
+       SELECT $4::uuid, ledger_transaction_id,'SYNTH-ACCOUNT-VENDOR-PAYABLE','ADJUSTMENT',100,0 FROM t
+       UNION ALL
+       SELECT $5::uuid, ledger_transaction_id,'SYNTH-ACCOUNT-PLATFORM-CLEARING','ADJUSTMENT',0,100 FROM t`,
+      [createUuidV7(), now, request, createUuidV7(), createUuidV7()],
+    );
+    check(
+      nobody?.includes('names no vendor'),
+      `An entry on the vendor payable naming no vendor was accepted (${nobody})`,
+    );
+    const empty = await refusal(
+      `INSERT INTO marketplace.ledger_transactions
+         (ledger_transaction_id,source_reference,transaction_kind,posted_at,request_id,correlation_id)
+       VALUES ($1,'SYNTH-ADJUSTMENT-EMPTY-0001','ADJUSTMENT',$2,$3,$3)`,
+      [createUuidV7(), now, request],
+    );
+    check(
+      empty?.includes('has 0 entries'),
+      `A transaction with no entries was accepted (${empty})`,
+    );
+    await pool.query(
+      `UPDATE marketplace.ledger_accounts SET lifecycle_state='CLOSED'
+        WHERE account_reference='SYNTH-ACCOUNT-PLATFORM-SUBSIDY'`,
+    );
+    try {
+      const closed = await refusal(
+        `WITH t AS (
+           INSERT INTO marketplace.ledger_transactions
+             (ledger_transaction_id,source_reference,transaction_kind,posted_at,request_id,correlation_id)
+           VALUES ($1,'SYNTH-ADJUSTMENT-CLOSED-0001','ADJUSTMENT',$2,$3,$3) RETURNING ledger_transaction_id)
+         INSERT INTO marketplace.ledger_entries
+           (ledger_entry_id,ledger_transaction_id,account_reference,component,debit_minor,credit_minor)
+         SELECT $4::uuid, ledger_transaction_id,'SYNTH-ACCOUNT-PLATFORM-SUBSIDY','ADJUSTMENT',100,0 FROM t
+         UNION ALL
+         SELECT $5::uuid, ledger_transaction_id,'SYNTH-ACCOUNT-PLATFORM-CLEARING','ADJUSTMENT',0,100 FROM t`,
+        [createUuidV7(), now, request, createUuidV7(), createUuidV7()],
+      );
+      check(closed?.includes('is closed'), `A closed account accepted a posting (${closed})`);
+    } finally {
+      await pool.query(
+        `UPDATE marketplace.ledger_accounts SET lifecycle_state='ACTIVE'
+          WHERE account_reference='SYNTH-ACCOUNT-PLATFORM-SUBSIDY'`,
+      );
+    }
+    const retyped = await refusal(
+      `UPDATE marketplace.ledger_accounts SET account_type='REVENUE'
+        WHERE account_reference='SYNTH-ACCOUNT-PLATFORM-SUBSIDY'`,
+    );
+    const dropped = await refusal(
+      `DELETE FROM marketplace.ledger_accounts WHERE account_reference='SYNTH-ACCOUNT-PLATFORM-SUBSIDY'`,
+    );
+    const erased = await refusal(`DELETE FROM marketplace.ledger_transactions`);
+    check(
+      retyped?.includes('lifecycle state') && dropped?.includes('never deleted') && erased,
+      `The catalogue or the history could be rewritten (${JSON.stringify([retyped, dropped, erased])})`,
+    );
+
+    // A capture and its posting are one transaction: when the posting cannot
+    // be written the capture is not recorded either, and the same command
+    // then succeeds whole.
+    const atomic = await service.createPayment({
+      allocations: [
+        {
+          delivery_minor: 0,
+          discount_minor: 0,
+          item_minor: 5_000,
+          policy_version_reference: 'SYNTH-POLICY-D05-V1',
+          source_order_reference: 'SYNTH-ORDER-MONEY-ATOMIC-0004',
+          tax_minor: 0,
+          tip_minor: 0,
+          vendor_location_id: location,
+        },
+      ],
+      amount_minor: 5_000,
+      command_reference: 'SYNTH-CMD-PAYMENT-CREATE-ATOMIC-0004',
+      context: context(),
+      provider_operation_reference: 'SYNTH-PAY-ATOMIC-0004',
+      provider_scenario: 'SUCCESS',
+      source_checkout_reference: 'SYNTH-CHECKOUT-MONEY-ATOMIC-0004',
+      now,
+    });
+    const atomicAuthorized = await service.authorize({
+      command_reference: 'SYNTH-CMD-PAYMENT-AUTH-ATOMIC-0004',
+      context: context(),
+      expected_version: atomic.version,
+      payment_transaction_id: atomic.payment_transaction_id,
+      now: new Date(now.getTime() + 20_000),
+    });
+    const atomicSource = `SYNTH-CAPTURE-${atomic.payment_transaction_id.toUpperCase()}`;
+    await pool.query(
+      `CREATE FUNCTION marketplace.verify_refuse_posting() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         IF NEW.source_reference = '${atomicSource}' THEN
+           RAISE EXCEPTION 'verifier refused the posting' USING ERRCODE = '23514';
+         END IF;
+         RETURN NEW;
+       END $$;
+       CREATE TRIGGER verify_refuse_posting BEFORE INSERT ON marketplace.ledger_transactions
+       FOR EACH ROW EXECUTE FUNCTION marketplace.verify_refuse_posting()`,
+    );
+    let captureRefused: string | null = null;
+    try {
+      await service.capture({
+        command_reference: 'SYNTH-CMD-PAYMENT-CAPTURE-ATOMIC-0004',
+        context: context(),
+        expected_version: atomicAuthorized.version,
+        payment_transaction_id: atomic.payment_transaction_id,
+        now: new Date(now.getTime() + 21_000),
+      });
+    } catch (error) {
+      captureRefused = error instanceof Error ? error.message : String(error);
+    } finally {
+      await pool.query(
+        `DROP TRIGGER verify_refuse_posting ON marketplace.ledger_transactions;
+         DROP FUNCTION marketplace.verify_refuse_posting()`,
+      );
+    }
+    const afterRefusal = await pool.query<{
+      events: string;
+      ledger: string;
+      payment_state: string;
+      version: number;
+    }>(
+      `SELECT payment_state, version,
+              (SELECT count(*)::text FROM marketplace.payment_events
+                WHERE payment_transaction_id=$1 AND event_type='PAYMENT_CAPTURED') AS events,
+              (SELECT count(*)::text FROM marketplace.ledger_transactions WHERE source_reference=$2) AS ledger
+         FROM marketplace.payment_transactions WHERE payment_transaction_id=$1`,
+      [atomic.payment_transaction_id, atomicSource],
+    );
+    check(
+      captureRefused?.includes('verifier refused the posting') &&
+        afterRefusal.rows[0]?.payment_state === 'AUTHORIZED' &&
+        afterRefusal.rows[0].version === atomicAuthorized.version &&
+        afterRefusal.rows[0].events === '0' &&
+        afterRefusal.rows[0].ledger === '0',
+      `A capture whose posting failed was recorded anyway (${captureRefused}; ${JSON.stringify(afterRefusal.rows[0])})`,
+    );
+    const atomicCaptured = await service.capture({
+      command_reference: 'SYNTH-CMD-PAYMENT-CAPTURE-ATOMIC-0004',
+      context: context(),
+      expected_version: atomicAuthorized.version,
+      payment_transaction_id: atomic.payment_transaction_id,
+      now: new Date(now.getTime() + 22_000),
+    });
+    const atomicLedger = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM marketplace.ledger_transactions WHERE source_reference=$1`,
+      [atomicSource],
+    );
+    check(
+      atomicCaptured.payment_state === 'CAPTURED' && atomicLedger.rows[0]?.count === '1',
+      'The same capture command did not then succeed whole',
+    );
+
+    // The books, shown only balanced: the vendor's and the partner's payables
+    // were credited by the settlement and cleared by their payouts.
+    const books = await complete.ledgerTrialBalance({ context: context() });
+    const account = (reference: string) =>
+      books.accounts.find((row) => row.account_reference === reference);
+    check(
+      books.balanced &&
+        books.totals.debit_minor === books.totals.credit_minor &&
+        books.accounts.length >= 8 &&
+        account('SYNTH-ACCOUNT-VENDOR-PAYABLE')?.balance_minor === 0 &&
+        account('SYNTH-ACCOUNT-PARTNER-PAYABLE')?.balance_minor === 0 &&
+        account('SYNTH-ACCOUNT-VENDOR-PAYABLE')?.entries === 2,
+      `The trial balance does not read the books as posted (${JSON.stringify(books)})`,
+    );
+    const read = await complete.ledgerTransaction({
+      context: context(),
+      ledger_transaction_id: parseUuidV7(originalId),
+    });
+    check(
+      read.transaction_kind === 'CAPTURE' &&
+        read.provider_operation_reference === 'SYNTH-PAY-AUTH-0001' &&
+        read.entries.length === 2 &&
+        read.entries.some(
+          (entry: { source_order_reference: string | null }) =>
+            entry.source_order_reference === 'SYNTH-ORDER-MONEY-0001',
+        ),
+      `A posting cannot be read back with its entries and references (${JSON.stringify(read)})`,
+    );
   } finally {
     await complete.close();
     await service.close();

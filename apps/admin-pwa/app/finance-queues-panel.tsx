@@ -14,15 +14,42 @@ import { adminRequest } from './authenticated-api';
  */
 type Row = Record<string, unknown>;
 
+/**
+ * The trial balance (10.1): the account catalogue with what has been posted
+ * to it. The server refuses to render it unless the two totals agree, so
+ * what appears here is either a balanced book or the refusal.
+ */
+type TrialBalance = {
+  readonly accounts: readonly {
+    readonly account_reference: string;
+    readonly account_type: string;
+    readonly owner_kind: string;
+    readonly normal_side: 'CREDIT' | 'DEBIT';
+    readonly lifecycle_state: string;
+    readonly balance_minor: number;
+    readonly entries: number;
+  }[];
+  readonly totals: { readonly debit_minor: number; readonly credit_minor: number };
+};
+
 function rupees(minor: unknown): string {
   const value = Number(minor ?? 0);
   return `₹${(Number.isFinite(value) ? value / 100 : 0).toFixed(2)}`;
+}
+
+function accountName(reference: string): string {
+  return reference
+    .replace(/^SYNTH-ACCOUNT-/, '')
+    .replaceAll('-', ' ')
+    .toLowerCase();
 }
 
 export function FinanceQueuesPanel() {
   const [payments, setPayments] = useState<Row[]>([]);
   const [refunds, setRefunds] = useState<Row[]>([]);
   const [exceptions, setExceptions] = useState<Row[]>([]);
+  const [ledger, setLedger] = useState<TrialBalance | null>(null);
+  const [ledgerNotice, setLedgerNotice] = useState('Loading the trial balance…');
   const [payoutId, setPayoutId] = useState('');
   const [message, setMessage] = useState('Loading the money queues…');
 
@@ -41,6 +68,21 @@ export function FinanceQueuesPanel() {
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'The money queues failed to load.');
+    }
+    // Read apart from the queues: a book that does not balance is refused by
+    // the server, and that refusal must be shown as itself, not as a failed
+    // queue load.
+    try {
+      const balance = await adminRequest<TrialBalance>('admin/finance/v2/ledger');
+      setLedger(balance);
+      setLedgerNotice(
+        `Debits ${rupees(balance.totals.debit_minor)} · credits ${rupees(balance.totals.credit_minor)} · balanced.`,
+      );
+    } catch (error) {
+      setLedger(null);
+      setLedgerNotice(
+        error instanceof Error ? error.message : 'The trial balance could not be read.',
+      );
     }
   }, []);
 
@@ -129,6 +171,24 @@ export function FinanceQueuesPanel() {
             Refresh queues
           </button>
         </div>
+      </div>
+
+      <div className="catalogue-flag" style={{ marginTop: '1rem' }}>
+        <p className="eyebrow">TRIAL BALANCE</p>
+        <p aria-live="polite">{ledgerNotice}</p>
+        {ledger ? (
+          <ul>
+            {ledger.accounts.map((account) => (
+              <li key={account.account_reference}>
+                <strong>{accountName(account.account_reference)}</strong>{' '}
+                {account.account_type.toLowerCase()} · {account.owner_kind.toLowerCase()} ·{' '}
+                {account.normal_side.toLowerCase()} normal · {rupees(account.balance_minor)} across{' '}
+                {account.entries} {account.entries === 1 ? 'entry' : 'entries'}
+                {account.lifecycle_state === 'CLOSED' ? ' · closed' : ''}
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </div>
 
       <div className="admin-card-grid" style={{ marginTop: '1rem' }}>

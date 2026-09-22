@@ -2246,6 +2246,40 @@ Not an audit step. The owner asked for the four Android apps to be installable b
 
 **Carried.** Android arrivals are still claims (Phase 9); the shell holds nothing offline beyond what the PWA caches; no store listing, signing key or crash reporting exists.
 
+## Run 66 (22 September 2026) — step 10.1, ledger accounts and posting engine
+
+Five requirements. Two held in part and three did not: the account catalogue (0028) defined types and ownership that nothing consulted — a closed account accepted postings, and a vendor's proceeds and a partner's payout were entries on the shared payable accounts naming no vendor and no partner; the capture, the refund and the paid payout each committed their state and then posted the ledger in a second transaction, so a failure between the two left a captured payment the books knew nothing of, with nothing to re-drive it; the transaction carried its business reference and request/correlation but no provider operation and no policy version; zero-sum was enforced at commit only from the entries' side, so a transaction row with no entries passed; and the catalogue itself could be rewritten by a plain UPDATE. There was no read of the ledger at all. One migration (0108); 35 connected assertions in the money module (25 before), three unit tests; five mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Define account types and ownership | Types defined; **ownership defined and never applied** — P66-02. |
+| 2 | Post immutable debit/credit entries under one transaction ID | One transaction ID and append-only; **not in the transaction it records** — P66-01. |
+| 3 | Enforce zero sum per currency before commit | Met per transaction (single-currency); **an empty transaction passed** — P66-03. |
+| 4 | Store business, provider, policy, and correlation references | Business and correlation met; **provider and policy absent** — P66-02. |
+| 5 | Reject direct edits and unbalanced visibility | Entries and transactions refused edits; **the catalogue did not**, and nothing read the books — P66-03. |
+
+**P66-01 — the posting commits with what it records.** `capture` posts inside `#providerTransition`'s transaction through an `onSucceeded` hook; a refund's success posts inside the approval transaction; a paid payout posts inside `submitPayout`/`reconcilePayout`, with the settlement's state refreshed there too. A replay of a successful command runs the same idempotent posting, which heals a record posted separately before this run and lost. The verifier installs a trigger that refuses the posting, captures, and reads back an AUTHORIZED payment at its old version with no CAPTURED event and no ledger row; the same command then succeeds whole.
+
+**P66-02 — whose money, under what.** `ledger_accounts.owner_dimension` says which entry column must name the owner (`VENDOR_LOCATION` on the vendor payable, `PARTNER_USER` on the partner payable); `ledger_entry_postable` refuses an entry on those accounts that names nobody, except in a REVERSAL, which mirrors history as posted, and refuses any entry on a CLOSED account. The posting engine (`#insertBalanced`, `#postEntries`) takes the vendor, partner and order on each entry and the provider operation and policy version on the transaction; the settlement names the vendor on proceeds and the partner on outbound, the payout names its beneficiary from the settlement, the capture credits one line per allocated order (falling back to one credit when the allocations do not account for the amount), the refund names its order. A settlement owing a partner amount to no partner is refused in code; the orchestrator no longer files a self-delivery tip as a partner's.
+
+**P66-03 — the shell and the catalogue.** `ledger_transaction_has_entries` (deferred, on the transaction) refuses fewer than two entries at commit. `ledger_accounts_protected` allows only `lifecycle_state` to change and refuses deletion. `GET admin/finance/v2/ledger` is the trial balance — every account with its postings and the two totals — assembled by `assembleTrialBalance`, which throws rather than render a book whose totals differ; `GET admin/finance/v2/ledger/transactions/:id` reads one posting with its entries and references. The admin finance panel shows the balance or the refusal.
+
+**Mutation results.** Five probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| The capture posts after its transaction commits (old shape) | *A capture whose posting failed was recorded anyway* |
+| The vendor's proceeds name no vendor | **The schema**: `ledger entry on SYNTH-ACCOUNT-VENDOR-PAYABLE names no vendor` refuses the settlement before any assertion runs |
+| The capture drops its provider reference | *A posting does not carry the provider operation or policy it was made under* |
+| The schema accepts a transaction with no entries | *A transaction with no entries was accepted* |
+| A closed account accepts a posting | *A closed account accepted a posting* |
+
+**Forward findings.** (10.3) A tip on a self-delivered order now sits in the platform remainder rather than a partner payable owed to nobody; whose it is — the vendor's, on the settlement — is 10.3's. (10.4) `postPartnerEarning` posts the earning's breakdown as debits and credits on the partner payable alone, a memo that moves nothing; the partner's liability comes from the settlement's outbound credit, and the earning record carries no policy reference to post. (10.6) The admin console has no way to find an `original_ledger_transaction_id` to correct; the transaction read exists now and the panel does not use it. (carried) The `actor` of a posting is on the command's event, not the transaction; TRUNCATE is not refused (the verifiers depend on it); a database superuser can disable the triggers — an operations control, not a schema one.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 109 migration files (0000–0108), full ladder; `money_lifecycle` 35 assertions (25 before), `vendor_fulfilment` 277, `partner_lifecycle` 86. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 593 pass / 0 fail (590 before: the trial balance's sign, refusal and empty book; the two ledger routes' scope); `pnpm test:integration` exit 0 on a rebuilt test stack; all five probes on a rebuilt database.
+
+**Step 10.1: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.
