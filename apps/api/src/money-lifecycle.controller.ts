@@ -115,6 +115,17 @@ export class MoneyLifecycleController {
       ].includes(trigger)
     )
       throw new BadRequestException();
+    // The exact lines being returned (10.2), when the operator names them.
+    const rawLines = value['lines'];
+    if (rawLines !== undefined && !Array.isArray(rawLines)) throw new BadRequestException();
+    const lines = (rawLines as unknown[] | undefined)?.map((entry) => {
+      const line = object(entry);
+      return {
+        amount_minor: integerField(line, 'amount_minor', 1),
+        quantity: integerField(line, 'quantity', 1),
+        vendor_order_line_id: uuid(stringField(line, 'vendor_order_line_id')),
+      };
+    });
     try {
       return await this.money.proposeRefund({
         command_reference: stringField(value, 'command_reference'),
@@ -122,6 +133,7 @@ export class MoneyLifecycleController {
         delivery_minor: integerField(value, 'delivery_minor', 0),
         discount_reversal_minor: integerField(value, 'discount_reversal_minor', 0),
         item_minor: integerField(value, 'item_minor', 0),
+        ...(lines ? { lines } : {}),
         payment_transaction_id: uuid(stringField(value, 'payment_transaction_id')),
         provider_operation_reference: stringField(value, 'provider_operation_reference'),
         provider_scenario: scenario(value),
@@ -225,6 +237,51 @@ export class MoneyLifecycleController {
         context: currentRequestContext(),
         expected_version: integerField(value, 'expected_version', 1),
         payout_id: uuid(id),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  /**
+   * The provider's answer for a capture or a refund it did not answer at the
+   * time (10.2), read off its statement or dashboard by a person: the same
+   * act as reconciling a payout.
+   */
+  @Post('payments/:payment_id/reconcile')
+  @manageFinance
+  @HttpCode(200)
+  async reconcilePayment(@Param('payment_id') id: string, @Body() raw: unknown) {
+    const value = object(raw);
+    const state = stringField(value, 'provider_state');
+    if (!['FAILED', 'SUCCEEDED', 'UNKNOWN'].includes(state)) throw new BadRequestException();
+    try {
+      return await this.money.reconcilePayment({
+        context: currentRequestContext(),
+        evidence_reference: stringField(value, 'statement_reference'),
+        payment_transaction_id: uuid(id),
+        provider_state: state as 'FAILED' | 'SUCCEEDED' | 'UNKNOWN',
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  @Post('refunds/:refund_id/reconcile')
+  @manageFinance
+  @HttpCode(200)
+  async reconcileRefund(@Param('refund_id') id: string, @Body() raw: unknown) {
+    const value = object(raw);
+    const state = stringField(value, 'provider_state');
+    if (!['FAILED', 'SUCCEEDED', 'UNKNOWN'].includes(state)) throw new BadRequestException();
+    try {
+      return await this.money.reconcileRefund({
+        context: currentRequestContext(),
+        evidence_reference: stringField(value, 'statement_reference'),
+        provider_state: state as 'FAILED' | 'SUCCEEDED' | 'UNKNOWN',
+        refund_id: uuid(id),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();

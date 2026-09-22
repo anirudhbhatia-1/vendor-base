@@ -1689,7 +1689,7 @@
       "name": "Post-custody cancellation handling",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "After custody, cancellation becomes a support-arranged return",
+      "notes": "After custody, cancellation becomes a support-arranged return. Run 67 (10.2): before custody a packed (READY) order can be cancelled as the preview promised, and the platform files the refund it is owed (item, tax, tip, less discount; delivery kept) for a person to approve; an offer for an ended order can no longer be accepted",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1716,7 +1716,7 @@
       "name": "Partial refund visibility",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Partial refunds are shown against the order, with what they covered",
+      "notes": "Partial refunds are shown against the order, with what they covered. Run 67 (10.2): a refund names the exact lines it returns (refund_lines, summing to its item amount) and is bounded by the order it returns from net of every refund not yet failed; the receipt shows the lines",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -7493,7 +7493,7 @@
       "name": "Payment provider",
       "status": "complete_local_synthetic",
       "target_stage": "10",
-      "notes": "Auth/capture/refund/void/reconciliation. Synthetic scenarios. Run 44: asynchronous port with void, void reaches the provider, thrown provider errors contained as UNKNOWN",
+      "notes": "Auth/capture/refund/void/reconciliation. Synthetic scenarios. Run 44: asynchronous port with void, void reaches the provider, thrown provider errors contained as UNKNOWN. Run 67 (10.2): a capture or refund the provider left unanswered is asked about on the worker's pass (status) or answered from its statement by an operator (reconcile routes); the orchestrator reports CAPTURE_UNKNOWN/CAPTURE_FAILED rather than CAPTURED",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {

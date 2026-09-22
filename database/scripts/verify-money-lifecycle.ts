@@ -10,7 +10,7 @@ import {
   SYNTHETIC_FINANCIAL_POLICY,
   type MoneyProviderAdapter,
 } from '../src/money-policy.js';
-import { MoneyLifecycleService } from '../src/money-lifecycle.js';
+import { MoneyInputError, MoneyLifecycleService, MoneyStateError } from '../src/money-lifecycle.js';
 import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
 import { check } from './verify-support.js';
 
@@ -887,6 +887,303 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
         ),
       `A posting cannot be read back with its entries and references (${JSON.stringify(read)})`,
     );
+
+    // 10.2 — outcomes the provider did not give at the time. A capture it
+    // left unanswered is asked about again and applied; a refund it left
+    // unanswered is settled from its statement; a refund is bounded by the
+    // order it returns from and by every refund not yet failed; a replayed
+    // command is its outcome again.
+    const unanswering: MoneyProviderAdapter = new (class extends LocalFakeMoneyProvider {
+      override async capture(): Promise<'UNKNOWN'> {
+        return 'UNKNOWN';
+      }
+      override async refund(): Promise<'UNKNOWN'> {
+        return 'UNKNOWN';
+      }
+      override async status(): Promise<'SUCCEEDED'> {
+        return 'SUCCEEDED';
+      }
+    })();
+    const silent = new MoneyLifecycleService({
+      connection_string: connectionString,
+      provider: unanswering,
+    });
+    try {
+      const held = await silent.createPayment({
+        // Two orders on one payment, so the order's own bound can be told
+        // apart from the payment's.
+        allocations: [
+          {
+            delivery_minor: 0,
+            discount_minor: 0,
+            item_minor: 4_000,
+            policy_version_reference: 'SYNTH-POLICY-D05-V1',
+            source_order_reference: 'SYNTH-ORDER-MONEY-HELD-0005',
+            tax_minor: 0,
+            tip_minor: 0,
+            vendor_location_id: location,
+          },
+          {
+            delivery_minor: 0,
+            discount_minor: 0,
+            item_minor: 3_000,
+            policy_version_reference: 'SYNTH-POLICY-D05-V1',
+            source_order_reference: 'SYNTH-ORDER-MONEY-HELD-0005B',
+            tax_minor: 0,
+            tip_minor: 0,
+            vendor_location_id: location,
+          },
+        ],
+        amount_minor: 7_000,
+        command_reference: 'SYNTH-CMD-PAYMENT-CREATE-HELD-0005',
+        context: context(),
+        provider_operation_reference: 'SYNTH-PAY-HELD-0005',
+        provider_scenario: 'SUCCESS',
+        source_checkout_reference: 'SYNTH-CHECKOUT-MONEY-HELD-0005',
+        now,
+      });
+      const heldAuthorized = await silent.authorize({
+        command_reference: 'SYNTH-CMD-PAYMENT-AUTH-HELD-0005',
+        context: context(),
+        expected_version: held.version,
+        payment_transaction_id: held.payment_transaction_id,
+        now: new Date(now.getTime() + 30_000),
+      });
+      const heldCapture = await silent.capture({
+        command_reference: 'SYNTH-CMD-PAYMENT-CAPTURE-HELD-0005',
+        context: context(),
+        expected_version: heldAuthorized.version,
+        payment_transaction_id: held.payment_transaction_id,
+        now: new Date(now.getTime() + 31_000),
+      });
+      check(
+        heldCapture.payment_state === 'UNKNOWN_REQUIRES_RECONCILIATION',
+        `A capture the provider did not answer was recorded as ${heldCapture.payment_state}`,
+      );
+      // An authorisation the provider did not answer is the checkout's to
+      // settle; the money service refuses to reconcile it as a capture.
+      await service
+        .reconcilePayment({
+          context: context(),
+          evidence_reference: 'SYNTH-STMT-WRONG-STAGE',
+          payment_transaction_id: unknown.payment_transaction_id,
+          provider_state: 'SUCCEEDED',
+          now: new Date(now.getTime() + 32_000),
+        })
+        .then(
+          () => check(false, 'An unanswered authorization was reconciled as a capture'),
+          (error: unknown) =>
+            check(
+              error instanceof MoneyStateError,
+              `An unanswered authorization was refused for the wrong reason (${String(error)})`,
+            ),
+        );
+      // Too soon to ask: the call may still be in flight.
+      const early = await silent.reconcileUnknownOperations({
+        context: context(),
+        now: new Date(now.getTime() + 40_000),
+      });
+      const swept = await silent.reconcileUnknownOperations({
+        context: context(),
+        now: new Date(now.getTime() + 100_000),
+      });
+      const heldAfter = await pool.query<{
+        exceptions: string;
+        ledger: string;
+        payment_state: string;
+        reason_code: string | null;
+      }>(
+        `SELECT payment.payment_state,
+                (SELECT count(*)::text FROM marketplace.finance_exceptions
+                  WHERE operation_reference=payment.provider_operation_reference
+                    AND exception_state<>'RESOLVED') AS exceptions,
+                (SELECT count(*)::text FROM marketplace.ledger_transactions
+                  WHERE source_reference=$2) AS ledger,
+                (SELECT reason_code FROM marketplace.payment_events
+                  WHERE payment_transaction_id=$1 AND event_type='PAYMENT_CAPTURE_RECONCILED') AS reason_code
+           FROM marketplace.payment_transactions payment WHERE payment_transaction_id=$1`,
+        [held.payment_transaction_id, `SYNTH-CAPTURE-${held.payment_transaction_id.toUpperCase()}`],
+      );
+      check(
+        early.payments === 0 &&
+          swept.payments === 1 &&
+          heldAfter.rows[0]?.payment_state === 'CAPTURED' &&
+          heldAfter.rows[0].exceptions === '0' &&
+          heldAfter.rows[0].ledger === '1' &&
+          heldAfter.rows[0].reason_code === 'RECONCILED_PROVIDER_STATUS',
+        `A capture the provider did not answer was not reconciled from its status (${JSON.stringify({ early, swept, ...heldAfter.rows[0] })})`,
+      );
+
+      // A refund the provider did not answer, settled from its statement.
+      const heldRefund = await silent.proposeRefund({
+        command_reference: 'SYNTH-CMD-REFUND-PROPOSE-HELD-0005',
+        context: context(),
+        delivery_minor: 0,
+        discount_reversal_minor: 0,
+        item_minor: 2_000,
+        payment_transaction_id: held.payment_transaction_id,
+        provider_operation_reference: 'SYNTH-REF-HELD-0005',
+        provider_scenario: 'SUCCESS',
+        source_order_reference: 'SYNTH-ORDER-MONEY-HELD-0005',
+        tax_minor: 0,
+        tip_minor: 0,
+        trigger_code: 'PARTIAL_ITEM_REFUND',
+        now: new Date(now.getTime() + 101_000),
+      });
+      // The same proposal again is the same refund, not a second one and
+      // not an error on the command's unique key.
+      const heldRefundReplay = await silent.proposeRefund({
+        command_reference: 'SYNTH-CMD-REFUND-PROPOSE-HELD-0005',
+        context: context(),
+        delivery_minor: 0,
+        discount_reversal_minor: 0,
+        item_minor: 2_000,
+        payment_transaction_id: held.payment_transaction_id,
+        provider_operation_reference: 'SYNTH-REF-HELD-0005-AGAIN',
+        provider_scenario: 'SUCCESS',
+        source_order_reference: 'SYNTH-ORDER-MONEY-HELD-0005',
+        tax_minor: 0,
+        tip_minor: 0,
+        trigger_code: 'PARTIAL_ITEM_REFUND',
+        now: new Date(now.getTime() + 101_500),
+      });
+      check(
+        heldRefundReplay.refund_id === heldRefund.refund_id,
+        'A replayed refund proposal filed a second refund',
+      );
+      // Bounded by the order: 4,000 was charged to this order, 2,000 is
+      // already proposed against it, so 2,001 more is refused although the
+      // payment as a whole (7,000 less the 2,000 pending) would allow it.
+      await silent
+        .proposeRefund({
+          command_reference: 'SYNTH-CMD-REFUND-PROPOSE-OVER-0005',
+          context: context(),
+          delivery_minor: 0,
+          discount_reversal_minor: 0,
+          item_minor: 2_001,
+          payment_transaction_id: held.payment_transaction_id,
+          provider_operation_reference: 'SYNTH-REF-OVER-0005',
+          provider_scenario: 'SUCCESS',
+          source_order_reference: 'SYNTH-ORDER-MONEY-HELD-0005',
+          tax_minor: 0,
+          tip_minor: 0,
+          trigger_code: 'PARTIAL_ITEM_REFUND',
+          now: new Date(now.getTime() + 102_000),
+        })
+        .then(
+          () =>
+            check(
+              false,
+              'A refund beyond what the order was charged, net of one pending, was accepted',
+            ),
+          (error: unknown) =>
+            check(
+              error instanceof MoneyInputError && /this order was charged/.test(String(error)),
+              `The over-refund was refused for the wrong reason (${String(error)})`,
+            ),
+        );
+      const heldSubmitted = await silent.approveAndSubmitRefund({
+        command_reference: 'SYNTH-CMD-REFUND-APPROVE-HELD-0005',
+        context: context(approver),
+        expected_version: heldRefund.version,
+        refund_id: heldRefund.refund_id,
+        now: new Date(now.getTime() + 103_000),
+      });
+      check(
+        heldSubmitted.refund_state === 'FAILED_REVIEW',
+        `A refund the provider did not answer was recorded as ${heldSubmitted.refund_state}`,
+      );
+      const heldRefundSettled = await service.reconcileRefund({
+        context: context(approver),
+        evidence_reference: 'SYNTH-STMT-REFUND-0005',
+        provider_state: 'SUCCEEDED',
+        refund_id: heldRefund.refund_id,
+        now: new Date(now.getTime() + 104_000),
+      });
+      const refundAfter = await pool.query<{ exceptions: string; ledger: string }>(
+        `SELECT (SELECT count(*)::text FROM marketplace.finance_exceptions
+                  WHERE operation_reference='SYNTH-REF-HELD-0005' AND exception_state<>'RESOLVED') AS exceptions,
+                (SELECT count(*)::text FROM marketplace.ledger_transactions
+                  WHERE source_reference=$1) AS ledger`,
+        [`SYNTH-REFUND-${String(heldRefund.refund_id).toUpperCase()}`],
+      );
+      check(
+        heldRefundSettled.refund_state === 'SUCCEEDED' &&
+          refundAfter.rows[0]?.exceptions === '0' &&
+          refundAfter.rows[0].ledger === '1',
+        `A refund the provider did not answer was not settled from its statement (${JSON.stringify({ state: heldRefundSettled.refund_state, ...refundAfter.rows[0] })})`,
+      );
+      // The same answer again is a receipt; a refund not awaiting an answer
+      // is refused.
+      const receiptAgain = await service.reconcileRefund({
+        context: context(approver),
+        evidence_reference: 'SYNTH-STMT-REFUND-0005',
+        provider_state: 'SUCCEEDED',
+        refund_id: heldRefund.refund_id,
+        now: new Date(now.getTime() + 105_000),
+      });
+      check(receiptAgain.refund_state === 'SUCCEEDED', 'A repeated answer was not a receipt');
+
+      // A capture the provider says failed leaves the authorisation standing
+      // for another attempt, and its exception closed.
+      const declined = await silent.createPayment({
+        allocations: [
+          {
+            delivery_minor: 0,
+            discount_minor: 0,
+            item_minor: 3_000,
+            policy_version_reference: 'SYNTH-POLICY-D05-V1',
+            source_order_reference: 'SYNTH-ORDER-MONEY-HELD-0006',
+            tax_minor: 0,
+            tip_minor: 0,
+            vendor_location_id: location,
+          },
+        ],
+        amount_minor: 3_000,
+        command_reference: 'SYNTH-CMD-PAYMENT-CREATE-HELD-0006',
+        context: context(),
+        provider_operation_reference: 'SYNTH-PAY-HELD-0006',
+        provider_scenario: 'SUCCESS',
+        source_checkout_reference: 'SYNTH-CHECKOUT-MONEY-HELD-0006',
+        now,
+      });
+      const declinedAuthorized = await silent.authorize({
+        command_reference: 'SYNTH-CMD-PAYMENT-AUTH-HELD-0006',
+        context: context(),
+        expected_version: declined.version,
+        payment_transaction_id: declined.payment_transaction_id,
+        now: new Date(now.getTime() + 110_000),
+      });
+      await silent.capture({
+        command_reference: 'SYNTH-CMD-PAYMENT-CAPTURE-HELD-0006',
+        context: context(),
+        expected_version: declinedAuthorized.version,
+        payment_transaction_id: declined.payment_transaction_id,
+        now: new Date(now.getTime() + 111_000),
+      });
+      const declinedSettled = await service.reconcilePayment({
+        context: context(approver),
+        evidence_reference: 'SYNTH-STMT-CAPTURE-0006',
+        payment_transaction_id: declined.payment_transaction_id,
+        provider_state: 'FAILED',
+        now: new Date(now.getTime() + 112_000),
+      });
+      const declinedAfter = await pool.query<{ exceptions: string; ledger: string }>(
+        `SELECT (SELECT count(*)::text FROM marketplace.finance_exceptions
+                  WHERE operation_reference='SYNTH-PAY-HELD-0006' AND exception_state<>'RESOLVED') AS exceptions,
+                (SELECT count(*)::text FROM marketplace.ledger_transactions
+                  WHERE source_reference=$1) AS ledger`,
+        [`SYNTH-CAPTURE-${declined.payment_transaction_id.toUpperCase()}`],
+      );
+      check(
+        declinedSettled.payment_state === 'AUTHORIZED' &&
+          declinedAfter.rows[0]?.exceptions === '0' &&
+          declinedAfter.rows[0].ledger === '0',
+        `A capture the provider says failed did not leave the authorisation standing (${JSON.stringify({ state: declinedSettled.payment_state, ...declinedAfter.rows[0] })})`,
+      );
+    } finally {
+      await silent.close();
+    }
   } finally {
     await complete.close();
     await service.close();

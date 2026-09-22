@@ -525,6 +525,8 @@ export type CustomerReceipt = {
     trigger_code: string;
     refund_total_minor: number;
     occurred_at: string;
+    /** The exact lines returned (10.2), when the refund names them. */
+    lines: readonly { vendor_order_line_id: string; quantity: number; amount_minor: number }[];
   }[];
 };
 

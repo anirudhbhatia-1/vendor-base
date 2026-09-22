@@ -1759,3 +1759,19 @@ export const partnerEarningAdjustments = marketplaceSchema.table(
     index('partner_earning_adjustments_partner').on(table.partnerUserId, table.createdAt),
   ],
 );
+
+export const refundLines = marketplaceSchema.table(
+  'refund_lines',
+  {
+    refundLineId: uuid('refund_line_id').primaryKey(),
+    refundId: uuid('refund_id').notNull(),
+    vendorOrderLineId: uuid('vendor_order_line_id').notNull(),
+    quantity: integer('quantity').notNull(),
+    amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('refund_line_once').on(table.refundId, table.vendorOrderLineId),
+    index('refund_lines_order_line').on(table.vendorOrderLineId),
+  ],
+);

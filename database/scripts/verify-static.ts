@@ -181,6 +181,7 @@ assert(
       '0106_return_receipt',
       '0107_earning_adjustments',
       '0108_ledger_posting_engine',
+      '0109_refund_lines_and_reconciliation',
     ]),
   'Unexpected reviewed migrations',
 );

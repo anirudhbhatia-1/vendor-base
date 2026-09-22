@@ -23,6 +23,10 @@ test('requires global finance authority for every synthetic money mutation', () 
     'schedulePayout',
     'submitPayout',
     'reconcilePayout',
+    // The provider's late answer for a capture or a refund (10.2) is applied
+    // under the same authority as a payout's.
+    'reconcilePayment',
+    'reconcileRefund',
   ]) {
     const rule = authorization(method);
     assert.equal(rule?.capability, 'admin.finance.ledger_manage');

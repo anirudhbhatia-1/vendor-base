@@ -34,6 +34,10 @@ function dependencies(input: { readonly method?: string } = {}) {
         calls.push('recordDeliveryEarnings');
         return { earning_posted: false, settled: true };
       },
+      refundEndedOrder: async () => {
+        calls.push('refundEndedOrder');
+        return null;
+      },
     },
     adminControl: {
       createSupportCase: async () => {
@@ -88,11 +92,17 @@ test('a delivered order settles, whoever delivered it', async () => {
 });
 
 test('each answer to a placed order, and each ready, settles the group authorization', async () => {
-  for (const type of ['vendor_order.accepted', 'vendor_order.ready', 'vendor_order.ended']) {
+  for (const type of ['vendor_order.accepted', 'vendor_order.ready']) {
     const { calls, deps } = dependencies();
     await handleDomainEvent(deps, context, event(type));
     assert.deepEqual(calls, ['settleAuthorizationForOrder'], type);
   }
+});
+
+test('an ended order settles the authorization and then files the refund it may be owed (10.2)', async () => {
+  const { calls, deps } = dependencies();
+  await handleDomainEvent(deps, context, event('vendor_order.ended'));
+  assert.deepEqual(calls, ['settleAuthorizationForOrder', 'refundEndedOrder']);
 });
 
 test('a placed order is offered to partners', async () => {

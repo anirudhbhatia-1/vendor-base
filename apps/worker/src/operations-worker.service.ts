@@ -347,6 +347,14 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#checkout.abandonUnknownPayments({ context, now }),
         0,
       );
+      // A capture or a refund the provider left unanswered is asked about
+      // again (10.2); what it says is applied, and what it still does not
+      // say waits for its statement.
+      const unknownOperations = await pass(
+        'money.reconcileUnknownOperations',
+        () => this.#money.reconcileUnknownOperations({ context, now }),
+        { payments: 0, refunds: 0 },
+      );
       const accepts = await pass(
         'fulfilment.timeoutOverdueAccepts',
         () => this.#fulfilment.timeoutOverdueAccepts({ context, now }),
@@ -482,6 +490,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         quotes +
         reconciled +
         abandoned +
+        unknownOperations.payments +
+        unknownOperations.refunds +
         accepts.length +
         decisions.length +
         lapsedDocuments.length +
@@ -522,6 +532,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           quotes,
           reconciled_placements: reconciled,
           abandoned_payments: abandoned,
+          reconciled_captures: unknownOperations.payments,
+          reconciled_refunds: unknownOperations.refunds,
           reservations: reservations.length,
         });
       }

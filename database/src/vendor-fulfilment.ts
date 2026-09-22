@@ -351,6 +351,12 @@ export interface CustomerReceipt {
     readonly trigger_code: string;
     readonly refund_total_minor: number;
     readonly occurred_at: string;
+    /** The exact lines returned (10.2), when the refund names them. */
+    readonly lines: readonly {
+      readonly vendor_order_line_id: UuidV7;
+      readonly quantity: number;
+      readonly amount_minor: number;
+    }[];
   }[];
 }
 
@@ -3322,12 +3328,20 @@ export class VendorFulfilmentService {
       trigger_code: string;
       refund_total_minor: string;
       created_at: Date;
+      lines: readonly { vendor_order_line_id: string; quantity: number; amount_minor: string }[];
     }>(
-      `SELECT refund_id, refund_state, trigger_code, refund_total_minor::text AS refund_total_minor,
-              created_at
-         FROM marketplace.refunds
-        WHERE source_order_reference=$1 AND refund_state NOT IN ('PROPOSED','REJECTED')
-        ORDER BY created_at`,
+      `SELECT refund.refund_id, refund.refund_state, refund.trigger_code,
+              refund.refund_total_minor::text AS refund_total_minor, refund.created_at,
+              COALESCE((SELECT json_agg(json_build_object(
+                          'vendor_order_line_id', line.vendor_order_line_id,
+                          'quantity', line.quantity,
+                          'amount_minor', line.amount_minor::text)
+                        ORDER BY line.vendor_order_line_id)
+                          FROM marketplace.refund_lines line WHERE line.refund_id=refund.refund_id),
+                       '[]'::json) AS lines
+         FROM marketplace.refunds refund
+        WHERE refund.source_order_reference=$1 AND refund.refund_state NOT IN ('PROPOSED','REJECTED')
+        ORDER BY refund.created_at`,
       [ownerRow.order_reference],
     );
     const money = charged.rows[0];
@@ -3390,6 +3404,15 @@ export class VendorFulfilmentService {
             trigger_code: row.trigger_code,
             refund_total_minor: Number(row.refund_total_minor),
             occurred_at: row.created_at.toISOString(),
+            lines: Object.freeze(
+              row.lines.map((line) =>
+                Object.freeze({
+                  vendor_order_line_id: parseUuidV7(line.vendor_order_line_id),
+                  quantity: line.quantity,
+                  amount_minor: Number(line.amount_minor),
+                }),
+              ),
+            ),
           }),
         ),
       ),
@@ -3545,7 +3568,11 @@ export class VendorFulfilmentService {
    * Refuses once the packages are in custody: at that point the goods exist
    * somewhere in the world and a state flip would strand them. The customer is
    * pointed at the support path instead, which is the one that can actually
-   * arrange a return.
+   * arrange a return. Until custody the order can be called off, packed or
+   * not — the preview said so, and until audit run 67 this refused anything
+   * past PICKING while the preview promised a cancellation with the item
+   * total returned. A packed order's money has been captured; the refund it
+   * is owed is filed by the platform on the ending (10.2).
    */
   async cancelByCustomer(input: {
     readonly context: RequestContext;
@@ -3580,7 +3607,12 @@ export class VendorFulfilmentService {
       const inCustody =
         order.assignment_state !== null &&
         !['UNASSIGNED', 'OFFERED', 'DECLINED', 'OFFER_EXPIRED'].includes(order.assignment_state);
-      if (!['PLACED', 'ACCEPTED', 'PICKING'].includes(order.lifecycle_state) || inCustody) {
+      if (
+        !['PLACED', 'ACCEPTED', 'PICKING', 'AWAITING_CUSTOMER_DECISION', 'READY'].includes(
+          order.lifecycle_state,
+        ) ||
+        inCustody
+      ) {
         throw new FulfilmentConflictError(
           'This order is too far along to cancel; open a support case instead',
         );

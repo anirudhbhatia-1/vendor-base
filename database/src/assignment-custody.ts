@@ -1352,6 +1352,16 @@ export class AssignmentCustodyService {
       if (!assignment.offer_expires_at || assignment.offer_expires_at <= now) {
         throw new AssignmentConflictError('Offer has expired');
       }
+      // The order may have ended while the offer stood — the customer can
+      // cancel until someone is carrying the bag (10.2) — and an accepted
+      // offer for it would send a partner to collect nothing.
+      const order = await client.query<{ lifecycle_state: string }>(
+        'SELECT lifecycle_state FROM marketplace.vendor_orders WHERE vendor_order_id=$1',
+        [assignment.vendor_order_id],
+      );
+      if (['CANCELLED', 'EXPIRED'].includes(order.rows[0]?.lifecycle_state ?? '')) {
+        throw new AssignmentConflictError('The order this offer was for has ended');
+      }
       const eligibility = await client.query<{ role_assignment_id: string }>(
         `SELECT eligibility.role_assignment_id
            FROM marketplace.partner_eligibilities eligibility

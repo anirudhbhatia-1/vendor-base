@@ -12,8 +12,14 @@ import type { MoneyLifecycleService } from './money-lifecycle.js';
 import { resolveFinancialPolicy } from './financial-policy.js';
 import { calculatePartnerOfferEarning } from './money-policy.js';
 
-/** What settling a group's authorization concluded. */
-export type AuthorizationOutcome = 'WAITING' | 'CAPTURED' | 'VOIDED' | 'ALREADY_SETTLED';
+/**
+ * What settling a group's authorization concluded. A capture the provider
+ * declined or did not answer is reported as itself (10.2): until audit run
+ * 67 every attempt answered CAPTURED, and an unanswered one went on to be
+ * delivered against money nobody knew had moved.
+ */
+export type AuthorizationOutcome =
+  'WAITING' | 'CAPTURED' | 'CAPTURE_FAILED' | 'CAPTURE_UNKNOWN' | 'VOIDED' | 'ALREADY_SETTLED';
 
 /**
  * Turns order-lifecycle events into money movements.
@@ -117,14 +123,136 @@ export class OrderMoneyOrchestrator {
       });
       return 'VOIDED';
     }
-    await this.#money.capture({
+    const captured = await this.#money.capture({
       command_reference: `SYNTH-CMD-CAPTURE-${reference}`,
       context: input.context,
       expected_version: row.version,
       now,
       payment_transaction_id: paymentId,
     });
-    return 'CAPTURED';
+    return captured.payment_state === 'CAPTURED'
+      ? 'CAPTURED'
+      : captured.payment_state === 'UNKNOWN_REQUIRES_RECONCILIATION'
+        ? 'CAPTURE_UNKNOWN'
+        : 'CAPTURE_FAILED';
+  }
+
+  /**
+   * Files the refund a cancellation after capture is owed (10.2).
+   *
+   * Capture happens at ready, and a customer may still call an order off
+   * until someone is carrying it. The cancellation preview promised "the
+   * item total is returned; the delivery fee may be kept", and until audit
+   * run 67 nothing returned it: the ending shrinks an authorisation, and a
+   * captured payment is not one. The refund is proposed by the platform,
+   * allocated to this order and to the exact lines that were in the bag,
+   * and waits for a person to approve it. The delivery fee is kept, as the
+   * customer was told; the tip, for a delivery that did not happen, is
+   * returned; the discount the order carried comes off the return.
+   *
+   * Replay-safe twice over: the command reference and the refund's provider
+   * reference are both the order's. Returns the refund, or null when there
+   * is nothing to return — an order that ended before capture, or one
+   * whose goods went out.
+   */
+  async refundEndedOrder(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    const now = input.now ?? new Date();
+    const found = await this.#pool.query<{
+      discount_minor: string | null;
+      item_minor: string | null;
+      lifecycle_state: string;
+      order_reference: string;
+      payment_state: string;
+      payment_transaction_id: string;
+      picked_up: string;
+      provider_scenario: string;
+      tax_minor: string | null;
+      tip_minor: string | null;
+    }>(
+      `SELECT orders.lifecycle_state, orders.order_reference,
+              payment.payment_transaction_id, payment.payment_state, payment.provider_scenario,
+              allocation.item_minor::text, allocation.tax_minor::text, allocation.tip_minor::text,
+              allocation.discount_minor::text,
+              (SELECT count(*) FROM marketplace.vendor_order_events event
+                WHERE event.vendor_order_id=orders.vendor_order_id
+                  AND event.resulting_state IN ('PICKED_UP','DELIVERED'))::text AS picked_up
+         FROM marketplace.vendor_orders orders
+         JOIN marketplace.checkout_groups grouping USING (checkout_group_id)
+         JOIN marketplace.payment_transactions payment USING (payment_transaction_id)
+         LEFT JOIN marketplace.payment_allocations allocation
+           ON allocation.payment_transaction_id=payment.payment_transaction_id
+          AND allocation.source_order_reference=orders.order_reference
+        WHERE orders.vendor_order_id=$1`,
+      [input.vendor_order_id],
+    );
+    const row = found.rows[0];
+    if (
+      !row ||
+      row.lifecycle_state !== 'CANCELLED' ||
+      row.payment_state !== 'CAPTURED' ||
+      Number(row.picked_up) > 0
+    )
+      return null;
+    const item = Number(row.item_minor ?? '0');
+    const tax = Number(row.tax_minor ?? '0');
+    const tip = Number(row.tip_minor ?? '0');
+    const discount = Number(row.discount_minor ?? '0');
+    if (item + tax + tip - discount <= 0) return null;
+
+    // The lines in the bag, at what they were charged; they are the refund's
+    // lines only when they account for the item amount exactly.
+    const lines = await this.#pool.query<{
+      vendor_order_line_id: string;
+      quantity: number;
+      unit_price_minor: string;
+      pick_state: string;
+      actual_quantity: number | null;
+      actual_unit_price_minor: string | null;
+    }>(
+      `SELECT line.vendor_order_line_id, line.quantity, line.unit_price_minor::text,
+              COALESCE(pick.pick_state,'PENDING') AS pick_state, pick.actual_quantity,
+              pick.actual_unit_price_minor::text
+         FROM marketplace.vendor_order_lines line
+         LEFT JOIN marketplace.vendor_order_line_picks pick USING (vendor_order_line_id)
+        WHERE line.vendor_order_id=$1 ORDER BY line.vendor_order_line_id`,
+      [input.vendor_order_id],
+    );
+    const supplied = lines.rows
+      .filter((line) =>
+        ['FOUND', 'SUBSTITUTION_APPROVED', 'WEIGHT_APPROVED'].includes(line.pick_state),
+      )
+      .map((line) => {
+        const quantity = line.actual_quantity ?? line.quantity;
+        const unit = Number(line.actual_unit_price_minor ?? line.unit_price_minor);
+        return {
+          vendor_order_line_id: parseUuidV7(line.vendor_order_line_id),
+          quantity,
+          amount_minor: quantity * unit,
+        };
+      })
+      .filter((line) => line.quantity > 0 && line.amount_minor > 0);
+    const lined = supplied.reduce((sum, line) => sum + line.amount_minor, 0);
+    const reference = String(input.vendor_order_id).toUpperCase();
+    return this.#money.proposeRefund({
+      command_reference: `SYNTH-CMD-REFUND-CANCEL-${reference}`,
+      context: input.context,
+      delivery_minor: 0,
+      discount_reversal_minor: discount,
+      item_minor: item,
+      ...(lined === item && supplied.length > 0 ? { lines: supplied } : {}),
+      now,
+      payment_transaction_id: parseUuidV7(row.payment_transaction_id),
+      provider_operation_reference: `SYNTH-REF-CANCEL-${reference}`,
+      provider_scenario: row.provider_scenario as 'SUCCESS' | 'DECLINE' | 'UNKNOWN' | 'MALFORMED',
+      source_order_reference: row.order_reference,
+      tax_minor: tax,
+      tip_minor: tip,
+      trigger_code: 'PRE_PICKUP_CANCEL',
+    });
   }
 
   /**

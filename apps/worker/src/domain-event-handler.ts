@@ -41,6 +41,10 @@ export interface DomainEventDependencies {
       readonly context: RequestContext;
       readonly vendor_order_id: UuidV7;
     }): Promise<{ readonly earning_posted: boolean; readonly settled: boolean }>;
+    refundEndedOrder(input: {
+      readonly context: RequestContext;
+      readonly vendor_order_id: UuidV7;
+    }): Promise<{ readonly refund_id?: unknown; readonly refund_state?: unknown } | null>;
   };
   readonly adminControl: {
     createSupportCase(input: {
@@ -169,6 +173,23 @@ export async function handleDomainEvent(
       outcome,
       vendor_order_id: event.aggregate_id,
     });
+    if (event.event_type === 'vendor_order.ended') {
+      // An order called off after its group was captured is owed the money
+      // back (10.2). The refund is filed here for a person to approve;
+      // nothing is filed for an order that ended before capture, whose
+      // share the ending already released from the authorisation.
+      const refund = await deps.orderMoney.refundEndedOrder({
+        context,
+        vendor_order_id: event.aggregate_id,
+      });
+      if (refund)
+        deps.log('vendor_order.refund.proposed', {
+          event_id: event.event_id,
+          refund_id: refund.refund_id,
+          refund_state: refund.refund_state,
+          vendor_order_id: event.aggregate_id,
+        });
+    }
   } else if (event.event_type === 'vendor_order.delivered') {
     const result = await deps.orderMoney.recordDeliveryEarnings({
       context,

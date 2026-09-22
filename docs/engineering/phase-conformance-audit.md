@@ -2280,6 +2280,42 @@ Five requirements. Two held in part and three did not: the account catalogue (00
 
 **Step 10.1: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 67 (22 September 2026) — step 10.2, authorization, capture, void, and refund lifecycle
+
+Five requirements. Three held and two did not, with two of the three held only in part: provider attempts map to internal transactions by operation reference, with duplicates, late answers and abandoned unknowns handled at the checkout since runs 44 and 48; capture takes what the bags hold since run 52; the unused authorisation is voided since run 44. But a capture the provider left *unanswered* was parked in `UNKNOWN_REQUIRES_RECONCILIATION` with an exception whose next action no route and no sweep performed, while the orchestrator answered `CAPTURED` regardless — the order was delivered against money nobody knew had moved and its settlement never ran; a refund the provider left unanswered was the same. A refund was bounded by the payment's captured total alone, counting only refunds that had succeeded, so one order's refund could be paid from a sibling's money and two pending proposals could both pass; it named no lines. And the cancellation preview promised a packed order's item total back while `cancelByCustomer` refused anything past PICKING and nothing would have filed the refund had it not. One migration (0109); 44 connected assertions in the money module (35 before) and 291 in fulfilment (277 before); one unit test; seven mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Map provider attempts to internal transactions | Met (runs 44, 48): operation reference, receipts, late answers. |
+| 2 | Capture only permitted completed/accepted amounts | Met since run 52 (the capture plan); the increase for an approved dearer change is recorded with no provider call — carried under D-12. |
+| 3 | Void unused authorization where supported | Met (run 44): `voidAuthorization` through the port; a partial capture's remainder is the adapter's release. |
+| 4 | Allocate partial/full refund to exact child orders and lines | **Not met:** bounded by the payment, not the order; pending proposals uncounted; no lines; the post-capture cancellation's refund never filed — P67-02, P67-03. |
+| 5 | Handle unknown, late, duplicated, and failed outcomes through reconciliation | **Not met for capture and refund:** parked, unreachable, and reported as captured — P67-01; replayed commands errored on the unique key — P67-03. |
+
+**P67-01 — the answer that came later.** `reconcilePayment` and `reconcileRefund` apply the provider's answer for a capture or refund it did not give at the time: "succeeded" is the capture or refund, posted in the same transaction, with the exception closed; "failed" leaves the authorisation standing (the capture may be attempted again) or makes the refund retryable; "unknown" changes nothing; an unanswered *authorisation* is refused here because the checkout settles it on its own deadline. `reconcileUnknownOperations` asks the port's `status` for every such operation older than a minute and applies what it says; the operations worker runs it on every pass. `POST admin/finance/payments/:id/reconcile` and `…/refunds/:id/reconcile` take a statement's answer from a person, as the payout's route does. `settleAuthorizationForOrder` reports `CAPTURE_UNKNOWN` and `CAPTURE_FAILED` as themselves. The fulfilment walk packs an order, captures it against a provider that answers nothing, reads `CAPTURE_UNKNOWN` and no settlement, sweeps, and reads a captured, settled order.
+
+**P67-02 — the refund a cancellation is owed.** A customer may call an order off until someone is carrying it (PRD: cancellation after custody becomes a controlled return); `cancelByCustomer` now allows AWAITING_CUSTOMER_DECISION and READY as the preview did, and 0109 lets a cancelled order keep its ready snapshot. On `vendor_order.ended` the worker runs `refundEndedOrder`: for an order cancelled after its group was captured and never picked up, the platform proposes the refund against that order — item, tax and tip less the discount, the delivery fee kept as the customer was told — with the exact lines that were in the bag, replay-safe on the order's own references, and a person approves it (the platform's proposal waits three days for one; a person's own still fifteen minutes). An offer for an ended order can no longer be accepted.
+
+**P67-03 — bounds, lines, replays.** A refund is bounded by what the order was charged and by what the payment captured, both net of every refund not yet failed — a pending proposal reserves its amount. `refund_lines` (0109) names the lines a refund returns; the schema holds their sum to the refund's item amount at commit; the customer's receipt shows them. A replayed proposal is the same refund and a replayed approval is its outcome, where both used to fail on the command's unique key (the walk's assertion that a replayed approval *throws* was the wrong assertion, and is now that it returns once-posted).
+
+**Mutation results.** Seven probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| The sweep asks about an operation still in flight | *A capture the provider did not answer was not reconciled from its status ({"early":{"payments":1,…* |
+| A failed capture marks the payment FAILED, the authorisation lost | *A capture the provider says failed did not leave the authorisation standing (…"state":"FAILED"…)* |
+| The refund is bounded by the payment alone (old) | *A refund beyond what the order was charged, net of one pending, was accepted* |
+| Nothing is filed for a cancellation after capture (old) | *A cancellation after capture did not file the refund the customer was promised (null, …)* |
+| Refund lines need not sum to the item amount (code and schema) | *The refund does not name the exact line it returns ([{"quantity":2,"amount_minor":"30001",…* |
+| Refund lines need not sum in code; the schema alone stands | **The schema**: `refund lines sum to 30001 against an item amount of 30000` refuses the proposal at commit |
+| The orchestrator reports CAPTURED whatever the provider said (old) | *A capture the provider did not answer was reported as CAPTURED and settled=false* |
+
+**Forward findings.** (D-12) An approved dearer replacement raises the recorded authorisation with `provider_scenario='SUCCESS'` and no provider call; a real adapter needs an incremental authorisation on the port, or the increase must be collected separately. (10.3) A cancelled order's kept delivery fee is captured and never divided — it sits in platform clearing with no settlement line; a return after custody still reaches money only through a support case and a person's refund. (10.5) `importProviderStatement` classifies a statement's answer for an unknown operation as a STATUS_MISMATCH exception rather than applying it as `reconcilePayout` does; the reconcile routes exist now for it to call. (9.3, carried) The order-state guard on `accept` is the only thing between a cancelled order and a partner collecting nothing; the ending does not withdraw its open offers.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 110 migration files (0000–0109), full ladder; `money_lifecycle` 44 assertions (35 before), `vendor_fulfilment` 291 (277 before), `partner_lifecycle` 86. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 594 pass / 0 fail (593 before: the ended order files its refund after settling); `pnpm test:integration` exit 0 on a rebuilt test stack; all seven probes on a rebuilt database.
+
+**Step 10.2: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

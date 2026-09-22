@@ -592,6 +592,17 @@ function OrderCard({
                     <span>
                       {t('customer.receipt.refund', 'Refund')} ·{' '}
                       {refund.refund_state.toLowerCase().replaceAll('_', ' ')}
+                      {refund.lines.length > 0
+                        ? ` · ${refund.lines
+                            .map((line) => {
+                              const ordered = receipt.lines.find(
+                                (candidate) =>
+                                  candidate.vendor_order_line_id === line.vendor_order_line_id,
+                              );
+                              return `${line.quantity} × ${ordered?.supplied_title ?? ordered?.title ?? t('customer.receipt.line', 'item')}`;
+                            })
+                            .join(', ')}`
+                        : ''}
                     </span>
                     <span>−{formatMoneyMinor(refund.refund_total_minor)}</span>
                   </li>

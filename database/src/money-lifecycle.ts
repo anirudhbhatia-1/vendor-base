@@ -742,12 +742,30 @@ export class MoneyLifecycleService {
     return payout;
   }
 
+  /**
+   * Proposes a refund against one child order of a captured payment (10.2).
+   *
+   * The refund is bounded twice: by what the payment captured and by what
+   * the order itself was charged, both net of every refund not yet failed —
+   * a pending proposal reserves its amount, so two cannot both pass the cap
+   * and both succeed. When `lines` are given they are the exact order lines
+   * being returned and must sum to the item amount; the schema holds them
+   * to it. The platform may propose (a cancellation after capture files its
+   * own refund); a person must still approve, and a person's proposal
+   * expires in fifteen minutes while the platform's waits three days for
+   * someone to be at the desk.
+   */
   async proposeRefund(input: {
     readonly command_reference: string;
     readonly context: RequestContext;
     readonly delivery_minor: number;
     readonly discount_reversal_minor: number;
     readonly item_minor: number;
+    readonly lines?: readonly {
+      readonly vendor_order_line_id: UuidV7;
+      readonly quantity: number;
+      readonly amount_minor: number;
+    }[];
     readonly payment_transaction_id: UuidV7;
     readonly provider_operation_reference: string;
     readonly provider_scenario: FakeProviderScenario;
@@ -762,9 +780,11 @@ export class MoneyLifecycleService {
       | 'PROVIDER_EXCEPTION';
     readonly now?: Date;
   }) {
-    const who = actor(input.context);
+    const proposer = financeAutomation(input.context);
+    const who = proposer.id;
     const now = input.now ?? new Date();
     const ids = contextIds(input.context);
+    const command = text(input.command_reference, COMMAND, 'Command reference');
     const total =
       minor(input.item_minor, 'Item refund') +
       minor(input.tax_minor, 'Tax refund') +
@@ -772,22 +792,65 @@ export class MoneyLifecycleService {
       minor(input.tip_minor, 'Tip refund') -
       minor(input.discount_reversal_minor, 'Discount reversal');
     minor(total, 'Refund total', 1);
+    const lines = input.lines ?? [];
+    if (lines.length > 0) {
+      const lined = lines.reduce(
+        (sum, line) => sum + minor(line.amount_minor, 'Line refund', 1),
+        0,
+      );
+      if (lined !== input.item_minor)
+        throw new MoneyInputError('Refund lines must sum to the item amount');
+      if (lines.some((line) => !Number.isSafeInteger(line.quantity) || line.quantity < 1))
+        throw new MoneyInputError('Refund line quantity must be a positive integer');
+      if (new Set(lines.map((line) => line.vendor_order_line_id)).size !== lines.length)
+        throw new MoneyInputError('A refund names each line once');
+    }
+    const sourceOrder = text(input.source_order_reference, ORDER, 'Order reference');
     return tx(this.#pool, async (client) => {
+      const replay = await client.query(
+        `SELECT refund.*, refund.refund_total_minor::bigint AS refund_total_minor
+           FROM marketplace.refund_events event
+           JOIN marketplace.refunds refund USING (refund_id)
+          WHERE event.command_reference=$1`,
+        [command],
+      );
+      if (replay.rows[0])
+        return Object.freeze({
+          ...replay.rows[0],
+          refund_total_minor: Number(replay.rows[0].refund_total_minor),
+        });
       const payment = await client.query<{ amount_minor: string; payment_state: string }>(
-        'SELECT amount_minor,payment_state FROM marketplace.payment_transactions WHERE payment_transaction_id=$1 FOR SHARE',
+        'SELECT amount_minor,payment_state FROM marketplace.payment_transactions WHERE payment_transaction_id=$1 FOR UPDATE',
         [input.payment_transaction_id],
       );
       if (!payment.rows[0] || payment.rows[0].payment_state !== 'CAPTURED') {
         throw new MoneyStateError('Refund requires a captured payment');
       }
-      const previous = await client.query<{ total: string }>(
-        `SELECT COALESCE(sum(refund_total_minor),0)::text AS total
+      const previous = await client.query<{ order_total: string; total: string }>(
+        `SELECT COALESCE(sum(refund_total_minor),0)::text AS total,
+                COALESCE(sum(refund_total_minor) FILTER (WHERE source_order_reference=$2),0)::text
+                  AS order_total
            FROM marketplace.refunds
-          WHERE payment_transaction_id=$1 AND refund_state='SUCCEEDED'`,
-        [input.payment_transaction_id],
+          WHERE payment_transaction_id=$1
+            AND refund_state IN ('PENDING_APPROVAL','SUBMITTED','SUCCEEDED','FAILED_REVIEW')`,
+        [input.payment_transaction_id, sourceOrder],
       );
       if (Number(previous.rows[0]?.total ?? 0) + total > Number(payment.rows[0].amount_minor)) {
         throw new MoneyInputError('Refund exceeds the remaining captured amount');
+      }
+      // The order's own allocation is the ceiling for a refund against it.
+      // An order the payment does not allocate to (the money verifier's
+      // synthetic references) is bounded by the payment alone.
+      const allocation = await client.query<{ allocated_total_minor: string }>(
+        `SELECT allocated_total_minor::text FROM marketplace.payment_allocations
+          WHERE payment_transaction_id=$1 AND source_order_reference=$2`,
+        [input.payment_transaction_id, sourceOrder],
+      );
+      const allocated = allocation.rows[0]
+        ? Number(allocation.rows[0].allocated_total_minor)
+        : null;
+      if (allocated !== null && Number(previous.rows[0]?.order_total ?? 0) + total > allocated) {
+        throw new MoneyInputError('Refund exceeds what this order was charged');
       }
       const refundId = createUuidV7();
       const inserted = await client.query(
@@ -801,7 +864,7 @@ export class MoneyLifecycleService {
         [
           refundId,
           input.payment_transaction_id,
-          text(input.source_order_reference, ORDER, 'Order reference'),
+          sourceOrder,
           text(input.provider_operation_reference, OPERATION, 'Refund operation'),
           input.trigger_code,
           input.item_minor,
@@ -810,27 +873,33 @@ export class MoneyLifecycleService {
           input.tip_minor,
           input.discount_reversal_minor,
           who,
-          new Date(now.getTime() + 900_000),
+          new Date(now.getTime() + (proposer.kind === 'system' ? 259_200_000 : 900_000)),
           input.provider_scenario,
           ids.request,
           ids.correlation,
           now,
         ],
       );
+      for (const line of lines)
+        await client.query(
+          `INSERT INTO marketplace.refund_lines
+            (refund_line_id,refund_id,vendor_order_line_id,quantity,amount_minor,created_at)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [
+            createUuidV7(),
+            refundId,
+            line.vendor_order_line_id,
+            line.quantity,
+            line.amount_minor,
+            now,
+          ],
+        );
       await client.query(
         `INSERT INTO marketplace.refund_events
           (refund_event_id,refund_id,refund_version,event_type,resulting_state,actor_id,reason_code,
            command_reference,request_id,correlation_id,occurred_at)
          VALUES ($1,$2,1,'REFUND_PROPOSED','PENDING_APPROVAL',$3,'REFUND_PROPOSED',$4,$5,$6,$7)`,
-        [
-          createUuidV7(),
-          refundId,
-          who,
-          text(input.command_reference, COMMAND, 'Command reference'),
-          ids.request,
-          ids.correlation,
-          now,
-        ],
+        [createUuidV7(), refundId, who, command, ids.request, ids.correlation, now],
       );
       return Object.freeze({ ...inserted.rows[0], refund_total_minor: total });
     });
@@ -846,6 +915,7 @@ export class MoneyLifecycleService {
     const who = actor(input.context);
     const now = input.now ?? new Date();
     const ids = contextIds(input.context);
+    const command = text(input.command_reference, COMMAND, 'Command reference');
     const approved = await tx(this.#pool, async (client) => {
       const result = await client.query(
         'SELECT * FROM marketplace.refunds WHERE refund_id=$1 FOR UPDATE',
@@ -853,6 +923,13 @@ export class MoneyLifecycleService {
       );
       const refund = result.rows[0];
       if (!refund) throw new MoneyNotFoundError('Refund not found');
+      // The same approval again is its outcome again, not a stale error and
+      // not a second instruction to the provider.
+      const replay = await client.query(
+        `SELECT 1 FROM marketplace.refund_events WHERE refund_id=$1 AND command_reference=$2`,
+        [input.refund_id, command],
+      );
+      if (replay.rows[0]) return Object.freeze(refund);
       if (
         refund.refund_state !== 'PENDING_APPROVAL' ||
         refund.version !== input.expected_version ||
@@ -880,7 +957,6 @@ export class MoneyLifecycleService {
           WHERE refund_id=$1 RETURNING *`,
         [input.refund_id, next, who, now],
       );
-      const command = text(input.command_reference, COMMAND, 'Command reference');
       await client.query(
         `INSERT INTO marketplace.refund_events
           (refund_event_id,refund_id,refund_version,event_type,previous_state,resulting_state,
@@ -912,35 +988,284 @@ export class MoneyLifecycleService {
       }
       const settled = Object.freeze(updated.rows[0]);
       // The refund and its posting commit together (10.1), like the capture.
-      if (settled.refund_state === 'SUCCEEDED') {
-        const amount = Number(settled.refund_total_minor);
-        await this.#insertBalanced(client, {
-          context: input.context,
-          entries: [
-            {
-              account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
-              component: 'CUSTOMER_REFUND',
-              credit: 0,
-              debit: amount,
-              source_order_reference: String(settled.source_order_reference),
-            },
-            {
-              account: 'SYNTH-ACCOUNT-CUSTOMER-CLEARING',
-              component: 'CUSTOMER_REFUND',
-              credit: amount,
-              debit: 0,
-              source_order_reference: String(settled.source_order_reference),
-            },
-          ],
-          kind: 'REFUND',
-          now,
-          provider: String(settled.provider_operation_reference),
-          source: `SYNTH-REFUND-${String(settled.refund_id).toUpperCase()}`,
-        });
-      }
+      if (settled.refund_state === 'SUCCEEDED')
+        await this.#postRefundLedger(client, input.context, settled, now);
       return settled;
     });
     return approved;
+  }
+
+  async #postRefundLedger(
+    client: PoolClient,
+    context: RequestContext,
+    refund: Record<string, unknown>,
+    now: Date,
+  ) {
+    const amount = Number(refund.refund_total_minor);
+    await this.#insertBalanced(client, {
+      context,
+      entries: [
+        {
+          account: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+          component: 'CUSTOMER_REFUND',
+          credit: 0,
+          debit: amount,
+          source_order_reference: String(refund.source_order_reference),
+        },
+        {
+          account: 'SYNTH-ACCOUNT-CUSTOMER-CLEARING',
+          component: 'CUSTOMER_REFUND',
+          credit: amount,
+          debit: 0,
+          source_order_reference: String(refund.source_order_reference),
+        },
+      ],
+      kind: 'REFUND',
+      now,
+      provider: String(refund.provider_operation_reference),
+      source: `SYNTH-REFUND-${String(refund.refund_id).toUpperCase()}`,
+    });
+  }
+
+  /**
+   * The provider's answer for a capture it did not answer at the time (10.2).
+   *
+   * A capture the provider left UNKNOWN parked the payment in
+   * UNKNOWN_REQUIRES_RECONCILIATION with an exception whose next action
+   * nothing performed: the order went on to be delivered against money
+   * nobody knew had moved, and its settlement never ran. The answer — read
+   * off the provider's statement by a person, or asked of the provider by
+   * the sweep — is applied here: "succeeded" is the capture, posted in the
+   * same transaction; "failed" leaves the authorisation standing so the
+   * capture can be attempted again; "unknown" changes nothing. An
+   * authorisation the provider did not answer is the checkout's to settle,
+   * on its own deadline, and is refused here.
+   */
+  async reconcilePayment(input: {
+    readonly context: RequestContext;
+    readonly evidence_reference: string;
+    readonly payment_transaction_id: UuidV7;
+    readonly provider_state: 'FAILED' | 'SUCCEEDED' | 'UNKNOWN';
+    readonly now?: Date;
+  }): Promise<PaymentRecord> {
+    const who = financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    const ids = contextIds(input.context);
+    const evidence = text(input.evidence_reference, COMMAND, 'Evidence reference');
+    return tx(this.#pool, async (client) => {
+      const locked = await client.query(
+        'SELECT * FROM marketplace.payment_transactions WHERE payment_transaction_id=$1 FOR UPDATE',
+        [input.payment_transaction_id],
+      );
+      const payment = locked.rows[0];
+      if (!payment) throw new MoneyNotFoundError('Payment not found');
+      if (payment.payment_state !== 'UNKNOWN_REQUIRES_RECONCILIATION') {
+        // Answered already: the same answer again is a receipt, a different
+        // one is a conflict for a person, and neither moves anything here.
+        if (
+          (payment.payment_state === 'CAPTURED' && input.provider_state === 'SUCCEEDED') ||
+          (payment.payment_state === 'AUTHORIZED' && input.provider_state === 'FAILED')
+        )
+          return record(payment);
+        throw new MoneyStateError('Payment is not awaiting reconciliation');
+      }
+      const unanswered = await client.query<{ event_type: string }>(
+        `SELECT event_type FROM marketplace.payment_events
+          WHERE payment_transaction_id=$1 AND provider_result='UNKNOWN'
+          ORDER BY payment_version DESC LIMIT 1`,
+        [input.payment_transaction_id],
+      );
+      if (unanswered.rows[0]?.event_type !== 'PAYMENT_CAPTURED')
+        throw new MoneyStateError('An unanswered authorization is reconciled by the checkout');
+      if (input.provider_state === 'UNKNOWN') return record(payment);
+      const next = input.provider_state === 'SUCCEEDED' ? 'CAPTURED' : 'AUTHORIZED';
+      const updated = await client.query(
+        `UPDATE marketplace.payment_transactions
+            SET payment_state=$2,version=version+1,updated_at=$3
+          WHERE payment_transaction_id=$1 RETURNING *`,
+        [input.payment_transaction_id, next, now],
+      );
+      await client.query(
+        `INSERT INTO marketplace.payment_events
+          (payment_event_id,payment_transaction_id,payment_version,event_type,previous_state,resulting_state,
+           provider_result,command_reference,actor_id,actor_kind,reason_code,request_id,correlation_id,occurred_at)
+         VALUES ($1,$2,$3,'PAYMENT_CAPTURE_RECONCILED','UNKNOWN_REQUIRES_RECONCILIATION',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [
+          createUuidV7(),
+          input.payment_transaction_id,
+          payment.version + 1,
+          next,
+          input.provider_state,
+          `SYNTH-CMD-RECONCILE-${String(input.payment_transaction_id).toUpperCase()}-${payment.version + 1}`,
+          who.id,
+          who.kind,
+          `RECONCILED_${evidence.replaceAll(/[^A-Z0-9]/g, '_')}`.slice(0, 64),
+          ids.request,
+          ids.correlation,
+          now,
+        ],
+      );
+      await client.query(
+        `UPDATE marketplace.finance_exceptions
+            SET exception_state='RESOLVED',updated_at=$2
+          WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+        [payment.provider_operation_reference, now],
+      );
+      const settled = record(updated.rows[0]);
+      return next === 'CAPTURED'
+        ? this.#postCaptureLedger(client, input.context, settled, now)
+        : settled;
+    });
+  }
+
+  /**
+   * The provider's answer for a refund it did not answer at the time (10.2),
+   * the refund's counterpart of `reconcilePayment`: "succeeded" is the
+   * refund, posted in the same transaction; "failed" makes it retryable.
+   */
+  async reconcileRefund(input: {
+    readonly context: RequestContext;
+    readonly evidence_reference: string;
+    readonly provider_state: 'FAILED' | 'SUCCEEDED' | 'UNKNOWN';
+    readonly refund_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    const who = financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    const ids = contextIds(input.context);
+    const evidence = text(input.evidence_reference, COMMAND, 'Evidence reference');
+    return tx(this.#pool, async (client) => {
+      const locked = await client.query(
+        'SELECT * FROM marketplace.refunds WHERE refund_id=$1 FOR UPDATE',
+        [input.refund_id],
+      );
+      const refund = locked.rows[0];
+      if (!refund) throw new MoneyNotFoundError('Refund not found');
+      const open = await client.query(
+        `SELECT 1 FROM marketplace.finance_exceptions
+          WHERE operation_reference=$1 AND exception_kind='REFUND_UNKNOWN' AND exception_state<>'RESOLVED'`,
+        [refund.provider_operation_reference],
+      );
+      if (refund.refund_state !== 'FAILED_REVIEW' || !open.rows[0]) {
+        if (
+          (refund.refund_state === 'SUCCEEDED' && input.provider_state === 'SUCCEEDED') ||
+          (refund.refund_state === 'FAILED_RETRYABLE' && input.provider_state === 'FAILED')
+        )
+          return Object.freeze(refund);
+        throw new MoneyStateError('Refund is not awaiting reconciliation');
+      }
+      if (input.provider_state === 'UNKNOWN') return Object.freeze(refund);
+      const next = input.provider_state === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED_RETRYABLE';
+      const updated = await client.query(
+        `UPDATE marketplace.refunds SET refund_state=$2,version=version+1,updated_at=$3
+          WHERE refund_id=$1 RETURNING *`,
+        [input.refund_id, next, now],
+      );
+      await client.query(
+        `INSERT INTO marketplace.refund_events
+          (refund_event_id,refund_id,refund_version,event_type,previous_state,resulting_state,
+           actor_id,reason_code,command_reference,request_id,correlation_id,occurred_at)
+         VALUES ($1,$2,$3,'REFUND_RECONCILED','FAILED_REVIEW',$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          createUuidV7(),
+          input.refund_id,
+          refund.version + 1,
+          next,
+          who.id,
+          `RECONCILED_${evidence.replaceAll(/[^A-Z0-9]/g, '_')}`.slice(0, 64),
+          `SYNTH-CMD-RECONCILE-${String(input.refund_id).toUpperCase()}-${refund.version + 1}`,
+          ids.request,
+          ids.correlation,
+          now,
+        ],
+      );
+      await client.query(
+        `UPDATE marketplace.finance_exceptions
+            SET exception_state='RESOLVED',updated_at=$2
+          WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+        [refund.provider_operation_reference, now],
+      );
+      const settled = Object.freeze(updated.rows[0]);
+      if (next === 'SUCCEEDED') await this.#postRefundLedger(client, input.context, settled, now);
+      return settled;
+    });
+  }
+
+  /**
+   * Asks the provider about every capture and refund it left unanswered
+   * (10.2), and applies what it says. Runs on the operations worker's pass;
+   * an answer that is still "unknown" waits for the next pass or for the
+   * provider's statement (10.5). Only operations older than a minute are
+   * asked, so a call still in flight is not second-guessed.
+   */
+  async reconcileUnknownOperations(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+  }) {
+    const now = input.now ?? new Date();
+    const before = new Date(now.getTime() - 60_000);
+    const answer = async (reference: string) => {
+      const outcome = await providerOutcome(async () => {
+        const status = await this.#provider.status(reference);
+        return status ?? 'UNKNOWN';
+      });
+      return outcome === 'SUCCEEDED' ? 'SUCCEEDED' : outcome === 'DECLINED' ? 'FAILED' : 'UNKNOWN';
+    };
+    const payments = await this.#pool.query<{
+      payment_transaction_id: string;
+      provider_operation_reference: string;
+    }>(
+      `SELECT payment.payment_transaction_id, payment.provider_operation_reference
+         FROM marketplace.payment_transactions payment
+        WHERE payment.payment_state='UNKNOWN_REQUIRES_RECONCILIATION' AND payment.updated_at<=$1
+          AND (SELECT event_type FROM marketplace.payment_events event
+                WHERE event.payment_transaction_id=payment.payment_transaction_id
+                  AND event.provider_result='UNKNOWN'
+                ORDER BY event.payment_version DESC LIMIT 1)='PAYMENT_CAPTURED'
+        ORDER BY payment.updated_at LIMIT 100`,
+      [before],
+    );
+    let settledPayments = 0;
+    for (const payment of payments.rows) {
+      const state = await answer(payment.provider_operation_reference);
+      if (state === 'UNKNOWN') continue;
+      await this.reconcilePayment({
+        context: input.context,
+        evidence_reference: 'PROVIDER-STATUS',
+        now,
+        payment_transaction_id: parseUuidV7(payment.payment_transaction_id),
+        provider_state: state,
+      });
+      settledPayments += 1;
+    }
+    const refunds = await this.#pool.query<{
+      refund_id: string;
+      provider_operation_reference: string;
+    }>(
+      `SELECT refund.refund_id, refund.provider_operation_reference
+         FROM marketplace.refunds refund
+        WHERE refund.refund_state='FAILED_REVIEW' AND refund.updated_at<=$1
+          AND EXISTS (SELECT 1 FROM marketplace.finance_exceptions exception
+                       WHERE exception.operation_reference=refund.provider_operation_reference
+                         AND exception.exception_kind='REFUND_UNKNOWN'
+                         AND exception.exception_state<>'RESOLVED')
+        ORDER BY refund.updated_at LIMIT 100`,
+      [before],
+    );
+    let settledRefunds = 0;
+    for (const refund of refunds.rows) {
+      const state = await answer(refund.provider_operation_reference);
+      if (state === 'UNKNOWN') continue;
+      await this.reconcileRefund({
+        context: input.context,
+        evidence_reference: 'PROVIDER-STATUS',
+        now,
+        provider_state: state,
+        refund_id: parseUuidV7(refund.refund_id),
+      });
+      settledRefunds += 1;
+    }
+    return { payments: settledPayments, refunds: settledRefunds };
   }
 
   async #providerTransition(

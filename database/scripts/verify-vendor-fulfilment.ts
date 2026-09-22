@@ -21,7 +21,11 @@ import {
   MoneyNotFoundError,
   MoneyStateError,
 } from '../src/money-lifecycle.js';
-import { calculatePartnerOfferEarning, SYNTHETIC_FINANCIAL_POLICY } from '../src/money-policy.js';
+import {
+  calculatePartnerOfferEarning,
+  LocalFakeMoneyProvider,
+  SYNTHETIC_FINANCIAL_POLICY,
+} from '../src/money-policy.js';
 import { ESTIMATE_ROAD_FACTOR } from '../src/routing.js';
 import { OrderMoneyOrchestrator } from '../src/order-money-orchestrator.js';
 import { CustomerCartService } from '../src/customer-cart.js';
@@ -3515,6 +3519,377 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         shelfX.rows[0]?.shelf === '5',
       `A customer's cancellation of an accepted order did not return its committed units (${JSON.stringify(shelfX.rows)})`,
     );
+    // An order that ended before capture had its share released from the
+    // authorisation; there is nothing to refund and nothing is filed.
+    check(
+      (await orderMoney.refundEndedOrder({
+        context: systemContext(systemActorId),
+        now: new Date(cancelBase.getTime() + 3_100),
+        vendor_order_id: orderX.vendor_order_id,
+      })) === null,
+      'A refund was filed for an order that ended before its money was captured',
+    );
+
+    // 10.2 -- an order called off after its group was captured is owed the
+    // money back. Capture happens at ready, and the customer may still
+    // cancel until someone is carrying the bag; the preview promised the
+    // item total back with the delivery fee kept, and until audit run 67
+    // nothing returned it. The platform files the refund against this order
+    // and its exact lines; a person approves it; the receipt shows it.
+    const refundBase = new Date(cancelBase.getTime() + 5_000);
+    const refundSuffix = `${Date.now()}R`;
+    const refundProduct = await catalogue.createProduct({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_location_id: storeA.locationId,
+      product_reference: `SYNTH-PROD-R${refundSuffix}`,
+      title: 'SYNTH Refunded Product',
+      category: 'FRUIT_VEGETABLE',
+      unit_label: 'EACH',
+      tax_basis: 'EXEMPT',
+      variable_weight: false,
+      sku: `SYNTH-SKU-R${refundSuffix}`,
+      variant_title: 'SYNTH Refunded Variant',
+      price_minor: 15_000,
+      initial_stock_quantity: 5,
+      low_stock_threshold: 1,
+      now: refundBase,
+    });
+    const refundCart = await carts.currentCart({
+      context: customerContext(customerId),
+      now: refundBase,
+    });
+    await carts.setCartAddress({
+      context: customerContext(customerId),
+      customer_address_id: addressId,
+      now: refundBase,
+    });
+    await carts.addLine({
+      context: customerContext(customerId),
+      vendor_location_id: storeA.locationId,
+      catalogue_variant_id: refundProduct.catalogue_variant_id,
+      quantity: 2,
+      now: refundBase,
+    });
+    const refundQuote = await checkout.createQuote({
+      context: customerContext(customerId),
+      cart_id: refundCart.cart_id,
+      now: refundBase,
+    });
+    const refundPlaced = await checkout.place({
+      context: customerContext(customerId),
+      checkout_quote_id: refundQuote.checkout_quote_id,
+      provider_scenario: 'SUCCESS',
+      idempotency_key: 'phase10-refund-001',
+      now: new Date(refundBase.getTime() + 1_000),
+    });
+    const orderR = refundPlaced.orders.find(
+      (o: { readonly vendor_location_id: UuidV7 }) => o.vendor_location_id === storeA.locationId,
+    );
+    check(orderR !== undefined, 'The refund order was not placed at storeA');
+    const acceptedR = await fulfilment.accept({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderR.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: orderR.version,
+      preparation_estimate_seconds: 600,
+      now: new Date(refundBase.getTime() + 2_000),
+    });
+    const pickingR = await fulfilment.startPicking({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderR.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: acceptedR.version,
+      now: new Date(refundBase.getTime() + 2_200),
+    });
+    const lineR = (
+      await fulfilment.listPicks({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderR.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+      })
+    )[0];
+    check(lineR !== undefined, 'The refund order has no line');
+    await fulfilment.markLineFound({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderR.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      vendor_order_line_id: lineR.vendor_order_line_id,
+      actual_quantity: 2,
+      actual_unit_price_minor: 15_000,
+      expected_version: 0,
+      now: new Date(refundBase.getTime() + 2_400),
+    });
+    const readyR = await fulfilment.markReady({
+      context: vendorContext(storeA.ownerUserId),
+      vendor_order_id: orderR.vendor_order_id,
+      vendor_location_id: storeA.locationId,
+      expected_version: pickingR.version,
+      package_count: 1,
+      now: new Date(refundBase.getTime() + 2_600),
+    });
+    const capturedR = await orderMoney.settleAuthorizationForOrder({
+      context: systemContext(systemActorId),
+      now: new Date(refundBase.getTime() + 2_700),
+      vendor_order_id: orderR.vendor_order_id,
+    });
+    check(capturedR === 'CAPTURED', `The refund order settled as ${capturedR} instead of CAPTURED`);
+    const previewR = await fulfilment.previewCancellation({
+      context: customerContext(customerId),
+      vendor_order_id: orderR.vendor_order_id,
+    });
+    check(
+      previewR.allowed && previewR.next_step === 'CANCEL',
+      `A ready order nobody is carrying could not be cancelled (${JSON.stringify(previewR)})`,
+    );
+    const cancelledR = await fulfilment.cancelByCustomer({
+      context: customerContext(customerId),
+      vendor_order_id: orderR.vendor_order_id,
+      expected_version: readyR.version,
+      reason_code: 'CHANGED_MIND',
+      now: new Date(refundBase.getTime() + 3_000),
+    });
+    check(cancelledR.lifecycle_state === 'CANCELLED', 'The captured order was not cancelled');
+    const refundR = await orderMoney.refundEndedOrder({
+      context: systemContext(systemActorId),
+      now: new Date(refundBase.getTime() + 3_100),
+      vendor_order_id: orderR.vendor_order_id,
+    });
+    const chargedR = await pool.query<{
+      item: string;
+      tax: string;
+      delivery: string;
+      tip: string;
+      discount: string;
+    }>(
+      `SELECT allocation.item_minor::text AS item, allocation.tax_minor::text AS tax,
+              allocation.delivery_minor::text AS delivery, allocation.tip_minor::text AS tip,
+              allocation.discount_minor::text AS discount
+         FROM marketplace.payment_allocations allocation
+         JOIN marketplace.vendor_orders orders
+           ON orders.order_reference=allocation.source_order_reference
+        WHERE orders.vendor_order_id=$1`,
+      [orderR.vendor_order_id],
+    );
+    const allocationR = chargedR.rows[0];
+    const owedR =
+      Number(allocationR?.item) +
+      Number(allocationR?.tax) +
+      Number(allocationR?.tip) -
+      Number(allocationR?.discount);
+    check(
+      refundR !== null &&
+        refundR.refund_state === 'PENDING_APPROVAL' &&
+        refundR.trigger_code === 'PRE_PICKUP_CANCEL' &&
+        Number(refundR.item_minor) === Number(allocationR?.item) &&
+        Number(refundR.item_minor) === 30_000 &&
+        Number(refundR.delivery_minor) === 0 &&
+        Number(refundR.refund_total_minor) === owedR &&
+        Number(allocationR?.delivery) > 0,
+      `A cancellation after capture did not file the refund the customer was promised (${JSON.stringify(refundR)}, charged ${JSON.stringify(allocationR)})`,
+    );
+    const linesR = await pool.query<{ quantity: number; amount_minor: string; line_id: string }>(
+      `SELECT quantity, amount_minor::text, vendor_order_line_id AS line_id
+         FROM marketplace.refund_lines WHERE refund_id=$1`,
+      [refundR?.refund_id],
+    );
+    check(
+      linesR.rows.length === 1 &&
+        linesR.rows[0]?.quantity === 2 &&
+        linesR.rows[0].amount_minor === '30000' &&
+        linesR.rows[0].line_id === lineR.vendor_order_line_id,
+      `The refund does not name the exact line it returns (${JSON.stringify(linesR.rows)})`,
+    );
+    const refundReplayR = await orderMoney.refundEndedOrder({
+      context: systemContext(systemActorId),
+      now: new Date(refundBase.getTime() + 3_200),
+      vendor_order_id: orderR.vendor_order_id,
+    });
+    check(
+      refundReplayR?.refund_id === refundR?.refund_id,
+      'A replayed ending filed a second refund for the same order',
+    );
+    // The platform proposed; a person approves, and the customer reads the
+    // refund with its line on the receipt.
+    const approvedR = await money.approveAndSubmitRefund({
+      command_reference: 'SYNTH-CMD-REFUND-CANCEL-APPROVE-R',
+      context: adminContext(adminId),
+      expected_version: Number(refundR?.version),
+      refund_id: parseUuidV7(String(refundR?.refund_id)),
+      now: new Date(refundBase.getTime() + 3_300),
+    });
+    const receiptR = await fulfilment.getReceipt({
+      context: customerContext(customerId),
+      vendor_order_id: orderR.vendor_order_id,
+    });
+    check(
+      approvedR.refund_state === 'SUCCEEDED' &&
+        receiptR.refunds.length === 1 &&
+        receiptR.refunds[0]?.refund_state === 'SUCCEEDED' &&
+        receiptR.refunds[0].lines.length === 1 &&
+        receiptR.refunds[0].lines[0]?.quantity === 2 &&
+        receiptR.refunds[0].refund_total_minor === owedR,
+      `The customer's receipt does not show the refund with its line (${JSON.stringify(receiptR.refunds)})`,
+    );
+
+    // 10.2 -- a capture the provider does not answer is reported as itself,
+    // and the order waits: nothing is delivered against money nobody knows
+    // has moved. The worker's pass asks the provider again and applies the
+    // answer, and the order then settles as any captured order does. Until
+    // audit run 67 the orchestrator answered CAPTURED whatever the provider
+    // said, and an unanswered capture was delivered and never settled.
+    const unanswering = new (class extends LocalFakeMoneyProvider {
+      override async capture(): Promise<'UNKNOWN'> {
+        return 'UNKNOWN';
+      }
+      override async status(): Promise<'SUCCEEDED'> {
+        return 'SUCCEEDED';
+      }
+    })();
+    const silentMoney = new MoneyLifecycleService({
+      connection_string: connectionString,
+      provider: unanswering,
+    });
+    const silentOrderMoney = new OrderMoneyOrchestrator({
+      complete_money: completeMoney,
+      connection_string: connectionString,
+      money: silentMoney,
+    });
+    try {
+      const heldBase = new Date(refundBase.getTime() + 5_000);
+      const heldSuffix = `${Date.now()}U`;
+      const heldProduct = await catalogue.createProduct({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_location_id: storeA.locationId,
+        product_reference: `SYNTH-PROD-U${heldSuffix}`,
+        title: 'SYNTH Held Product',
+        category: 'FRUIT_VEGETABLE',
+        unit_label: 'EACH',
+        tax_basis: 'EXEMPT',
+        variable_weight: false,
+        sku: `SYNTH-SKU-U${heldSuffix}`,
+        variant_title: 'SYNTH Held Variant',
+        price_minor: 9_000,
+        initial_stock_quantity: 5,
+        low_stock_threshold: 1,
+        now: heldBase,
+      });
+      const heldCart = await carts.currentCart({
+        context: customerContext(customerId),
+        now: heldBase,
+      });
+      await carts.setCartAddress({
+        context: customerContext(customerId),
+        customer_address_id: addressId,
+        now: heldBase,
+      });
+      await carts.addLine({
+        context: customerContext(customerId),
+        vendor_location_id: storeA.locationId,
+        catalogue_variant_id: heldProduct.catalogue_variant_id,
+        quantity: 1,
+        now: heldBase,
+      });
+      const heldQuote = await checkout.createQuote({
+        context: customerContext(customerId),
+        cart_id: heldCart.cart_id,
+        now: heldBase,
+      });
+      const heldPlaced = await checkout.place({
+        context: customerContext(customerId),
+        checkout_quote_id: heldQuote.checkout_quote_id,
+        provider_scenario: 'SUCCESS',
+        idempotency_key: 'phase10-held-001',
+        now: new Date(heldBase.getTime() + 1_000),
+      });
+      const orderU = heldPlaced.orders.find(
+        (o: { readonly vendor_location_id: UuidV7 }) => o.vendor_location_id === storeA.locationId,
+      );
+      check(orderU !== undefined, 'The held-capture order was not placed at storeA');
+      const acceptedU = await fulfilment.accept({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderU.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        expected_version: orderU.version,
+        preparation_estimate_seconds: 600,
+        now: new Date(heldBase.getTime() + 2_000),
+      });
+      const pickingU = await fulfilment.startPicking({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderU.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        expected_version: acceptedU.version,
+        now: new Date(heldBase.getTime() + 2_200),
+      });
+      const lineU = (
+        await fulfilment.listPicks({
+          context: vendorContext(storeA.ownerUserId),
+          vendor_order_id: orderU.vendor_order_id,
+          vendor_location_id: storeA.locationId,
+        })
+      )[0];
+      check(lineU !== undefined, 'The held-capture order has no line');
+      await fulfilment.markLineFound({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderU.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        vendor_order_line_id: lineU.vendor_order_line_id,
+        actual_quantity: 1,
+        actual_unit_price_minor: 9_000,
+        expected_version: 0,
+        now: new Date(heldBase.getTime() + 2_400),
+      });
+      await fulfilment.markReady({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_order_id: orderU.vendor_order_id,
+        vendor_location_id: storeA.locationId,
+        expected_version: pickingU.version,
+        package_count: 1,
+        now: new Date(heldBase.getTime() + 2_600),
+      });
+      const heldOutcome = await silentOrderMoney.settleAuthorizationForOrder({
+        context: systemContext(systemActorId),
+        now: new Date(heldBase.getTime() + 2_700),
+        vendor_order_id: orderU.vendor_order_id,
+      });
+      const heldSettle = await silentOrderMoney.recordDeliveryEarnings({
+        context: systemContext(systemActorId),
+        now: new Date(heldBase.getTime() + 2_800),
+        vendor_order_id: orderU.vendor_order_id,
+      });
+      check(
+        heldOutcome === 'CAPTURE_UNKNOWN' && !heldSettle.settled,
+        `A capture the provider did not answer was reported as ${heldOutcome} and settled=${heldSettle.settled}`,
+      );
+      const heldSwept = await silentMoney.reconcileUnknownOperations({
+        context: systemContext(systemActorId),
+        now: new Date(heldBase.getTime() + 70_000),
+      });
+      const heldSettled = await silentOrderMoney.recordDeliveryEarnings({
+        context: systemContext(systemActorId),
+        now: new Date(heldBase.getTime() + 71_000),
+        vendor_order_id: orderU.vendor_order_id,
+      });
+      const heldPayment = await pool.query<{ payment_state: string; settlements: string }>(
+        `SELECT payment.payment_state,
+                (SELECT count(*)::text FROM marketplace.settlements
+                  WHERE source_order_reference=orders.order_reference) AS settlements
+           FROM marketplace.vendor_orders orders
+           JOIN marketplace.checkout_groups grouping USING (checkout_group_id)
+           JOIN marketplace.payment_transactions payment USING (payment_transaction_id)
+          WHERE orders.vendor_order_id=$1`,
+        [orderU.vendor_order_id],
+      );
+      check(
+        heldSwept.payments === 1 &&
+          heldPayment.rows[0]?.payment_state === 'CAPTURED' &&
+          heldSettled.settled &&
+          heldPayment.rows[0].settlements === '1',
+        `The provider's late answer did not capture and settle the order (${JSON.stringify({ heldSwept, heldSettled, ...heldPayment.rows[0] })})`,
+      );
+    } finally {
+      await silentOrderMoney.close();
+      await silentMoney.close();
+    }
 
     // 8.2 -- an order whose hold lapsed before the shop answered cannot be
     // accepted on stock that went back to the shelf: refused, and the order
@@ -4343,18 +4718,30 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         refund_id: proposedRefund.refund_id,
       });
 
-      // A replayed approval on the version it already consumed must not post a
-      // second time. A duplicate correction is how a refund becomes two.
-      await rejects(
-        () =>
-          money.approveAndSubmitRefund({
-            command_reference: 'SYNTH-CMD-REFUND-APPROVE-0001',
-            context: adminContext(financeApproverId),
-            expected_version: proposedRefund.version,
-            refund_id: proposedRefund.refund_id,
-          }),
-        MoneyStateError,
-        'A replayed approval posted the refund twice',
+      // A replayed approval is its outcome again (10.2): the same command
+      // returns the refund as it stands and instructs the provider a second
+      // time no more than it posts a second time. A duplicate correction is
+      // how a refund becomes two.
+      const replayedApproval = await money.approveAndSubmitRefund({
+        command_reference: 'SYNTH-CMD-REFUND-APPROVE-0001',
+        context: adminContext(financeApproverId),
+        expected_version: proposedRefund.version,
+        refund_id: proposedRefund.refund_id,
+      });
+      const refundEvents = await pool.query<{ events: string; ledger: string }>(
+        `SELECT (SELECT count(*)::text FROM marketplace.refund_events WHERE refund_id=$1) AS events,
+                (SELECT count(*)::text FROM marketplace.ledger_transactions
+                  WHERE source_reference=$2) AS ledger`,
+        [
+          proposedRefund.refund_id,
+          `SYNTH-REFUND-${String(proposedRefund.refund_id).toUpperCase()}`,
+        ],
+      );
+      check(
+        replayedApproval.refund_state === 'SUCCEEDED' &&
+          refundEvents.rows[0]?.events === '3' &&
+          refundEvents.rows[0].ledger === '1',
+        `A replayed approval posted the refund twice or refused its own outcome (${JSON.stringify(refundEvents.rows[0])})`,
       );
 
       // The receipt is regenerated from settled facts, so the refund has to
