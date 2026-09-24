@@ -2316,6 +2316,42 @@ Five requirements. Three held and two did not, with two of the three held only i
 
 **Step 10.2: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 68 (24 September 2026) — step 10.3, vendor fees and settlements
+
+Five requirements. Two held, one held in part and two did not. The commission is a rate resolved from the version the order was quoted under (runs 41, 52) and the settlement writes policy-versioned component lines, and payouts are built in daily batches and submitted safely (runs 44, 62) — but the fee was charged once, at settlement, on what the bags held then: a refund that landed afterwards took money back from the customer and left the shop's proceeds and the platform's fee standing on goods that had been returned, so a fully refunded order still paid the shop and still charged it commission, and the batch then paid the stale figure. The statement showed a gross, a fee and a net — and the "fee" it showed was the platform's whole remainder, the delivery margin included, not the commission; nothing of a refund, an adjustment, a payment cost, a tax or the payout's own state appeared, against a catalogue entry that asks for all of them. And VEN-50, "vendors challenge a specific ledger or payout line through a tracked finance case", existed nowhere: no table, no service, no route, no screen — while the matrix recorded it as `backend_only` with `domain: true, api: true, tests: true`. One migration (0110); 303 connected assertions in fulfilment (291 before), three unit tests; seven mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Approved platform/payment/tax rules from preserved versions | Platform rule met (the quote's version, resolved as of the quote). **Payment and tax rules do not exist** — gated by D-12; the components and the tax-payable account are in the schema and nothing writes them. |
+| 2 | No completed-order fee on failed, platform-cancelled or fully refunded orders | Met at settlement time only; **a refund afterwards changed neither the proceeds nor the fee** — P68-01. |
+| 3 | Create settlement lines and batches | Met; the re-division now writes its own lines — P68-01. |
+| 4 | Submit payout safely | Met (runs 44, 62); it paid a stale payable, which P68-01 fixes upstream rather than in the payout. |
+| 5 | Show vendor statement and dispute path | **Statement incomplete and its fee wrong; no dispute path at all** — P68-02, P68-03. |
+
+**P68-01 — the refund re-divides the order.** `redivideSettlementForRefunds` takes a settlement whose succeeded refunds have outrun what it accounted for: the goods' share comes off the shop's proceeds and the commission is recalculated on what remains, under the policy the order was sold on, and what the refund took that was not goods — a delivery fee, a tip — the platform absorbs. The correction is one balanced ADJUSTMENT keyed to the settlement and the refunds it accounts for; the settlement's payable, remainder, customer net and accounted refunds move with it, so the balance constraint holds and a second pass finds nothing. `redivideRefundedSettlements` runs on the operations worker for every settlement not yet submitted or paid.
+
+**P68-02 — the statement is the line.** `vendorStatement` reads the settlement's own policy-versioned lines: the sale, the platform fee (the commission line, not the platform's whole remainder), payment costs, tax, refunds, adjustments, and the payout's state and paid date. The CSV carries the same twelve columns; the panel shows the refund and the adjustment beside the net.
+
+**P68-03 — the shop's challenge.** 0110 adds `vendor_settlement_disputes` (one open case per settlement line, the figure as recorded against the figure expected, what the shop says, a seven-day deadline) and `vendor_settlement_adjustments` (append-only but for the posting stamp). `vendor.finance.dispute` raises and withdraws; `admin.vendor_settlement.resolve` answers; a resolution at another figure writes the adjustment, moves the settlement's payable against the platform's remainder in the same transaction, and posts to the ledger once — the failure 9.10 found on the partner's side, not repeated here. The payouts panel raises a challenge on a line, reads its answer back and withdraws it.
+
+**Mutation results.** Seven probes, each on a rebuilt database, restored from the index:
+
+| Probe | Caught by |
+|---|---|
+| A refund after settlement changes nothing (old) | *A refund after settlement did not re-divide the order's money* |
+| The refund comes off the proceeds, the commission stands | same assertion, on the expected payable |
+| The re-division does not record what it accounted for | *The re-division ran twice or left the books unbalanced (1)* |
+| A resolved challenge moves no money (the 9.10 failure) | *A resolved challenge did not move the money on the settlement (undefined)* |
+| Any shop may challenge any settlement | *A shop challenged another store's settlement under its own location* — after the walk gained that case: staff membership alone had been doing the work, and the first form of the probe passed |
+| The statement hides the refund (old) | *The shop's statement does not show the refund that changed its money* |
+| The vendor adjustment posts twice | **The schema**: `ledger_transactions_source_reference_key` refuses the second posting — after the walk replayed the posting directly rather than through the sweep, which filters on the stamp and had let it pass |
+
+**Forward findings.** (D-12) There is no payment-fee schedule and no tax policy: `PAYMENT_FEE` and `TAX` are components the schema allows, `SYNTH-ACCOUNT-TAX-PAYABLE` is an account nothing posts to, and `tax_minor` is written as zero at checkout — a real provider's fee and an approved tax version are gated, and the statement and the dispute components are already shaped for them. (10.4) A refund of a tip or a delivery fee on a delivered order is absorbed by the platform rather than clawed back from the partner who was paid it. (10.6) A settlement already submitted or paid is skipped by the re-division: a refund on a paid order is a correction, not a re-division. (10.3, carried) An order cancelled after capture still has no settlement — its kept delivery fee sits in platform clearing, divided by nothing; the refund exists (10.2) but the division does not.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 111 migration files (0000–0110), full ladder; `vendor_fulfilment` 303 assertions (291 before), `money_lifecycle` 44, `partner_lifecycle` 86. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 597 pass / 0 fail (594 before: the statement's columns, the statement's refund and payout, the shop's challenge on the panel, the dispute routes' scopes); `pnpm test:integration` exit 0 on a rebuilt test stack; all seven probes on a rebuilt database.
+
+**Step 10.3: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

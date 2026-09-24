@@ -22,6 +22,8 @@ import {
 } from './money-policy.js';
 import { transaction } from './transaction.js';
 import { assembleTrialBalance, type LedgerAccountBalanceRow } from './ledger-balance.js';
+import { calculateCommissionAmount } from './money-policy.js';
+import { resolveFinancialPolicy } from './financial-policy.js';
 
 type StatementKind = 'PAYMENT' | 'PAYOUT' | 'REFUND';
 type ProviderState = 'FAILED' | 'SUCCEEDED' | 'UNKNOWN';
@@ -699,6 +701,209 @@ export class CompleteMoneyLifecycleService {
     });
   }
 
+  /**
+   * Re-divides an order's money after a refund succeeded (10.3).
+   *
+   * The commission was charged once, at settlement, on what the bags held
+   * then. A refund after that took money back from the customer and left the
+   * vendor's proceeds and the platform's fee standing on goods that had been
+   * returned: until audit run 68 a fully refunded order still paid the shop
+   * and still charged it commission. The refund's item part comes off the
+   * vendor's proceeds and the fee is recalculated on what remains, under the
+   * policy the order was sold on; the rest of the refund (delivery, tip) the
+   * platform absorbs, because clawing it back from a partner who has been
+   * paid is a dispute, not an arithmetic.
+   *
+   * The correction is posted as one ADJUSTMENT keyed to the settlement and
+   * the refunds it accounts for, so a replay moves nothing twice, and the
+   * settlement's own figures move with it.
+   */
+  async redivideSettlementForRefunds(input: {
+    readonly context: RequestContext;
+    readonly settlement_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<any>(
+        `SELECT settlement.settlement_id, settlement.source_order_reference,
+                settlement.vendor_location_id, settlement.created_at,
+                settlement.successful_refunds_minor::text AS accounted,
+                (SELECT COALESCE(sum(refund_total_minor),0)::text FROM marketplace.refunds
+                  WHERE source_order_reference=settlement.source_order_reference
+                    AND refund_state='SUCCEEDED') AS refunded_total,
+                (SELECT COALESCE(sum(item_minor),0)::text FROM marketplace.refunds
+                  WHERE source_order_reference=settlement.source_order_reference
+                    AND refund_state='SUCCEEDED') AS refunded_items,
+                (SELECT COALESCE(sum(amount_minor),0)::text FROM marketplace.settlement_lines
+                  WHERE settlement_id=settlement.settlement_id
+                    AND component='ITEM_PROCEEDS') AS proceeds,
+                (SELECT COALESCE(sum(amount_minor),0)::text FROM marketplace.settlement_lines
+                  WHERE settlement_id=settlement.settlement_id
+                    AND component='PLATFORM_FEE') AS fee,
+                settlement.redivided_item_refunds_minor::text AS item_refunds_accounted,
+                (SELECT policy_version_reference FROM marketplace.settlement_lines
+                  WHERE settlement_id=settlement.settlement_id LIMIT 1) AS policy_reference
+           FROM marketplace.settlements settlement
+          WHERE settlement_id=$1 FOR UPDATE`,
+        [input.settlement_id],
+      );
+      const settlement = found.rows[0];
+      if (!settlement) throw new MoneyNotFoundError('Settlement not found');
+      const accounted = Number(settlement.accounted);
+      const unaccounted = Number(settlement.refunded_total) - accounted;
+      if (unaccounted <= 0) return { redivided: false as const, unaccounted: 0 };
+
+      // The shop's goods, in money, as the settlement's own lines stand: the
+      // commission is a rate on what was supplied, so a returned pack takes
+      // the fee with it. The policy is the one the order was sold on.
+      const { policy } = await resolveFinancialPolicy(this.#pool, {
+        at: new Date(settlement.created_at),
+      });
+      // `proceeds` is the goods supplied, in money; the fee is charged on it
+      // and comes out of it, so the shop's payable is the difference.
+      const proceeds = Number(settlement.proceeds);
+      const fee = Number(settlement.fee);
+      const payable = proceeds - fee;
+      const itemRefundDelta = Math.max(
+        0,
+        Math.min(
+          proceeds,
+          Number(settlement.refunded_items) - Number(settlement.item_refunds_accounted),
+        ),
+      );
+      const remainingItems = proceeds - itemRefundDelta;
+      const newFee = calculateCommissionAmount(remainingItems, policy.commission_basis_points);
+      const vendorDelta = remainingItems - newFee - payable;
+      const feeDelta = newFee - fee;
+      // What the refund took that was not the shop's goods — a delivery fee,
+      // a tip — the platform absorbs: clawing it back from a partner who has
+      // been paid is a dispute, not an arithmetic.
+      const absorbed = unaccounted - itemRefundDelta;
+      const platformDelta = -(unaccounted + vendorDelta);
+      const entries: CorrectionEntry[] = [];
+      if (vendorDelta !== 0)
+        entries.push({
+          account_reference: 'SYNTH-ACCOUNT-VENDOR-PAYABLE',
+          component: 'ADJUSTMENT',
+          debit_minor: vendorDelta < 0 ? -vendorDelta : 0,
+          credit_minor: vendorDelta > 0 ? vendorDelta : 0,
+          source_order_reference: settlement.source_order_reference,
+          vendor_location_id: settlement.vendor_location_id,
+        });
+      const platformSide = -feeDelta + absorbed;
+      if (platformSide !== 0)
+        entries.push({
+          account_reference: 'SYNTH-ACCOUNT-PLATFORM-REVENUE',
+          component: 'ADJUSTMENT',
+          debit_minor: platformSide > 0 ? platformSide : 0,
+          credit_minor: platformSide < 0 ? -platformSide : 0,
+          source_order_reference: settlement.source_order_reference,
+        });
+      if (entries.length > 0) {
+        entries.push({
+          account_reference: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+          component: 'ADJUSTMENT',
+          debit_minor: 0,
+          credit_minor: unaccounted,
+          source_order_reference: settlement.source_order_reference,
+        });
+        await this.#postEntries(client, {
+          context: input.context,
+          entries,
+          kind: 'ADJUSTMENT',
+          now,
+          ...(settlement.policy_reference
+            ? { policy_version_reference: String(settlement.policy_reference) }
+            : {}),
+          source_reference: `SYNTH-ADJUSTMENT-REDIVIDE-${String(input.settlement_id).replaceAll('-', '').toUpperCase()}-${Number(settlement.refunded_total)}`,
+        });
+      }
+
+      // The lines say what happened, in the components the statement reads.
+      const policyReference = String(
+        settlement.policy_reference ?? 'SYNTH-POLICY-REDIVISION-UNKNOWN',
+      );
+      for (const [participant, component, amount] of [
+        ['CUSTOMER', 'REFUND', -unaccounted],
+        ['VENDOR', 'ITEM_PROCEEDS', -itemRefundDelta],
+        ['PLATFORM', 'PLATFORM_FEE', feeDelta],
+      ] as const) {
+        if (amount === 0) continue;
+        await client.query(
+          `INSERT INTO marketplace.settlement_lines
+            (settlement_line_id,settlement_id,participant_kind,component,amount_minor,
+             policy_version_reference,created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            createUuidV7(),
+            input.settlement_id,
+            participant,
+            component,
+            amount,
+            policyReference,
+            now,
+          ],
+        );
+      }
+      const updated = await client.query<any>(
+        `UPDATE marketplace.settlements
+            SET vendor_payable_minor=vendor_payable_minor+$2,
+                platform_remainder_minor=platform_remainder_minor+$3,
+                customer_net_minor=customer_net_minor-$4,
+                successful_refunds_minor=successful_refunds_minor+$4,
+                redivided_refunds_minor=redivided_refunds_minor+$4,
+                redivided_item_refunds_minor=redivided_item_refunds_minor+$6,
+                version=version+1, updated_at=$5
+          WHERE settlement_id=$1 RETURNING *`,
+        [input.settlement_id, vendorDelta, platformDelta, unaccounted, now, itemRefundDelta],
+      );
+      return {
+        redivided: true as const,
+        unaccounted,
+        settlement: updated.rows[0],
+        vendor_delta_minor: vendorDelta,
+        platform_delta_minor: platformDelta,
+      };
+    });
+  }
+
+  /**
+   * The worker's pass: every settlement a refund has outrun (10.3). A payout
+   * already paid is not unwound here — that is a correction (10.6) — so only
+   * settlements not yet paid are re-divided.
+   */
+  async redivideRefundedSettlements(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+    readonly now?: Date;
+  }) {
+    financeAutomation(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const pending = await this.#pool.query<{ settlement_id: string }>(
+      `SELECT settlement.settlement_id
+         FROM marketplace.settlements settlement
+        WHERE settlement.settlement_state NOT IN ('PAID','SUBMITTED')
+          AND (SELECT COALESCE(sum(refund_total_minor),0) FROM marketplace.refunds
+                WHERE source_order_reference=settlement.source_order_reference
+                  AND refund_state='SUCCEEDED')
+              > settlement.successful_refunds_minor
+        ORDER BY settlement.updated_at LIMIT $1`,
+      [limit],
+    );
+    let redivided = 0;
+    for (const row of pending.rows) {
+      const outcome = await this.redivideSettlementForRefunds({
+        context: input.context,
+        settlement_id: parseUuidV7(row.settlement_id),
+        ...(input.now ? { now: input.now } : {}),
+      });
+      if (outcome.redivided) redivided += 1;
+    }
+    return redivided;
+  }
+
   /** The worker's pass: every adjustment not yet in the ledger. */
   async postPendingEarningAdjustments(input: {
     readonly context: RequestContext;
@@ -779,32 +984,78 @@ export class CompleteMoneyLifecycleService {
     // Gross is what the goods sold for after refunds; the platform's share is
     // the commission on that; net is what the vendor is owed. The three add up
     // by construction of the settlement, and that is asserted, not assumed.
+    // Each order shows what it sold for, the platform's fee, what was
+    // refunded and adjusted, and where the payout stands (VEN-48). The
+    // components are the settlement's own policy-versioned lines (10.3) —
+    // this used to derive a gross from two columns and show nothing of a
+    // refund, an adjustment or the payout, so a shop reading a statement
+    // after a return saw the pre-refund figure and no sign of the money.
     const settlements = await this.#pool.query<{
-      settlement_id: string;
-      source_order_reference: string;
-      settlement_state: string;
+      adjustment_minor: string;
       eligible_at: Date;
+      paid_at: Date | null;
+      payment_fee_minor: string;
+      payout_state: string | null;
+      platform_fee_minor: string;
+      proceeds_minor: string;
+      refund_minor: string;
+      settlement_id: string;
+      settlement_state: string;
+      source_order_reference: string;
+      tax_minor: string;
       vendor_payable_minor: string;
-      platform_remainder_minor: string;
     }>(
-      `SELECT settlement_id, source_order_reference, settlement_state, eligible_at,
-              vendor_payable_minor::text, platform_remainder_minor::text
-         FROM marketplace.settlements
-        WHERE vendor_location_id=$1
-        ORDER BY created_at DESC`,
+      `SELECT settlement.settlement_id, settlement.source_order_reference,
+              settlement.settlement_state, settlement.eligible_at,
+              settlement.vendor_payable_minor::text,
+              COALESCE(line.proceeds,0)::text AS proceeds_minor,
+              COALESCE(line.platform_fee,0)::text AS platform_fee_minor,
+              COALESCE(line.payment_fee,0)::text AS payment_fee_minor,
+              COALESCE(line.tax,0)::text AS tax_minor,
+              COALESCE(line.refund,0)::text AS refund_minor,
+              COALESCE(adjustment.total,0)::text AS adjustment_minor,
+              payout.payout_state, payout.paid_at
+         FROM marketplace.settlements settlement
+         LEFT JOIN LATERAL (
+           SELECT sum(amount_minor) FILTER (WHERE component='ITEM_PROCEEDS') AS proceeds,
+                  sum(amount_minor) FILTER (WHERE component='PLATFORM_FEE') AS platform_fee,
+                  sum(amount_minor) FILTER (WHERE component='PAYMENT_FEE') AS payment_fee,
+                  sum(amount_minor) FILTER (WHERE component='TAX') AS tax,
+                  sum(amount_minor) FILTER (WHERE component='REFUND'
+                    AND participant_kind='CUSTOMER') AS refund
+             FROM marketplace.settlement_lines
+            WHERE settlement_id=settlement.settlement_id
+         ) line ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT sum(delta_minor) AS total FROM marketplace.vendor_settlement_adjustments
+            WHERE settlement_id=settlement.settlement_id
+         ) adjustment ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT payout_state, paid_at FROM marketplace.payouts
+            WHERE settlement_id=settlement.settlement_id AND beneficiary_kind='VENDOR'
+            ORDER BY created_at DESC LIMIT 1
+         ) payout ON TRUE
+        WHERE settlement.vendor_location_id=$1
+        ORDER BY settlement.created_at DESC`,
       [input.vendor_location_id],
     );
     const entries = settlements.rows.map((row) => {
       const net = Number(row.vendor_payable_minor);
-      const fee = Number(row.platform_remainder_minor);
+      const fee = Number(row.platform_fee_minor);
       return Object.freeze({
         settlement_id: row.settlement_id,
         reference: row.source_order_reference,
         eligible_at: row.eligible_at.toISOString(),
         lifecycle_state: row.settlement_state,
-        gross_minor: net + fee,
+        gross_minor: Number(row.proceeds_minor),
         platform_fee_minor: fee,
+        payment_fee_minor: Number(row.payment_fee_minor),
+        tax_minor: Number(row.tax_minor),
+        refund_minor: Math.abs(Number(row.refund_minor)),
+        adjustment_minor: Number(row.adjustment_minor),
         net_minor: net,
+        payout_state: row.payout_state ?? null,
+        paid_at: row.paid_at ? row.paid_at.toISOString() : null,
       });
     });
     const sum = (states: readonly string[]) =>
@@ -926,6 +1177,337 @@ export class CompleteMoneyLifecycleService {
       days: rollup('day'),
       weeks: rollup('week'),
     });
+  }
+
+  /**
+   * A shop challenges a line of its settlement (VEN-50, 10.3).
+   *
+   * The catalogue promised "vendors challenge a specific ledger or payout
+   * line through a tracked finance case"; until audit run 68 there was no
+   * table, no route and no screen, and the matrix recorded it as backend
+   * work waiting for a UI that had nothing behind it. The shape is the
+   * partner's dispute (9.10): one open case per settlement line, the amount
+   * as recorded and the amount expected, what the shop says, and a deadline.
+   */
+  async openSettlementDispute(input: {
+    readonly context: RequestContext;
+    readonly disputed_component:
+      'ADJUSTMENT' | 'ITEM_PROCEEDS' | 'PAYMENT_FEE' | 'PLATFORM_FEE' | 'REFUND' | 'TAX';
+    readonly evidence_note: string;
+    readonly expected_amount_minor: number;
+    readonly settlement_id: UuidV7;
+    readonly vendor_location_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    const who = actor(input.context, 'vendor_staff');
+    const now = input.now ?? new Date();
+    const contextRefs = refs(input.context);
+    amount(input.expected_amount_minor, 'Expected amount', true);
+    const note = input.evidence_note.trim();
+    if (note.length < 1 || note.length > 500)
+      throw new MoneyInputError('Say what is wrong, in up to 500 characters');
+    return transaction(this.#pool, async (client) => {
+      await this.#requireStaff(client, who, input.vendor_location_id);
+      const found = await client.query<any>(
+        `SELECT settlement_id, vendor_location_id,
+                vendor_payable_minor::text AS vendor_payable,
+                platform_remainder_minor::text AS platform_remainder,
+                successful_refunds_minor::text AS refunds,
+                redivided_refunds_minor::text AS redivided
+           FROM marketplace.settlements WHERE settlement_id=$1`,
+        [input.settlement_id],
+      );
+      const settlement = found.rows[0];
+      if (!settlement || settlement.vendor_location_id !== input.vendor_location_id)
+        throw new MoneyNotFoundError('Settlement not found');
+      // The figure being challenged is the one on the record, not one the
+      // caller supplies: a dispute about a number nobody holds is not one.
+      const recorded =
+        input.disputed_component === 'ITEM_PROCEEDS'
+          ? Number(settlement.vendor_payable)
+          : input.disputed_component === 'PLATFORM_FEE'
+            ? Math.max(0, Number(settlement.platform_remainder))
+            : input.disputed_component === 'REFUND'
+              ? Number(settlement.refunds) + Number(settlement.redivided)
+              : 0;
+      if (recorded === input.expected_amount_minor)
+        throw new MoneyInputError('That line already shows the amount you expect');
+      const disputeId = createUuidV7();
+      try {
+        const inserted = await client.query<any>(
+          `INSERT INTO marketplace.vendor_settlement_disputes
+            (vendor_settlement_dispute_id,settlement_id,vendor_location_id,raised_by_user_id,
+             disputed_component,disputed_amount_minor,expected_amount_minor,evidence_note,
+             deadline_at,request_id,correlation_id,created_at,updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12) RETURNING *`,
+          [
+            disputeId,
+            input.settlement_id,
+            input.vendor_location_id,
+            who,
+            input.disputed_component,
+            recorded,
+            input.expected_amount_minor,
+            note,
+            new Date(now.getTime() + 7 * 24 * 3_600_000),
+            contextRefs.request,
+            contextRefs.correlation,
+            now,
+          ],
+        );
+        return inserted.rows[0];
+      } catch (error) {
+        if ((error as { code?: string }).code === '23505')
+          throw new MoneyStateError('That line is already being looked at');
+        throw error;
+      }
+    });
+  }
+
+  /** What the shop has challenged, and how it ended (VEN-50). */
+  async listSettlementDisputes(input: {
+    readonly context: RequestContext;
+    readonly vendor_location_id: UuidV7;
+  }) {
+    const who = actor(input.context, 'vendor_staff');
+    const client = await this.#pool.connect();
+    try {
+      await this.#requireStaff(client, who, input.vendor_location_id);
+      const rows = await client.query<any>(
+        `SELECT dispute.vendor_settlement_dispute_id, dispute.settlement_id,
+                settlement.source_order_reference, dispute.disputed_component,
+                dispute.disputed_amount_minor::text, dispute.expected_amount_minor::text,
+                dispute.evidence_note, dispute.lifecycle_state, dispute.resolution_reason_code,
+                dispute.resolved_amount_minor::text, dispute.deadline_at, dispute.resolved_at,
+                dispute.created_at,
+                adjustment.delta_minor::text AS adjustment_delta_minor
+           FROM marketplace.vendor_settlement_disputes dispute
+           JOIN marketplace.settlements settlement USING (settlement_id)
+           LEFT JOIN marketplace.vendor_settlement_adjustments adjustment
+             ON adjustment.vendor_settlement_dispute_id=dispute.vendor_settlement_dispute_id
+          WHERE dispute.vendor_location_id=$1
+          ORDER BY dispute.created_at DESC`,
+        [input.vendor_location_id],
+      );
+      return { disputes: rows.rows };
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * An operator's answer to a challenge (10.3), or the shop's withdrawal.
+   *
+   * A resolution at a figure other than the recorded one moves the
+   * settlement's vendor payable by the difference and writes the adjustment
+   * that says so, in the same transaction — the outcome is money, not a
+   * number on a case, which is the failure 9.10 found on the partner's side.
+   */
+  async resolveSettlementDispute(input: {
+    readonly context: RequestContext;
+    readonly resolution: 'RESOLVED' | 'WITHDRAWN';
+    readonly resolution_reason_code?: string;
+    readonly resolved_amount_minor?: number;
+    readonly vendor_settlement_dispute_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    const now = input.now ?? new Date();
+    if (input.resolution === 'RESOLVED') {
+      if (
+        !input.resolution_reason_code ||
+        !/^[A-Z][A-Z0-9_]{2,63}$/.test(input.resolution_reason_code)
+      )
+        throw new MoneyInputError('A resolution needs a reason code');
+      if (input.resolved_amount_minor === undefined)
+        throw new MoneyInputError('A resolution needs the amount decided');
+      amount(input.resolved_amount_minor, 'Resolved amount', true);
+    }
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<any>(
+        `SELECT * FROM marketplace.vendor_settlement_disputes
+          WHERE vendor_settlement_dispute_id=$1 FOR UPDATE`,
+        [input.vendor_settlement_dispute_id],
+      );
+      const dispute = found.rows[0];
+      if (!dispute) throw new MoneyNotFoundError('Dispute not found');
+      if (dispute.lifecycle_state !== 'OPEN') throw new MoneyStateError('Dispute is not open');
+      let resolverId: UuidV7;
+      if (input.resolution === 'RESOLVED') {
+        resolverId = admin(input.context);
+      } else if (input.context.actor?.actor_kind === 'vendor_staff') {
+        resolverId = actor(input.context, 'vendor_staff');
+        await this.#requireStaff(client, resolverId, dispute.vendor_location_id);
+      } else {
+        resolverId = admin(input.context);
+      }
+      const updated = await client.query<any>(
+        `UPDATE marketplace.vendor_settlement_disputes
+            SET lifecycle_state=$2, resolver_user_id=$3, resolution_reason_code=$4,
+                resolved_amount_minor=$5, resolved_at=$6, updated_at=$6
+          WHERE vendor_settlement_dispute_id=$1 RETURNING *`,
+        [
+          input.vendor_settlement_dispute_id,
+          input.resolution,
+          resolverId,
+          input.resolution_reason_code ?? null,
+          input.resolved_amount_minor ?? null,
+          now,
+        ],
+      );
+      if (input.resolution !== 'RESOLVED') return updated.rows[0];
+      const delta = Number(input.resolved_amount_minor) - Number(dispute.disputed_amount_minor);
+      if (delta === 0) return updated.rows[0];
+      const contextRefs = refs(input.context);
+      await client.query(
+        `INSERT INTO marketplace.vendor_settlement_adjustments
+          (vendor_settlement_adjustment_id,settlement_id,vendor_location_id,
+           vendor_settlement_dispute_id,delta_minor,reason_code,decided_by_user_id,
+           request_id,correlation_id,created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          createUuidV7(),
+          dispute.settlement_id,
+          dispute.vendor_location_id,
+          input.vendor_settlement_dispute_id,
+          delta,
+          input.resolution_reason_code,
+          resolverId,
+          contextRefs.request,
+          contextRefs.correlation,
+          now,
+        ],
+      );
+      // The settlement moves with the decision: the shop's payable and the
+      // platform's remainder are two sides of the same amount.
+      await client.query(
+        `UPDATE marketplace.settlements
+            SET vendor_payable_minor=vendor_payable_minor+$2,
+                platform_remainder_minor=platform_remainder_minor-$2,
+                version=version+1, updated_at=$3
+          WHERE settlement_id=$1`,
+        [dispute.settlement_id, delta, now],
+      );
+      return updated.rows[0];
+    });
+  }
+
+  /** Posts a resolved vendor dispute's delta to the ledger, once (10.3). */
+  async postSettlementAdjustment(input: {
+    readonly context: RequestContext;
+    readonly vendor_settlement_adjustment_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<{
+        delta_minor: string;
+        ledger_transaction_id: string | null;
+        settlement_id: string;
+        source_order_reference: string;
+        vendor_location_id: string;
+      }>(
+        `SELECT adjustment.delta_minor::text, adjustment.ledger_transaction_id,
+                adjustment.settlement_id, adjustment.vendor_location_id,
+                settlement.source_order_reference
+           FROM marketplace.vendor_settlement_adjustments adjustment
+           JOIN marketplace.settlements settlement USING (settlement_id)
+          WHERE adjustment.vendor_settlement_adjustment_id=$1 FOR UPDATE OF adjustment`,
+        [input.vendor_settlement_adjustment_id],
+      );
+      const adjustment = found.rows[0];
+      if (!adjustment) throw new MoneyNotFoundError('Vendor settlement adjustment not found');
+      if (adjustment.ledger_transaction_id) return { posted: false as const, replayed: true };
+      const delta = Number(adjustment.delta_minor);
+      const magnitude = Math.abs(delta);
+      const owner = {
+        source_order_reference: adjustment.source_order_reference,
+        vendor_location_id: parseUuidV7(adjustment.vendor_location_id),
+      };
+      const ledgerId = await this.#postEntries(client, {
+        context: input.context,
+        entries:
+          delta > 0
+            ? [
+                {
+                  account_reference: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+                  component: 'ADJUSTMENT',
+                  debit_minor: magnitude,
+                  credit_minor: 0,
+                  source_order_reference: owner.source_order_reference,
+                },
+                {
+                  account_reference: 'SYNTH-ACCOUNT-VENDOR-PAYABLE',
+                  component: 'ADJUSTMENT',
+                  debit_minor: 0,
+                  credit_minor: magnitude,
+                  ...owner,
+                },
+              ]
+            : [
+                {
+                  account_reference: 'SYNTH-ACCOUNT-VENDOR-PAYABLE',
+                  component: 'ADJUSTMENT',
+                  debit_minor: magnitude,
+                  credit_minor: 0,
+                  ...owner,
+                },
+                {
+                  account_reference: 'SYNTH-ACCOUNT-PLATFORM-CLEARING',
+                  component: 'ADJUSTMENT',
+                  debit_minor: 0,
+                  credit_minor: magnitude,
+                  source_order_reference: owner.source_order_reference,
+                },
+              ],
+        kind: 'ADJUSTMENT',
+        now,
+        source_reference: `SYNTH-ADJUSTMENT-VENDOR-${String(input.vendor_settlement_adjustment_id).replaceAll('-', '').toUpperCase()}`,
+      });
+      await client.query(
+        `UPDATE marketplace.vendor_settlement_adjustments
+            SET ledger_transaction_id=$2, posted_at=$3
+          WHERE vendor_settlement_adjustment_id=$1`,
+        [input.vendor_settlement_adjustment_id, ledgerId, now],
+      );
+      return { posted: true as const, replayed: false, ledger_transaction_id: ledgerId };
+    });
+  }
+
+  /** The worker's pass: every vendor adjustment not yet in the ledger. */
+  async postPendingSettlementAdjustments(input: {
+    readonly context: RequestContext;
+    readonly limit?: number;
+    readonly now?: Date;
+  }) {
+    financeAutomation(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const pending = await this.#pool.query<{ vendor_settlement_adjustment_id: string }>(
+      `SELECT vendor_settlement_adjustment_id FROM marketplace.vendor_settlement_adjustments
+        WHERE ledger_transaction_id IS NULL ORDER BY created_at LIMIT $1`,
+      [limit],
+    );
+    let posted = 0;
+    for (const row of pending.rows) {
+      const outcome = await this.postSettlementAdjustment({
+        context: input.context,
+        vendor_settlement_adjustment_id: parseUuidV7(row.vendor_settlement_adjustment_id),
+        ...(input.now ? { now: input.now } : {}),
+      });
+      if (outcome.posted) posted += 1;
+    }
+    return posted;
+  }
+
+  async #requireStaff(client: PoolClient, userId: UuidV7, vendorLocationId: UuidV7) {
+    const membership = await client.query(
+      `SELECT 1 FROM marketplace.staff_memberships sm JOIN marketplace.role_assignments ra
+        ON ra.role_assignment_id=sm.role_assignment_id
+       WHERE sm.user_id=$1 AND sm.vendor_location_id=$2 AND ra.state='ACTIVE'
+         AND ra.valid_from<=clock_timestamp() AND (ra.valid_until IS NULL OR ra.valid_until>clock_timestamp())`,
+      [userId, vendorLocationId],
+    );
+    if (!membership.rows[0]) throw new MoneyNotFoundError('Settlement not found');
   }
 
   async financeQueue(input: { readonly context: RequestContext }) {

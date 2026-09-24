@@ -407,6 +407,18 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#completeMoney.postPendingEarningAdjustments({ context, now }),
         0,
       );
+      // A refund that outran its settlement re-divides the order's money
+      // (10.3), and a resolved shop dispute reaches the ledger.
+      const redivided = await pass(
+        'completeMoney.redivideRefundedSettlements',
+        () => this.#completeMoney.redivideRefundedSettlements({ context, now }),
+        0,
+      );
+      const settlementAdjustments = await pass(
+        'completeMoney.postPendingSettlementAdjustments',
+        () => this.#completeMoney.postPendingSettlementAdjustments({ context, now }),
+        0,
+      );
       const controls = await pass(
         'adminControl.expireOperationalControls',
         () => this.#adminControl.expireOperationalControls({ context, now }),
@@ -499,6 +511,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         documents +
         offlineProofs.length +
         earningAdjustments +
+        redivided +
+        settlementAdjustments +
         controls.trust +
         controls.incidents +
         waitTimers +
@@ -517,6 +531,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           documents,
           offline_proofs: offlineProofs.length,
           earning_adjustments: earningAdjustments,
+          redivided_settlements: redivided,
+          settlement_adjustments: settlementAdjustments,
           trust_controls: controls.trust,
           incident_controls: controls.incidents,
           wait_timers: waitTimers,

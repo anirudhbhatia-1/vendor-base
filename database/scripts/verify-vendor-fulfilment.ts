@@ -22,6 +22,7 @@ import {
   MoneyStateError,
 } from '../src/money-lifecycle.js';
 import {
+  calculateCommissionAmount,
   calculatePartnerOfferEarning,
   LocalFakeMoneyProvider,
   SYNTHETIC_FINANCIAL_POLICY,
@@ -4555,11 +4556,13 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         vendor_location_id: storeA.locationId,
       });
       const ledgerSettlement = await pool.query<{
+        settlement_id: string;
         vendor_payable_minor: string;
         platform_remainder_minor: string;
         settlement_state: string;
       }>(
-        `SELECT vendor_payable_minor::text, platform_remainder_minor::text, settlement_state
+        `SELECT settlement_id, vendor_payable_minor::text, platform_remainder_minor::text,
+                settlement_state
            FROM marketplace.settlements WHERE source_order_reference=$1`,
         [orderA.order_reference],
       );
@@ -4572,15 +4575,23 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
           ownSettlement !== undefined,
         'The vendor statement did not carry the settlement for the delivered order',
       );
+      // The fee on the statement is the commission line the settlement wrote
+      // under its policy version, not the platform's whole remainder: the
+      // remainder also holds the delivery margin, which is not the shop's
+      // fee and was being shown to the shop as one.
+      const feeLine = await pool.query<{ amount: string }>(
+        `SELECT amount_minor::text AS amount FROM marketplace.settlement_lines
+          WHERE settlement_id=$1 AND component='PLATFORM_FEE'`,
+        [ledgerSettlement.rows[0]?.settlement_id],
+      );
       check(
         ownSettlement.net_minor === Number(ledgerSettlement.rows[0]?.vendor_payable_minor) &&
-          ownSettlement.platform_fee_minor ===
-            Number(ledgerSettlement.rows[0]?.platform_remainder_minor) &&
+          ownSettlement.platform_fee_minor === Number(feeLine.rows[0]?.amount) &&
           ownSettlement.gross_minor - ownSettlement.platform_fee_minor ===
             ownSettlement.net_minor &&
           ownSettlement.lifecycle_state === ledgerSettlement.rows[0]?.settlement_state &&
           typeof ownSettlement.eligible_at === 'string',
-        `The vendor statement does not reconcile to the settlement (${JSON.stringify(ownSettlement)})`,
+        `The vendor statement does not reconcile to the settlement (${JSON.stringify(ownSettlement)}, fee line ${feeLine.rows[0]?.amount})`,
       );
       check(
         statement.pending_minor + statement.eligible_minor + statement.settled_minor ===
@@ -4792,6 +4803,224 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
             ),
         ),
         'The refund rewrote an order total instead of posting against it',
+      );
+
+      // -----------------------------------------------------------------
+      // 10.3 — the refund re-divides the order's money, and the shop can
+      // challenge the line it is paid on.
+      //
+      // The commission was charged once, at settlement, on what the bags
+      // held then: until audit run 68 a refund after delivery took money
+      // back from the customer and left the shop's proceeds and the
+      // platform's fee standing on goods that had been returned.
+      // -----------------------------------------------------------------
+      const beforeRedivision = await pool.query<{
+        settlement_id: string;
+        vendor_payable: string;
+        platform_remainder: string;
+      }>(
+        `SELECT settlement_id, vendor_payable_minor::text AS vendor_payable,
+                platform_remainder_minor::text AS platform_remainder
+           FROM marketplace.settlements WHERE source_order_reference=$1`,
+        [referenceA],
+      );
+      const settlementA = beforeRedivision.rows[0];
+      check(settlementA !== undefined, 'The delivered order has no settlement to re-divide');
+      const redivided = await completeMoney.redivideRefundedSettlements({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 90_000),
+      });
+      const afterRedivision = await pool.query<{
+        vendor_payable: string;
+        platform_remainder: string;
+        redivided: string;
+        accounted: string;
+        fee_lines: string;
+        refund_lines: string;
+      }>(
+        `SELECT vendor_payable_minor::text AS vendor_payable,
+                platform_remainder_minor::text AS platform_remainder,
+                redivided_refunds_minor::text AS redivided,
+                successful_refunds_minor::text AS accounted,
+                (SELECT count(*)::text FROM marketplace.settlement_lines
+                  WHERE settlement_id=$1 AND component='PLATFORM_FEE') AS fee_lines,
+                (SELECT count(*)::text FROM marketplace.settlement_lines
+                  WHERE settlement_id=$1 AND component='REFUND') AS refund_lines
+           FROM marketplace.settlements WHERE settlement_id=$1`,
+        [settlementA.settlement_id],
+      );
+      const after = afterRedivision.rows[0];
+      // The shop keeps the goods' money less what came back; the commission
+      // follows, because it is a rate on what was actually supplied.
+      const expectedProceeds =
+        Number(settlementA.vendor_payable) -
+        REFUND_ITEM_MINOR +
+        calculateCommissionAmount(
+          REFUND_ITEM_MINOR,
+          SYNTHETIC_FINANCIAL_POLICY.commission_basis_points,
+        );
+      check(
+        redivided === 1 &&
+          Number(after?.vendor_payable) === expectedProceeds &&
+          Number(after?.redivided) === REFUND_ITEM_MINOR &&
+          Number(after?.accounted) === REFUND_ITEM_MINOR &&
+          after?.fee_lines === '2' &&
+          after.refund_lines === '1',
+        `A refund after settlement did not re-divide the order's money (${JSON.stringify({ redivided, expectedProceeds, ...after })})`,
+      );
+      const redividedAgain = await completeMoney.redivideRefundedSettlements({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 91_000),
+      });
+      const balanceAfter = await completeMoney.ledgerTrialBalance({
+        context: adminContext(adminId),
+      });
+      check(
+        redividedAgain === 0 && balanceAfter.balanced,
+        `The re-division ran twice or left the books unbalanced (${redividedAgain})`,
+      );
+
+      // The shop reads the refund and the payout state on its own statement.
+      const statementAfter = await completeMoney.vendorStatement({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_location_id: storeA.locationId,
+      });
+      const lineAfter = statementAfter.settlements.find((entry) => entry.reference === referenceA);
+      check(
+        lineAfter !== undefined &&
+          lineAfter.refund_minor === REFUND_ITEM_MINOR &&
+          lineAfter.net_minor === expectedProceeds &&
+          lineAfter.gross_minor - lineAfter.platform_fee_minor === lineAfter.net_minor,
+        `The shop's statement does not show the refund that changed its money (${JSON.stringify(lineAfter)})`,
+      );
+
+      // VEN-50: the shop challenges the line, an operator answers at a
+      // different figure, and the answer is money — the failure 9.10 found
+      // on the partner's side, here proved not to have been repeated.
+      const disputed = await completeMoney.openSettlementDispute({
+        context: vendorContext(storeA.ownerUserId),
+        disputed_component: 'ITEM_PROCEEDS',
+        evidence_note: 'The returned pack was resold, so this refund should not be ours.',
+        expected_amount_minor: expectedProceeds + 1_000,
+        settlement_id: parseUuidV7(settlementA.settlement_id),
+        vendor_location_id: storeA.locationId,
+      });
+      check(
+        Number(disputed.disputed_amount_minor) === expectedProceeds &&
+          disputed.lifecycle_state === 'OPEN',
+        `The challenge did not record the figure on the settlement (${JSON.stringify(disputed)})`,
+      );
+      await rejects(
+        () =>
+          completeMoney.openSettlementDispute({
+            context: vendorContext(storeA.ownerUserId),
+            disputed_component: 'ITEM_PROCEEDS',
+            evidence_note: 'Again.',
+            expected_amount_minor: expectedProceeds + 2_000,
+            settlement_id: parseUuidV7(settlementA.settlement_id),
+            vendor_location_id: storeA.locationId,
+          }),
+        MoneyStateError,
+        'One settlement line took two open challenges at once',
+      );
+      await rejects(
+        () =>
+          completeMoney.openSettlementDispute({
+            context: vendorContext(storeB.ownerUserId),
+            disputed_component: 'PLATFORM_FEE',
+            evidence_note: 'Not my settlement.',
+            expected_amount_minor: 0,
+            settlement_id: parseUuidV7(settlementA.settlement_id),
+            vendor_location_id: storeA.locationId,
+          }),
+        MoneyNotFoundError,
+        'A shop challenged another store’s settlement',
+      );
+      // And under its own location: staff membership alone does not make
+      // another store's settlement this store's to argue with.
+      await rejects(
+        () =>
+          completeMoney.openSettlementDispute({
+            context: vendorContext(storeB.ownerUserId),
+            disputed_component: 'PLATFORM_FEE',
+            evidence_note: 'Still not my settlement.',
+            expected_amount_minor: 0,
+            settlement_id: parseUuidV7(settlementA.settlement_id),
+            vendor_location_id: storeB.locationId,
+          }),
+        MoneyNotFoundError,
+        'A shop challenged another store’s settlement under its own location',
+      );
+      const resolvedDispute = await completeMoney.resolveSettlementDispute({
+        context: adminContext(adminId),
+        resolution: 'RESOLVED',
+        resolution_reason_code: 'RETURNED_STOCK_RESOLD',
+        resolved_amount_minor: expectedProceeds + 1_000,
+        vendor_settlement_dispute_id: parseUuidV7(disputed.vendor_settlement_dispute_id),
+        now: new Date(now.getTime() + 92_000),
+      });
+      const postedAdjustments = await completeMoney.postPendingSettlementAdjustments({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 93_000),
+      });
+      const disputeOutcome = await pool.query<{
+        delta: string;
+        ledger: string | null;
+        payable: string;
+      }>(
+        `SELECT adjustment.delta_minor::text AS delta, adjustment.ledger_transaction_id::text AS ledger,
+                settlement.vendor_payable_minor::text AS payable
+           FROM marketplace.vendor_settlement_adjustments adjustment
+           JOIN marketplace.settlements settlement USING (settlement_id)
+          WHERE adjustment.vendor_settlement_dispute_id=$1`,
+        [disputed.vendor_settlement_dispute_id],
+      );
+      check(
+        resolvedDispute.lifecycle_state === 'RESOLVED' &&
+          postedAdjustments === 1 &&
+          Number(disputeOutcome.rows[0]?.delta) === 1_000 &&
+          disputeOutcome.rows[0]?.ledger !== null &&
+          Number(disputeOutcome.rows[0]?.payable) === expectedProceeds + 1_000,
+        `A resolved challenge did not move the money on the settlement (${JSON.stringify(disputeOutcome.rows[0])})`,
+      );
+      // Replayed directly, not only through the sweep that filters on the
+      // stamp: a posting that is idempotent only because its caller filters
+      // is not idempotent.
+      const adjustmentRow = await pool.query<{ id: string }>(
+        `SELECT vendor_settlement_adjustment_id::text AS id
+           FROM marketplace.vendor_settlement_adjustments
+          WHERE vendor_settlement_dispute_id=$1`,
+        [disputed.vendor_settlement_dispute_id],
+      );
+      const directReplay = await completeMoney.postSettlementAdjustment({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 94_000),
+        vendor_settlement_adjustment_id: parseUuidV7(String(adjustmentRow.rows[0]?.id)),
+      });
+      check(
+        !directReplay.posted && directReplay.replayed,
+        'A replayed vendor adjustment posted a second time',
+      );
+      const postedAgain = await completeMoney.postPendingSettlementAdjustments({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 95_000),
+      });
+      const balanceAfterDispute = await completeMoney.ledgerTrialBalance({
+        context: adminContext(adminId),
+      });
+      check(
+        postedAgain === 0 && balanceAfterDispute.balanced,
+        'The dispute adjustment posted twice or left the books unbalanced',
+      );
+      const readBack = await completeMoney.listSettlementDisputes({
+        context: vendorContext(storeA.ownerUserId),
+        vendor_location_id: storeA.locationId,
+      });
+      check(
+        readBack.disputes.length === 1 &&
+          readBack.disputes[0]?.lifecycle_state === 'RESOLVED' &&
+          Number(readBack.disputes[0]?.adjustment_delta_minor) === 1_000,
+        `The shop cannot read its challenge back with what it changed (${JSON.stringify(readBack.disputes)})`,
       );
 
       // -----------------------------------------------------------------

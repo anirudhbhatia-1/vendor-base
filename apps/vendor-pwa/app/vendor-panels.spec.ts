@@ -195,13 +195,60 @@ test('a settlement statement downloads as CSV, not a print dialog', () => {
     ],
   });
   const [header, row] = csv.split('\n');
+  // Sale, platform fee, payment costs, refund/adjustment, tax and payout
+  // status, per order (VEN-48, 10.3): a statement that showed gross, fee and
+  // net alone told a shop nothing about a refund that had taken money back.
   assert.equal(
     header,
-    'settlement_reference,lifecycle_state,eligible_at,gross_inr,platform_fee_inr,net_inr',
+    'settlement_reference,lifecycle_state,eligible_at,gross_inr,platform_fee_inr,payment_fee_inr,tax_inr,refund_inr,adjustment_inr,net_inr,payout_state,paid_at',
   );
   // Paise are integers in the ledger; the single division to rupees happens
   // once, for display, and must not lose the last two digits.
-  assert.equal(row, 'SETTLE-1,SETTLED,2026-08-30T00:00:00.000Z,250.00,9.50,240.50');
+  assert.equal(
+    row,
+    'SETTLE-1,SETTLED,2026-08-30T00:00:00.000Z,250.00,9.50,0.00,0.00,0.00,0.00,240.50,not scheduled,',
+  );
+});
+
+test('the statement carries the refund, the adjustment and the payout it has (VEN-48)', () => {
+  const csv = statementToCsv({
+    vendor_location_id: 'loc',
+    pending_minor: 0,
+    eligible_minor: 0,
+    settled_minor: 19_000,
+    settlements: [
+      {
+        settlement_id: 's-2',
+        reference: 'SETTLE-2',
+        eligible_at: '2026-09-24T00:00:00.000Z',
+        lifecycle_state: 'PAID',
+        gross_minor: 25_000,
+        platform_fee_minor: 950,
+        payment_fee_minor: 120,
+        tax_minor: 0,
+        refund_minor: 5_000,
+        adjustment_minor: -250,
+        net_minor: 19_000,
+        payout_state: 'PAID',
+        paid_at: '2026-09-25T12:30:00.000Z',
+      },
+    ],
+  });
+  const row = csv.split('\n')[1];
+  assert.equal(
+    row,
+    'SETTLE-2,PAID,2026-09-24T00:00:00.000Z,250.00,9.50,1.20,0.00,50.00,-2.50,190.00,PAID,2026-09-25T12:30:00.000Z',
+  );
+});
+
+test('a shop can challenge a settlement line and read its answer (VEN-50)', () => {
+  const source = panel('payouts-panel.tsx');
+  // The catalogue promises a tracked finance case per line; until audit run
+  // 68 the screen had no way to raise one and no route behind it.
+  assert.ok(source.includes('finance.openDispute('), 'a line can be challenged');
+  assert.ok(source.includes('finance.disputes('), 'raised challenges are read back');
+  assert.ok(source.includes('finance.withdrawDispute('), 'an open challenge can be withdrawn');
+  assert.ok(source.includes('ITEM_PROCEEDS'), 'the challenge names a component of the line');
 });
 
 test('a field containing a comma is quoted rather than breaking the row', () => {

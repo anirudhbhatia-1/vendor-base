@@ -58,6 +58,7 @@ export type {
   VendorOrder,
   VendorOrderSummary,
   VendorSettlementEntry,
+  VendorSettlementDispute,
   VendorStatement,
   WhoAmI,
 } from './types.js';

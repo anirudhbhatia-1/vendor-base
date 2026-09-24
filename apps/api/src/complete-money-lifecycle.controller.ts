@@ -32,6 +32,17 @@ const vendorRead = RequireAuthorization({
   conceal_resource: true,
   vendor_location_id_param: 'vendor_location_id',
 });
+/** Challenging a settlement line is its own capability (VEN-50, 10.3). */
+const vendorDispute = RequireAuthorization({
+  capability: 'vendor.finance.dispute',
+  conceal_resource: true,
+  vendor_location_id_param: 'vendor_location_id',
+});
+const resolveDispute = RequireAuthorization({
+  admin_scope: { kind: 'GLOBAL' },
+  capability: 'admin.vendor_settlement.resolve',
+  conceal_resource: true,
+});
 
 @Controller('admin/finance/v2')
 export class CompleteMoneyAdminController {
@@ -262,6 +273,95 @@ export class VendorFinanceController {
         context: currentRequestContext(),
         vendor_location_id: uuid(id),
       });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  @Get('disputes')
+  @vendorRead
+  async disputes(@Param('vendor_location_id') id: string) {
+    try {
+      return await this.money.listSettlementDisputes({
+        context: currentRequestContext(),
+        vendor_location_id: uuid(id),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  @Post('disputes')
+  @vendorDispute
+  async openDispute(@Param('vendor_location_id') id: string, @Body() raw: unknown) {
+    const value = object(raw);
+    const component = stringField(value, 'disputed_component');
+    if (
+      !['ADJUSTMENT', 'ITEM_PROCEEDS', 'PAYMENT_FEE', 'PLATFORM_FEE', 'REFUND', 'TAX'].includes(
+        component,
+      )
+    )
+      throw new BadRequestException();
+    try {
+      return await this.money.openSettlementDispute({
+        context: currentRequestContext(),
+        disputed_component: component as
+          'ADJUSTMENT' | 'ITEM_PROCEEDS' | 'PAYMENT_FEE' | 'PLATFORM_FEE' | 'REFUND' | 'TAX',
+        evidence_note: stringField(value, 'evidence_note'),
+        expected_amount_minor: integerField(value, 'expected_amount_minor', 0),
+        settlement_id: uuid(stringField(value, 'settlement_id')),
+        vendor_location_id: uuid(id),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  @Post('disputes/:dispute_id/withdraw')
+  @vendorDispute
+  @HttpCode(200)
+  async withdrawDispute(@Param('dispute_id') disputeId: string) {
+    try {
+      return await this.money.resolveSettlementDispute({
+        context: currentRequestContext(),
+        resolution: 'WITHDRAWN',
+        vendor_settlement_dispute_id: uuid(disputeId),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+}
+
+/** The operator's side of a shop's challenge (VEN-50, ADM-48, 10.3). */
+@Controller('admin/finance/v2/vendor-settlement-disputes')
+export class AdminVendorSettlementDisputeController {
+  constructor(
+    @Inject(COMPLETE_MONEY_LIFECYCLE)
+    private readonly money: CompleteMoneyLifecycleService,
+  ) {}
+
+  @Post(':dispute_id/resolve')
+  @resolveDispute
+  @HttpCode(200)
+  async resolve(@Param('dispute_id') disputeId: string, @Body() raw: unknown) {
+    const value = object(raw);
+    try {
+      const resolved = await this.money.resolveSettlementDispute({
+        context: currentRequestContext(),
+        resolution: 'RESOLVED',
+        resolution_reason_code: stringField(value, 'resolution_reason_code'),
+        resolved_amount_minor: integerField(value, 'resolved_amount_minor', 0),
+        vendor_settlement_dispute_id: uuid(disputeId),
+      });
+      // The decision is money: its adjustment reaches the ledger with the
+      // request that made it, not on the worker's next pass.
+      await this.money.postPendingSettlementAdjustments({ context: currentRequestContext() });
+      return resolved;
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();
       translateDomainError(error);

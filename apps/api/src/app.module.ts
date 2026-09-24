@@ -92,6 +92,7 @@ import {
   CompleteMoneyAdminController,
   CustomerFinanceController,
   PartnerFinanceController,
+  AdminVendorSettlementDisputeController,
   VendorFinanceController,
 } from './complete-money-lifecycle.controller.js';
 import { CATALOGUE_FRESHNESS_MODERATION } from './tokens.js';
@@ -204,6 +205,7 @@ import {
     CompleteMoneyAdminController,
     CustomerFinanceController,
     PartnerFinanceController,
+    AdminVendorSettlementDisputeController,
     VendorFinanceController,
     AdminControlPlaneController,
     LocaleController,

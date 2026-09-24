@@ -1775,3 +1775,51 @@ export const refundLines = marketplaceSchema.table(
     index('refund_lines_order_line').on(table.vendorOrderLineId),
   ],
 );
+
+export const vendorSettlementDisputes = marketplaceSchema.table(
+  'vendor_settlement_disputes',
+  {
+    vendorSettlementDisputeId: uuid('vendor_settlement_dispute_id').primaryKey(),
+    settlementId: uuid('settlement_id').notNull(),
+    vendorLocationId: uuid('vendor_location_id').notNull(),
+    raisedByUserId: uuid('raised_by_user_id').notNull(),
+    disputedComponent: text('disputed_component').notNull(),
+    disputedAmountMinor: bigint('disputed_amount_minor', { mode: 'number' }).notNull(),
+    expectedAmountMinor: bigint('expected_amount_minor', { mode: 'number' }).notNull(),
+    evidenceNote: text('evidence_note').notNull(),
+    lifecycleState: text('lifecycle_state').notNull(),
+    resolverUserId: uuid('resolver_user_id'),
+    resolutionReasonCode: text('resolution_reason_code'),
+    resolvedAmountMinor: bigint('resolved_amount_minor', { mode: 'number' }),
+    deadlineAt: timestamp('deadline_at', { withTimezone: true }).notNull(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('vendor_settlement_disputes_location').on(table.vendorLocationId, table.createdAt),
+  ],
+);
+
+export const vendorSettlementAdjustments = marketplaceSchema.table(
+  'vendor_settlement_adjustments',
+  {
+    vendorSettlementAdjustmentId: uuid('vendor_settlement_adjustment_id').primaryKey(),
+    settlementId: uuid('settlement_id').notNull(),
+    vendorLocationId: uuid('vendor_location_id').notNull(),
+    vendorSettlementDisputeId: uuid('vendor_settlement_dispute_id').notNull().unique(),
+    deltaMinor: bigint('delta_minor', { mode: 'number' }).notNull(),
+    reasonCode: text('reason_code').notNull(),
+    decidedByUserId: uuid('decided_by_user_id').notNull(),
+    ledgerTransactionId: uuid('ledger_transaction_id'),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    postedAt: timestamp('posted_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('vendor_settlement_adjustments_location').on(table.vendorLocationId, table.createdAt),
+  ],
+);

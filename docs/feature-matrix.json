@@ -3129,7 +3129,7 @@
       "name": "Settlement ledger",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/vendor-pwa/app/payouts-panel.tsx renders the settlement statement",
+      "notes": "apps/vendor-pwa/app/payouts-panel.tsx renders the settlement statement. Run 68 (10.3): each order shows the sale, the platform fee (the commission line, not the platform's whole remainder), payment costs, tax, refunds, adjustments and the payout state with its paid date, from the settlement's own policy-versioned lines",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3175,22 +3175,24 @@
     {
       "id": "VEN-50",
       "name": "Settlement disputes",
-      "status": "backend_only",
+      "status": "complete_local_synthetic",
       "target_stage": "5",
-      "notes": "No dispute UI",
+      "notes": "Run 68 (10.3) built it: vendor_settlement_disputes with one open case per settlement line, vendor.finance.dispute to raise and withdraw, admin.vendor_settlement.resolve to answer, and a resolution at another figure posts a vendor_settlement_adjustment to the ledger once. Before run 68 nothing existed — no table, no service, no route, no screen — and this row claimed domain and API",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
         "worker": false,
-        "pwa": false,
+        "pwa": true,
         "android": false,
         "tests": true
       },
       "phase_steps": ["10.6"],
       "verified_by": [
         "apps/api/src/complete-money-lifecycle.controller.spec.ts",
+        "apps/vendor-pwa/app/vendor-panels.spec.ts",
+        "database/scripts/verify-vendor-fulfilment.ts",
         "database/scripts/verify-money-lifecycle.ts"
       ]
     },
@@ -6200,7 +6202,7 @@
       "name": "Independent settlement",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Per-order settlement with component decomposition",
+      "notes": "Per-order settlement with component decomposition. Run 68 (10.3): a refund after settlement re-divides the order — the goods' share comes off the shop's proceeds and the commission is recalculated on what remains, under the policy the order was sold on; the rest the platform absorbs",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {

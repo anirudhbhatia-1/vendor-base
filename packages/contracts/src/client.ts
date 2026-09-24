@@ -30,6 +30,7 @@ import type {
   CheckoutGroupReceipt,
   CustomerOrderGroup,
   CustomerReceipt,
+  VendorSettlementDispute,
   VendorStatement,
   PartnerStatement,
   Session,
@@ -907,6 +908,29 @@ export function createApiClient(options: ApiClientOptions) {
       finance: {
         statement: (vendorLocationId: string) =>
           r<VendorStatement>(`/vendor/locations/${vendorLocationId}/finance/statement`),
+        /** The lines this shop has challenged, and how they ended (VEN-50). */
+        disputes: (vendorLocationId: string) =>
+          r<{ disputes: readonly VendorSettlementDispute[] }>(
+            `/vendor/locations/${vendorLocationId}/finance/disputes`,
+          ),
+        openDispute: (
+          vendorLocationId: string,
+          body: {
+            settlement_id: string;
+            disputed_component: string;
+            expected_amount_minor: number;
+            evidence_note: string;
+          },
+        ) =>
+          r<VendorSettlementDispute>(`/vendor/locations/${vendorLocationId}/finance/disputes`, {
+            method: 'POST',
+            json: body,
+          }),
+        withdrawDispute: (vendorLocationId: string, disputeId: string) =>
+          r<VendorSettlementDispute>(
+            `/vendor/locations/${vendorLocationId}/finance/disputes/${disputeId}/withdraw`,
+            { method: 'POST', json: {} },
+          ),
       },
     },
 

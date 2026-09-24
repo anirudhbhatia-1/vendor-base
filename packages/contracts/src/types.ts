@@ -567,6 +567,13 @@ export type VendorSettlementEntry = {
   reference: string;
   eligible_at: string;
   lifecycle_state: string;
+  /** What the order sold for, the costs against it, and where its payout stands (VEN-48, 10.3). */
+  payment_fee_minor?: number;
+  tax_minor?: number;
+  refund_minor?: number;
+  adjustment_minor?: number;
+  payout_state?: string | null;
+  paid_at?: string | null;
   gross_minor: number;
   platform_fee_minor: number;
   net_minor: number;
@@ -578,6 +585,24 @@ export type VendorStatement = {
   eligible_minor: number;
   settled_minor: number;
   settlements: readonly VendorSettlementEntry[];
+};
+
+/** A settlement line a shop has challenged (VEN-50, 10.3). */
+export type VendorSettlementDispute = {
+  vendor_settlement_dispute_id: string;
+  settlement_id: string;
+  source_order_reference: string;
+  disputed_component: string;
+  disputed_amount_minor: string;
+  expected_amount_minor: string;
+  evidence_note: string;
+  lifecycle_state: string;
+  resolution_reason_code: string | null;
+  resolved_amount_minor: string | null;
+  adjustment_delta_minor: string | null;
+  deadline_at: string;
+  resolved_at: string | null;
+  created_at: string;
 };
 
 // ─── Vendor ───────────────────────────────────────────────────────────────────
