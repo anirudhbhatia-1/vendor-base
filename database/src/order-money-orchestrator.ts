@@ -295,6 +295,7 @@ export class OrderMoneyOrchestrator {
       tip_minor: string | null;
       allocated_total_minor: string | null;
       refunded_minor: string;
+      refunded_item_minor: string;
       policy_version_reference: string;
       quoted_at: Date;
       wait_minor: string;
@@ -322,7 +323,13 @@ export class OrderMoneyOrchestrator {
               COALESCE((SELECT sum(refund.refund_total_minor)
                           FROM marketplace.refunds refund
                          WHERE refund.source_order_reference = orders.order_reference
-                           AND refund.refund_state = 'SUCCEEDED'), 0)::text AS refunded_minor
+                           AND refund.refund_state = 'SUCCEEDED'), 0)::text AS refunded_minor,
+              -- The goods' share of those refunds: only returned goods come off
+              -- the shop; a refunded delivery fee or tip is the platform's (10.3).
+              COALESCE((SELECT sum(refund.item_minor)
+                          FROM marketplace.refunds refund
+                         WHERE refund.source_order_reference = orders.order_reference
+                           AND refund.refund_state = 'SUCCEEDED'), 0)::text AS refunded_item_minor
          FROM marketplace.vendor_orders orders
          JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
          JOIN marketplace.payment_transactions payment USING(payment_transaction_id)
@@ -436,6 +443,7 @@ export class OrderMoneyOrchestrator {
       payment_transaction_id: parseUuidV7(row.payment_transaction_id),
       source_order_reference: row.order_reference,
       successful_refunds_minor: Number(row.refunded_minor),
+      successful_item_refunds_minor: Number(row.refunded_item_minor),
       vendor_item_minor: Number(row.item_minor ?? '0'),
       vendor_location_id: parseUuidV7(row.vendor_location_id),
       ...(row.partner_user_id ? { partner_user_id: parseUuidV7(row.partner_user_id) } : {}),

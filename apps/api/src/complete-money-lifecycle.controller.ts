@@ -7,8 +7,12 @@ import {
   Inject,
   Param,
   Post,
+  Query,
 } from '@nestjs/common';
-import { CompleteMoneyLifecycleService } from '@neighbourhood-store/database';
+import {
+  CompleteMoneyLifecycleService,
+  type DisputableComponent,
+} from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
@@ -38,6 +42,14 @@ const vendorDispute = RequireAuthorization({
   conceal_resource: true,
   vendor_location_id_param: 'vendor_location_id',
 });
+/** The lines a shop may challenge; an adjustment is argued on the line it changed. */
+const DISPUTABLE_COMPONENTS: readonly DisputableComponent[] = [
+  'ITEM_PROCEEDS',
+  'PAYMENT_FEE',
+  'PLATFORM_FEE',
+  'REFUND',
+  'TAX',
+];
 const resolveDispute = RequireAuthorization({
   admin_scope: { kind: 'GLOBAL' },
   capability: 'admin.vendor_settlement.resolve',
@@ -298,17 +310,12 @@ export class VendorFinanceController {
   async openDispute(@Param('vendor_location_id') id: string, @Body() raw: unknown) {
     const value = object(raw);
     const component = stringField(value, 'disputed_component');
-    if (
-      !['ADJUSTMENT', 'ITEM_PROCEEDS', 'PAYMENT_FEE', 'PLATFORM_FEE', 'REFUND', 'TAX'].includes(
-        component,
-      )
-    )
+    if (!DISPUTABLE_COMPONENTS.includes(component as DisputableComponent))
       throw new BadRequestException();
     try {
       return await this.money.openSettlementDispute({
         context: currentRequestContext(),
-        disputed_component: component as
-          'ADJUSTMENT' | 'ITEM_PROCEEDS' | 'PAYMENT_FEE' | 'PLATFORM_FEE' | 'REFUND' | 'TAX',
+        disputed_component: component as DisputableComponent,
         evidence_note: stringField(value, 'evidence_note'),
         expected_amount_minor: integerField(value, 'expected_amount_minor', 0),
         settlement_id: uuid(stringField(value, 'settlement_id')),
@@ -323,11 +330,17 @@ export class VendorFinanceController {
   @Post('disputes/:dispute_id/withdraw')
   @vendorDispute
   @HttpCode(200)
-  async withdrawDispute(@Param('dispute_id') disputeId: string) {
+  async withdrawDispute(
+    @Param('vendor_location_id') id: string,
+    @Param('dispute_id') disputeId: string,
+  ) {
     try {
+      // The capability was checked for the store in the path; the case must
+      // be that store's, or another store's staff could withdraw it.
       return await this.money.resolveSettlementDispute({
         context: currentRequestContext(),
         resolution: 'WITHDRAWN',
+        vendor_location_id: uuid(id),
         vendor_settlement_dispute_id: uuid(disputeId),
       });
     } catch (error) {
@@ -345,23 +358,38 @@ export class AdminVendorSettlementDisputeController {
     private readonly money: CompleteMoneyLifecycleService,
   ) {}
 
+  /** The queue an operator answers from, overdue cases first (VEN-50, 11.5). */
+  @Get()
+  @resolveDispute
+  async list(@Query('state') state?: string) {
+    if (state !== undefined && !['OPEN', 'RESOLVED', 'WITHDRAWN'].includes(state))
+      throw new BadRequestException();
+    try {
+      return await this.money.listVendorSettlementDisputesForAdmin({
+        context: currentRequestContext(),
+        ...(state ? { state: state as 'OPEN' | 'RESOLVED' | 'WITHDRAWN' } : {}),
+      });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
   @Post(':dispute_id/resolve')
   @resolveDispute
   @HttpCode(200)
   async resolve(@Param('dispute_id') disputeId: string, @Body() raw: unknown) {
     const value = object(raw);
     try {
-      const resolved = await this.money.resolveSettlementDispute({
+      // The decision is money: its adjustment is posted in the same
+      // transaction that records it, so the answer and the books commit
+      // together and nothing else pending rides on this request.
+      return await this.money.resolveSettlementDispute({
         context: currentRequestContext(),
         resolution: 'RESOLVED',
         resolution_reason_code: stringField(value, 'resolution_reason_code'),
         resolved_amount_minor: integerField(value, 'resolved_amount_minor', 0),
         vendor_settlement_dispute_id: uuid(disputeId),
       });
-      // The decision is money: its adjustment reaches the ledger with the
-      // request that made it, not on the worker's next pass.
-      await this.money.postPendingSettlementAdjustments({ context: currentRequestContext() });
-      return resolved;
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();
       translateDomainError(error);

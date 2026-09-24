@@ -10,12 +10,12 @@ import { Pool, type PoolClient } from 'pg';
 import { resolveFinancialPolicy } from './financial-policy.js';
 import {
   LocalFakeMoneyProvider,
-  calculateCommissionAmount,
   type FakeProviderScenario,
   type FinancialPolicy,
   type MoneyProviderAdapter,
   providerOutcome,
 } from './money-policy.js';
+import { divideOrder, OrderDivisionError, type OrderDivision } from './settlement-division.js';
 import { transaction as tx } from './transaction.js';
 
 export class MoneyInputError extends Error {
@@ -382,6 +382,13 @@ export class MoneyLifecycleService {
     readonly payment_transaction_id: UuidV7;
     readonly source_order_reference: string;
     readonly successful_refunds_minor: number;
+    /**
+     * The goods' share of `successful_refunds_minor`. Only returned goods come
+     * off the shop; a refunded delivery fee or tip is the platform's to absorb.
+     * Omitted by callers that cannot tell, in which case every refund is
+     * treated as goods — the division this route made before 10.3.
+     */
+    readonly successful_item_refunds_minor?: number;
     readonly vendor_item_minor: number;
     readonly vendor_location_id: UuidV7;
     readonly completed: boolean;
@@ -398,29 +405,39 @@ export class MoneyLifecycleService {
   }) {
     financeAutomation(input.context);
     const now = input.now ?? new Date();
-    const customerNet =
-      minor(input.customer_captured_minor, 'Captured') -
-      minor(input.successful_refunds_minor, 'Refunds');
-    const remainingItems = Math.max(
-      0,
-      minor(input.vendor_item_minor, 'Vendor items') - input.successful_refunds_minor,
+    const refunds = minor(input.successful_refunds_minor, 'Refunds');
+    const goodsRefunds = Math.min(
+      minor(input.successful_item_refunds_minor ?? refunds, 'Item refunds'),
+      refunds,
     );
-    // Commission is a rate on what the vendor actually supplied, so a refunded
-    // line reduces it rather than being charged for.
-    const vendorFee =
-      input.completed && remainingItems > 0
-        ? calculateCommissionAmount(remainingItems, input.financial_policy.commission_basis_points)
-        : 0;
-    const vendorPayable = remainingItems - vendorFee;
+    const goods = minor(input.vendor_item_minor, 'Vendor items');
     const partnerPayable =
-      input.partner_outbound_minor +
-      input.partner_wait_minor +
-      input.partner_return_minor +
-      input.partner_tip_minor;
-    [partnerPayable, vendorPayable, customerNet].forEach((value) =>
-      minor(value, 'Settlement amount'),
-    );
-    const platform = customerNet - vendorPayable - partnerPayable;
+      minor(input.partner_outbound_minor, 'Partner outbound') +
+      minor(input.partner_wait_minor, 'Partner wait') +
+      minor(input.partner_return_minor, 'Partner return') +
+      minor(input.partner_tip_minor, 'Partner tip');
+    // One division for settlement and for every later re-division (10.3);
+    // commission is a rate on what the vendor actually supplied.
+    let division: OrderDivision;
+    try {
+      division = divideOrder({
+        captured_minor: minor(input.customer_captured_minor, 'Captured'),
+        refunds_minor: refunds,
+        goods_minor: goods,
+        goods_refunds_minor: Math.min(goodsRefunds, goods),
+        partner_payable_minor: partnerPayable,
+        commission_basis_points: input.financial_policy.commission_basis_points,
+        fee_applies: input.completed,
+      });
+    } catch (error) {
+      if (error instanceof OrderDivisionError) throw new MoneyInputError(error.message);
+      throw error;
+    }
+    const customerNet = division.customer_net_minor;
+    const remainingItems = division.remaining_goods_minor;
+    const vendorFee = division.vendor_fee_minor;
+    const vendorPayable = division.vendor_payable_minor;
+    const platform = division.platform_remainder_minor;
     const eligibleAt = new Date(
       now.getTime() + input.financial_policy.settlement_delay_seconds * 1_000,
     );
@@ -435,8 +452,9 @@ export class MoneyLifecycleService {
         `INSERT INTO marketplace.settlements
         (settlement_id,source_order_reference,payment_transaction_id,vendor_location_id,partner_user_id,
          settlement_state,customer_captured_minor,successful_refunds_minor,customer_net_minor,
-         vendor_payable_minor,partner_payable_minor,platform_remainder_minor,eligible_at,created_at,updated_at)
-       VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11,$12,$13,$13) RETURNING *`,
+         vendor_payable_minor,partner_payable_minor,platform_remainder_minor,eligible_at,created_at,updated_at,
+         goods_minor,goods_refunds_at_creation_minor,commission_basis_points,fee_applies)
+       VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,$15,$16,$17) RETURNING *`,
         [
           createUuidV7(),
           text(input.source_order_reference, ORDER, 'Order reference'),
@@ -451,6 +469,10 @@ export class MoneyLifecycleService {
           platform,
           eligibleAt,
           now,
+          goods,
+          Math.min(goodsRefunds, goods),
+          input.financial_policy.commission_basis_points,
+          input.completed,
         ],
       );
       const settlementId = result.rows[0].settlement_id;

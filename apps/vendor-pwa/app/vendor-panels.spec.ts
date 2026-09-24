@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { acceptanceSentence, substitutionRuleSentence } from './orders-panel.js';
-import { statementToCsv } from './payouts-panel.js';
+import { statementFigure, statementToCsv } from './payouts-panel.js';
 import { verticesToWkt } from './service-area-panel.js';
 
 /**
@@ -200,13 +200,13 @@ test('a settlement statement downloads as CSV, not a print dialog', () => {
   // net alone told a shop nothing about a refund that had taken money back.
   assert.equal(
     header,
-    'settlement_reference,lifecycle_state,eligible_at,gross_inr,platform_fee_inr,payment_fee_inr,tax_inr,refund_inr,adjustment_inr,net_inr,payout_state,paid_at',
+    'settlement_reference,lifecycle_state,eligible_at,gross_inr,goods_returned_inr,platform_fee_inr,payment_fee_inr,tax_inr,customer_refund_inr,adjustment_inr,net_inr,payout_state,paid_at',
   );
   // Paise are integers in the ledger; the single division to rupees happens
   // once, for display, and must not lose the last two digits.
   assert.equal(
     row,
-    'SETTLE-1,SETTLED,2026-08-30T00:00:00.000Z,250.00,9.50,0.00,0.00,0.00,0.00,240.50,not scheduled,',
+    'SETTLE-1,SETTLED,2026-08-30T00:00:00.000Z,250.00,0.00,9.50,0.00,0.00,0.00,0.00,240.50,not scheduled,',
   );
 });
 
@@ -215,20 +215,23 @@ test('the statement carries the refund, the adjustment and the payout it has (VE
     vendor_location_id: 'loc',
     pending_minor: 0,
     eligible_minor: 0,
-    settled_minor: 19_000,
+    settled_minor: 19_180,
     settlements: [
       {
         settlement_id: 's-2',
         reference: 'SETTLE-2',
         eligible_at: '2026-09-24T00:00:00.000Z',
         lifecycle_state: 'PAID',
+        // The sale is the goods as sold; ₹45 came back, and the customer's
+        // ₹50 refund also returned a ₹5 delivery fee the shop never bore.
         gross_minor: 25_000,
+        goods_returned_minor: 4_500,
         platform_fee_minor: 950,
         payment_fee_minor: 120,
         tax_minor: 0,
         refund_minor: 5_000,
         adjustment_minor: -250,
-        net_minor: 19_000,
+        net_minor: 19_180,
         payout_state: 'PAID',
         paid_at: '2026-09-25T12:30:00.000Z',
       },
@@ -237,8 +240,32 @@ test('the statement carries the refund, the adjustment and the payout it has (VE
   const row = csv.split('\n')[1];
   assert.equal(
     row,
-    'SETTLE-2,PAID,2026-09-24T00:00:00.000Z,250.00,9.50,1.20,0.00,50.00,-2.50,190.00,PAID,2026-09-25T12:30:00.000Z',
+    'SETTLE-2,PAID,2026-09-24T00:00:00.000Z,250.00,45.00,9.50,1.20,0.00,50.00,-2.50,191.80,PAID,2026-09-25T12:30:00.000Z',
   );
+});
+
+test('a challenge starts from the figure the statement shows for that line (VEN-50)', () => {
+  const entry = {
+    settlement_id: 's-3',
+    reference: 'SETTLE-3',
+    eligible_at: '2026-09-24T00:00:00.000Z',
+    lifecycle_state: 'PENDING',
+    gross_minor: 25_000,
+    goods_returned_minor: 4_500,
+    platform_fee_minor: 1_025,
+    net_minor: 19_475,
+  };
+  // It used to prefill the net payable for every line, so a fee challenge
+  // opened on the shop's whole payout.
+  assert.equal(statementFigure(entry, 'ITEM_PROCEEDS'), 20_500);
+  assert.equal(statementFigure(entry, 'PLATFORM_FEE'), 1_025);
+  assert.equal(statementFigure(entry, 'REFUND'), 4_500);
+  const source = panel('payouts-panel.tsx');
+  assert.ok(
+    source.includes('parseRupeesToMinor('),
+    'the expected amount is parsed as integer paise',
+  );
+  assert.ok(!source.includes('Math.round('), 'no floating-point money in the challenge form');
 });
 
 test('a shop can challenge a settlement line and read its answer (VEN-50)', () => {

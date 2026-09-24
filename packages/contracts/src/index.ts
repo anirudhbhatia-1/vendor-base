@@ -58,6 +58,7 @@ export type {
   VendorOrder,
   VendorOrderSummary,
   VendorSettlementEntry,
+  VendorDisputableComponent,
   VendorSettlementDispute,
   VendorStatement,
   WhoAmI,

@@ -12,13 +12,26 @@ import { MoneyLifecycleService, type FakeProviderScenario } from '@neighbourhood
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
-import { booleanField, integerField, object, stringField, uuid } from './request-fields.js';
+import {
+  booleanField,
+  integerField,
+  object,
+  optionalInteger,
+  stringField,
+  uuid,
+} from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 function scenario(value: Record<string, unknown>): FakeProviderScenario {
   const found = stringField(value, 'provider_scenario');
   if (!['SUCCESS', 'DECLINE', 'UNKNOWN', 'MALFORMED'].includes(found))
     throw new BadRequestException();
   return found as FakeProviderScenario;
+}
+
+/** The goods' share of the refunds, when the caller knows it (10.3). */
+function optionalItemRefunds(value: Record<string, unknown>) {
+  const items = optionalInteger(value, 'successful_item_refunds_minor', 0);
+  return items === undefined ? {} : { successful_item_refunds_minor: items };
 }
 const manageFinance = RequireAuthorization({
   admin_scope: { kind: 'GLOBAL' },
@@ -196,6 +209,7 @@ export class MoneyLifecycleController {
         payment_transaction_id: uuid(stringField(value, 'payment_transaction_id')),
         source_order_reference: stringField(value, 'source_order_reference'),
         successful_refunds_minor: integerField(value, 'successful_refunds_minor', 0),
+        ...optionalItemRefunds(value),
         vendor_item_minor: integerField(value, 'vendor_item_minor', 0),
         vendor_location_id: uuid(stringField(value, 'vendor_location_id')),
       });

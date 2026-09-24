@@ -570,10 +570,16 @@ export type VendorSettlementEntry = {
   /** What the order sold for, the costs against it, and where its payout stands (VEN-48, 10.3). */
   payment_fee_minor?: number;
   tax_minor?: number;
+  /** Goods the customer returned, taken off the shop. */
+  goods_returned_minor?: number;
+  /** Everything refunded to the customer, delivery and tip included; the shop bears only the goods. */
   refund_minor?: number;
   adjustment_minor?: number;
+  /** Adjustments answered after the payout was fixed, paid or recovered separately. */
+  adjustment_outstanding_minor?: number;
   payout_state?: string | null;
   paid_at?: string | null;
+  /** The goods as sold, before any return. */
   gross_minor: number;
   platform_fee_minor: number;
   net_minor: number;
@@ -587,10 +593,18 @@ export type VendorStatement = {
   settlements: readonly VendorSettlementEntry[];
 };
 
+/** The settlement lines a shop may challenge (VEN-50). */
+export type VendorDisputableComponent =
+  'ITEM_PROCEEDS' | 'PAYMENT_FEE' | 'PLATFORM_FEE' | 'REFUND' | 'TAX';
+
 /** A settlement line a shop has challenged (VEN-50, 10.3). */
 export type VendorSettlementDispute = {
   vendor_settlement_dispute_id: string;
   settlement_id: string;
+  vendor_location_id?: string;
+  applied_to_settlement?: boolean | null;
+  /** Set on the operator's queue: an open case past its seven-day answer. */
+  overdue?: boolean;
   source_order_reference: string;
   disputed_component: string;
   disputed_amount_minor: string;

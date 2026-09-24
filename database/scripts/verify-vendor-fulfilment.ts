@@ -17,6 +17,7 @@ import { CatalogueProductService } from '../src/catalogue-products.js';
 import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
 import {
   MoneyAuthorizationError,
+  MoneyInputError,
   MoneyLifecycleService,
   MoneyNotFoundError,
   MoneyStateError,
@@ -4818,14 +4819,29 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         settlement_id: string;
         vendor_payable: string;
         platform_remainder: string;
+        goods: string | null;
+        fee: string;
       }>(
         `SELECT settlement_id, vendor_payable_minor::text AS vendor_payable,
-                platform_remainder_minor::text AS platform_remainder
-           FROM marketplace.settlements WHERE source_order_reference=$1`,
+                platform_remainder_minor::text AS platform_remainder,
+                goods_minor::text AS goods,
+                (SELECT COALESCE(sum(amount_minor),0)::text FROM marketplace.settlement_lines line
+                  WHERE line.settlement_id=settlement.settlement_id
+                    AND line.component='PLATFORM_FEE') AS fee
+           FROM marketplace.settlements settlement WHERE source_order_reference=$1`,
         [referenceA],
       );
       const settlementA = beforeRedivision.rows[0];
       check(settlementA !== undefined, 'The delivered order has no settlement to re-divide');
+      // The settlement keeps what it was divided from (0111): the goods as
+      // sold, so a later refund divides from the same inputs.
+      check(
+        settlementA.goods !== null &&
+          Number(settlementA.goods) - Number(settlementA.fee) ===
+            Number(settlementA.vendor_payable),
+        `The settlement did not keep the goods it was divided from (${JSON.stringify(settlementA)})`,
+      );
+      const goodsA = Number(settlementA.goods);
       const redivided = await completeMoney.redivideRefundedSettlements({
         context: systemContext(systemActorId),
         now: new Date(now.getTime() + 90_000),
@@ -4851,14 +4867,12 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       );
       const after = afterRedivision.rows[0];
       // The shop keeps the goods' money less what came back; the commission
-      // follows, because it is a rate on what was actually supplied.
-      const expectedProceeds =
-        Number(settlementA.vendor_payable) -
-        REFUND_ITEM_MINOR +
-        calculateCommissionAmount(
-          REFUND_ITEM_MINOR,
-          SYNTHETIC_FINANCIAL_POLICY.commission_basis_points,
-        );
+      // is recalculated on what it kept, at the rate the order was sold at.
+      const feeAfterReturn = calculateCommissionAmount(
+        goodsA - REFUND_ITEM_MINOR,
+        SYNTHETIC_FINANCIAL_POLICY.commission_basis_points,
+      );
+      const expectedProceeds = goodsA - REFUND_ITEM_MINOR - feeAfterReturn;
       check(
         redivided === 1 &&
           Number(after?.vendor_payable) === expectedProceeds &&
@@ -4880,7 +4894,10 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         `The re-division ran twice or left the books unbalanced (${redividedAgain})`,
       );
 
-      // The shop reads the refund and the payout state on its own statement.
+      // The shop reads the sale, the return and the payout state on its own
+      // statement, and they reconcile: the sale less the goods returned less
+      // the fee is what it is paid. The "sale" used to be already net of the
+      // return and shown beside it.
       const statementAfter = await completeMoney.vendorStatement({
         context: vendorContext(storeA.ownerUserId),
         vendor_location_id: storeA.locationId,
@@ -4888,27 +4905,31 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       const lineAfter = statementAfter.settlements.find((entry) => entry.reference === referenceA);
       check(
         lineAfter !== undefined &&
+          lineAfter.gross_minor === goodsA &&
+          lineAfter.goods_returned_minor === REFUND_ITEM_MINOR &&
           lineAfter.refund_minor === REFUND_ITEM_MINOR &&
           lineAfter.net_minor === expectedProceeds &&
-          lineAfter.gross_minor - lineAfter.platform_fee_minor === lineAfter.net_minor,
+          lineAfter.gross_minor - lineAfter.goods_returned_minor - lineAfter.platform_fee_minor ===
+            lineAfter.net_minor,
         `The shop's statement does not show the refund that changed its money (${JSON.stringify(lineAfter)})`,
       );
 
       // VEN-50: the shop challenges the line, an operator answers at a
       // different figure, and the answer is money — the failure 9.10 found
-      // on the partner's side, here proved not to have been repeated.
+      // on the partner's side, here proved not to have been repeated. The
+      // figure recorded is the one the statement shows for the goods paid.
+      const goodsPaid = goodsA - REFUND_ITEM_MINOR;
       const disputed = await completeMoney.openSettlementDispute({
         context: vendorContext(storeA.ownerUserId),
         disputed_component: 'ITEM_PROCEEDS',
         evidence_note: 'The returned pack was resold, so this refund should not be ours.',
-        expected_amount_minor: expectedProceeds + 1_000,
+        expected_amount_minor: goodsPaid + 1_000,
         settlement_id: parseUuidV7(settlementA.settlement_id),
         vendor_location_id: storeA.locationId,
       });
       check(
-        Number(disputed.disputed_amount_minor) === expectedProceeds &&
-          disputed.lifecycle_state === 'OPEN',
-        `The challenge did not record the figure on the settlement (${JSON.stringify(disputed)})`,
+        Number(disputed.disputed_amount_minor) === goodsPaid && disputed.lifecycle_state === 'OPEN',
+        `The challenge did not record the figure on the statement (${JSON.stringify(disputed)})`,
       );
       await rejects(
         () =>
@@ -4916,12 +4937,41 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
             context: vendorContext(storeA.ownerUserId),
             disputed_component: 'ITEM_PROCEEDS',
             evidence_note: 'Again.',
-            expected_amount_minor: expectedProceeds + 2_000,
+            expected_amount_minor: goodsPaid + 2_000,
             settlement_id: parseUuidV7(settlementA.settlement_id),
             vendor_location_id: storeA.locationId,
           }),
         MoneyStateError,
         'One settlement line took two open challenges at once',
+      );
+      // The goods paid and the goods returned are one amount seen from two
+      // sides; two open cases over it could each be paid.
+      await rejects(
+        () =>
+          completeMoney.openSettlementDispute({
+            context: vendorContext(storeA.ownerUserId),
+            disputed_component: 'REFUND',
+            evidence_note: 'The same return, from the other side.',
+            expected_amount_minor: 0,
+            settlement_id: parseUuidV7(settlementA.settlement_id),
+            vendor_location_id: storeA.locationId,
+          }),
+        MoneyStateError,
+        'The goods paid and the goods returned took two open challenges at once',
+      );
+      // An adjustment is argued on the line it changed, not as a line itself.
+      await rejects(
+        () =>
+          completeMoney.openSettlementDispute({
+            context: vendorContext(storeA.ownerUserId),
+            disputed_component: 'ADJUSTMENT',
+            evidence_note: 'Challenging an answer.',
+            expected_amount_minor: 1,
+            settlement_id: parseUuidV7(settlementA.settlement_id),
+            vendor_location_id: storeA.locationId,
+          }),
+        MoneyInputError,
+        'An adjustment was taken as a settlement line to challenge',
       );
       await rejects(
         () =>
@@ -4951,14 +5001,41 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         MoneyNotFoundError,
         'A shop challenged another store’s settlement under its own location',
       );
+      // Withdrawing is checked against the store the route names: another
+      // store's staff cannot withdraw this store's case through their own.
+      await rejects(
+        () =>
+          completeMoney.resolveSettlementDispute({
+            context: vendorContext(storeB.ownerUserId),
+            resolution: 'WITHDRAWN',
+            vendor_location_id: storeB.locationId,
+            vendor_settlement_dispute_id: parseUuidV7(disputed.vendor_settlement_dispute_id),
+          }),
+        MoneyNotFoundError,
+        'Another store withdrew this store’s challenge through its own route',
+      );
+      // The operator finds the case in a queue rather than by an id only the
+      // database held.
+      const disputeQueue = await completeMoney.listVendorSettlementDisputesForAdmin({
+        context: adminContext(adminId),
+        state: 'OPEN',
+      });
+      check(
+        disputeQueue.disputes.some(
+          (row) => row.vendor_settlement_dispute_id === disputed.vendor_settlement_dispute_id,
+        ),
+        'The operator’s queue does not list the shop’s open challenge',
+      );
       const resolvedDispute = await completeMoney.resolveSettlementDispute({
         context: adminContext(adminId),
         resolution: 'RESOLVED',
         resolution_reason_code: 'RETURNED_STOCK_RESOLD',
-        resolved_amount_minor: expectedProceeds + 1_000,
+        resolved_amount_minor: goodsPaid + 1_000,
         vendor_settlement_dispute_id: parseUuidV7(disputed.vendor_settlement_dispute_id),
         now: new Date(now.getTime() + 92_000),
       });
+      // The answer posts in its own transaction: nothing is left for the
+      // sweep, and the route no longer sweeps anyone else's adjustments.
       const postedAdjustments = await completeMoney.postPendingSettlementAdjustments({
         context: systemContext(systemActorId),
         now: new Date(now.getTime() + 93_000),
@@ -4977,11 +5054,12 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
       );
       check(
         resolvedDispute.lifecycle_state === 'RESOLVED' &&
-          postedAdjustments === 1 &&
+          resolvedDispute.applied_to_settlement === true &&
+          postedAdjustments === 0 &&
           Number(disputeOutcome.rows[0]?.delta) === 1_000 &&
           disputeOutcome.rows[0]?.ledger !== null &&
           Number(disputeOutcome.rows[0]?.payable) === expectedProceeds + 1_000,
-        `A resolved challenge did not move the money on the settlement (${JSON.stringify(disputeOutcome.rows[0])})`,
+        `A resolved challenge did not move the money on the settlement (${JSON.stringify({ postedAdjustments, ...disputeOutcome.rows[0] })})`,
       );
       // Replayed directly, not only through the sweep that filters on the
       // stamp: a posting that is idempotent only because its caller filters
@@ -5001,25 +5079,117 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         !directReplay.posted && directReplay.replayed,
         'A replayed vendor adjustment posted a second time',
       );
-      const postedAgain = await completeMoney.postPendingSettlementAdjustments({
-        context: systemContext(systemActorId),
-        now: new Date(now.getTime() + 95_000),
+
+      // A refund of the delivery fee alone takes nothing off the shop and
+      // charges it no commission: the first re-division recomputed the fee
+      // from whatever policy was in force, and a dispute's answer was undone
+      // by the next division. The platform absorbs it; the answer stands.
+      const DELIVERY_REFUND_MINOR = 100;
+      const deliveryAllocation = await pool.query<{ delivery: string }>(
+        `SELECT allocation.delivery_minor::text AS delivery
+           FROM marketplace.payment_allocations allocation
+          WHERE allocation.source_order_reference=$1`,
+        [referenceA],
+      );
+      const deliveryCharged = Number(deliveryAllocation.rows[0]?.delivery ?? 0);
+      check(
+        deliveryCharged >= DELIVERY_REFUND_MINOR,
+        'The delivered order carried no delivery fee to refund',
+      );
+      const deliveryRefund = await money.proposeRefund({
+        command_reference: 'SYNTH-CMD-REFUND-DELIVERY-0001',
+        context: adminContext(financeProposerId),
+        delivery_minor: DELIVERY_REFUND_MINOR,
+        discount_reversal_minor: 0,
+        item_minor: 0,
+        payment_transaction_id: parseUuidV7(paymentTransactionId),
+        provider_operation_reference: 'SYNTH-REF-DELIVERY-0001',
+        provider_scenario: 'SUCCESS',
+        source_order_reference: referenceA as string,
+        tax_minor: 0,
+        tip_minor: 0,
+        trigger_code: 'PROVIDER_EXCEPTION',
       });
+      await money.approveAndSubmitRefund({
+        command_reference: 'SYNTH-CMD-REFUND-DELIVERY-APPROVE',
+        context: adminContext(financeApproverId),
+        expected_version: deliveryRefund.version,
+        refund_id: deliveryRefund.refund_id,
+      });
+      const beforeDelivery = await pool.query<{ platform: string }>(
+        'SELECT platform_remainder_minor::text AS platform FROM marketplace.settlements WHERE settlement_id=$1',
+        [settlementA.settlement_id],
+      );
+      const deliveryRedivided = await completeMoney.redivideRefundedSettlements({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 96_000),
+      });
+      const afterDelivery = await pool.query<{ payable: string; platform: string; fee: string }>(
+        `SELECT vendor_payable_minor::text AS payable,
+                platform_remainder_minor::text AS platform,
+                (SELECT COALESCE(sum(amount_minor),0)::text FROM marketplace.settlement_lines line
+                  WHERE line.settlement_id=settlement.settlement_id
+                    AND line.component='PLATFORM_FEE') AS fee
+           FROM marketplace.settlements settlement WHERE settlement_id=$1`,
+        [settlementA.settlement_id],
+      );
+      check(
+        deliveryRedivided === 1 &&
+          Number(afterDelivery.rows[0]?.payable) === expectedProceeds + 1_000 &&
+          Number(afterDelivery.rows[0]?.fee) === feeAfterReturn &&
+          Number(afterDelivery.rows[0]?.platform) ===
+            Number(beforeDelivery.rows[0]?.platform) - DELIVERY_REFUND_MINOR,
+        `A delivery-only refund moved the shop's money or its fee (${JSON.stringify(afterDelivery.rows[0])})`,
+      );
+
+      // A fee answered lower pays the shop more: the first version added the
+      // difference whatever the line was, so winning a fee challenge took
+      // money from the shop.
+      const feeDispute = await completeMoney.openSettlementDispute({
+        context: vendorContext(storeA.ownerUserId),
+        disputed_component: 'PLATFORM_FEE',
+        evidence_note: 'The commission on the returned pack was not refunded in full.',
+        expected_amount_minor: feeAfterReturn - 100,
+        settlement_id: parseUuidV7(settlementA.settlement_id),
+        vendor_location_id: storeA.locationId,
+      });
+      check(
+        Number(feeDispute.disputed_amount_minor) === feeAfterReturn,
+        `A fee challenge did not record the fee line the statement shows (${JSON.stringify(feeDispute)})`,
+      );
+      const feeAnswer = await completeMoney.resolveSettlementDispute({
+        context: adminContext(adminId),
+        resolution: 'RESOLVED',
+        resolution_reason_code: 'FEE_OVERCHARGED',
+        resolved_amount_minor: feeAfterReturn - 100,
+        vendor_settlement_dispute_id: parseUuidV7(feeDispute.vendor_settlement_dispute_id),
+        now: new Date(now.getTime() + 97_000),
+      });
+      const afterFee = await pool.query<{ payable: string }>(
+        'SELECT vendor_payable_minor::text AS payable FROM marketplace.settlements WHERE settlement_id=$1',
+        [settlementA.settlement_id],
+      );
+      check(
+        feeAnswer.adjustment_delta_minor === 100 &&
+          Number(afterFee.rows[0]?.payable) === expectedProceeds + 1_100,
+        `A fee answered lower did not pay the shop more (${JSON.stringify({ delta: feeAnswer.adjustment_delta_minor, ...afterFee.rows[0] })})`,
+      );
+
       const balanceAfterDispute = await completeMoney.ledgerTrialBalance({
         context: adminContext(adminId),
       });
-      check(
-        postedAgain === 0 && balanceAfterDispute.balanced,
-        'The dispute adjustment posted twice or left the books unbalanced',
-      );
+      check(balanceAfterDispute.balanced, 'The dispute adjustments left the books unbalanced');
       const readBack = await completeMoney.listSettlementDisputes({
         context: vendorContext(storeA.ownerUserId),
         vendor_location_id: storeA.locationId,
       });
+      const proceedsCase = readBack.disputes.find(
+        (row) => row.vendor_settlement_dispute_id === disputed.vendor_settlement_dispute_id,
+      );
       check(
-        readBack.disputes.length === 1 &&
-          readBack.disputes[0]?.lifecycle_state === 'RESOLVED' &&
-          Number(readBack.disputes[0]?.adjustment_delta_minor) === 1_000,
+        readBack.disputes.length === 2 &&
+          proceedsCase?.lifecycle_state === 'RESOLVED' &&
+          Number(proceedsCase.adjustment_delta_minor) === 1_000,
         `The shop cannot read its challenge back with what it changed (${JSON.stringify(readBack.disputes)})`,
       );
 
@@ -5127,8 +5297,9 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         context: customerContext(customerId),
       });
       check(
+        // The receipt was read before the delivery-fee refund above.
         Number(receiptAfterImport.refunded_total_minor) ===
-          Number(receiptAfter.refunded_total_minor),
+          Number(receiptAfter.refunded_total_minor) + DELIVERY_REFUND_MINOR,
         'Importing a provider statement changed the customer receipt',
       );
 

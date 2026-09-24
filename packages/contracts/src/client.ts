@@ -30,6 +30,7 @@ import type {
   CheckoutGroupReceipt,
   CustomerOrderGroup,
   CustomerReceipt,
+  VendorDisputableComponent,
   VendorSettlementDispute,
   VendorStatement,
   PartnerStatement,
@@ -917,7 +918,7 @@ export function createApiClient(options: ApiClientOptions) {
           vendorLocationId: string,
           body: {
             settlement_id: string;
-            disputed_component: string;
+            disputed_component: VendorDisputableComponent;
             expected_amount_minor: number;
             evidence_note: string;
           },
@@ -1149,6 +1150,26 @@ export function createApiClient(options: ApiClientOptions) {
     },
 
     admin: {
+      /** Shops' challenges of their settlement lines, overdue first (VEN-50, 11.5). */
+      vendorSettlementDisputes: {
+        list: (state?: 'OPEN' | 'RESOLVED' | 'WITHDRAWN') =>
+          r<{ disputes: readonly VendorSettlementDispute[] }>(
+            `/admin/finance/v2/vendor-settlement-disputes${state ? `?state=${state}` : ''}`,
+          ),
+        resolve: (
+          disputeId: string,
+          body: { resolution_reason_code: string; resolved_amount_minor: number },
+        ) =>
+          r<
+            Omit<VendorSettlementDispute, 'adjustment_delta_minor'> & {
+              adjustment_delta_minor?: number;
+            }
+          >(`/admin/finance/v2/vendor-settlement-disputes/${disputeId}/resolve`, {
+            method: 'POST',
+            json: body,
+          }),
+      },
+
       vendorOnboarding: {
         get: (caseId: string) => r<Record<string, unknown>>(`/admin/vendor-onboarding/${caseId}`),
 

@@ -1,7 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import type { VendorSettlementDispute, VendorStatement } from '@neighbourhood-store/contracts';
+import type {
+  VendorDisputableComponent,
+  VendorSettlementDispute,
+  VendorSettlementEntry,
+  VendorStatement,
+} from '@neighbourhood-store/contracts';
+import { parseRupeesToMinor } from '@neighbourhood-store/ui';
 import { vendorApiClient } from './authenticated-api';
 
 /**
@@ -14,34 +20,38 @@ import { vendorApiClient } from './authenticated-api';
  * only.
  */
 export function statementToCsv(statement: VendorStatement): string {
-  // Sale, platform fee, payment costs, refund/adjustment, tax and payout
-  // status, per order (VEN-48): the columns the catalogue asks for, from the
-  // settlement's own policy-versioned lines.
+  // Sale, goods returned, platform fee, payment costs, tax, the customer's
+  // refund, adjustments and payout status, per order (VEN-48): the sale is
+  // the goods as sold, so sale − returned − fee − payment − tax ± adjustment
+  // is what the shop is paid.
   const header = [
     'settlement_reference',
     'lifecycle_state',
     'eligible_at',
     'gross_inr',
+    'goods_returned_inr',
     'platform_fee_inr',
     'payment_fee_inr',
     'tax_inr',
-    'refund_inr',
+    'customer_refund_inr',
     'adjustment_inr',
     'net_inr',
     'payout_state',
     'paid_at',
   ];
+  const rupees = (minor: number) => (minor / 100).toFixed(2);
   const rows = statement.settlements.map((entry) => [
     entry.reference,
     entry.lifecycle_state,
     entry.eligible_at,
-    (entry.gross_minor / 100).toFixed(2),
-    (entry.platform_fee_minor / 100).toFixed(2),
-    ((entry.payment_fee_minor ?? 0) / 100).toFixed(2),
-    ((entry.tax_minor ?? 0) / 100).toFixed(2),
-    ((entry.refund_minor ?? 0) / 100).toFixed(2),
-    ((entry.adjustment_minor ?? 0) / 100).toFixed(2),
-    (entry.net_minor / 100).toFixed(2),
+    rupees(entry.gross_minor),
+    rupees(entry.goods_returned_minor ?? 0),
+    rupees(entry.platform_fee_minor),
+    rupees(entry.payment_fee_minor ?? 0),
+    rupees(entry.tax_minor ?? 0),
+    rupees(entry.refund_minor ?? 0),
+    rupees(entry.adjustment_minor ?? 0),
+    rupees(entry.net_minor),
     entry.payout_state ?? 'not scheduled',
     entry.paid_at ?? '',
   ]);
@@ -63,11 +73,35 @@ function downloadStatement(statement: VendorStatement): void {
 }
 
 /** The lines a shop may challenge, in the words it reads them by (VEN-50). */
-const DISPUTABLE = [
-  ['ITEM_PROCEEDS', 'What we were paid for the goods'],
+const DISPUTABLE: readonly (readonly [VendorDisputableComponent, string])[] = [
+  ['ITEM_PROCEEDS', 'What we were paid for the goods we kept'],
   ['PLATFORM_FEE', 'The platform fee'],
-  ['REFUND', 'A refund taken off this order'],
-] as const;
+  ['REFUND', 'Goods taken back for a return'],
+];
+
+/**
+ * The figure the statement shows for a line — the same one the server
+ * records when the challenge is opened — so the form starts from what the
+ * shop is disputing rather than from an unrelated total.
+ */
+export function statementFigure(
+  entry: VendorSettlementEntry,
+  component: VendorDisputableComponent,
+): number {
+  const returned = entry.goods_returned_minor ?? 0;
+  switch (component) {
+    case 'ITEM_PROCEEDS':
+      return entry.gross_minor - returned;
+    case 'PLATFORM_FEE':
+      return entry.platform_fee_minor;
+    case 'REFUND':
+      return returned;
+    case 'PAYMENT_FEE':
+      return entry.payment_fee_minor ?? 0;
+    case 'TAX':
+      return entry.tax_minor ?? 0;
+  }
+}
 
 export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string }) {
   const [statement, setStatement] = useState<VendorStatement | null>(null);
@@ -77,8 +111,8 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
   // The line being challenged, if any: the settlement, which part of it, the
   // figure the shop expected, and why.
   const [challenge, setChallenge] = useState<{
-    settlementId: string;
-    component: string;
+    entry: VendorSettlementEntry;
+    component: VendorDisputableComponent;
     expected: string;
     note: string;
   } | null>(null);
@@ -103,9 +137,15 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
 
   async function sendChallenge() {
     if (!challenge) return;
-    const rupees = Number(challenge.expected);
-    if (!Number.isFinite(rupees) || rupees < 0) {
-      setMessage('Enter the amount you expected, in rupees.');
+    // Parsed as digits, never as a float: `Number('') * 100` sent an empty
+    // field as a real claim of ₹0, and `1.005 * 100` is not 100.5.
+    const expectedMinor = parseRupeesToMinor(challenge.expected);
+    if (expectedMinor === null) {
+      setMessage('Enter the amount you expected in rupees, like 245 or 245.50.');
+      return;
+    }
+    if (!challenge.note.trim()) {
+      setMessage('Say what is wrong so finance can check it.');
       return;
     }
     setBusy(true);
@@ -114,8 +154,8 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
       await client.vendor.finance.openDispute(vendorLocationId, {
         disputed_component: challenge.component,
         evidence_note: challenge.note,
-        expected_amount_minor: Math.round(rupees * 100),
-        settlement_id: challenge.settlementId,
+        expected_amount_minor: expectedMinor,
+        settlement_id: challenge.entry.settlement_id,
       });
       setChallenge(null);
       setMessage('Sent. Finance will answer this within seven days.');
@@ -181,13 +221,17 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
                 <div key={s.settlement_id}>
                   <strong>{s.reference}</strong>
                   <span>
-                    Sale {fmt(s.gross_minor)} · fee {fmt(s.platform_fee_minor)}
-                    {s.refund_minor ? ` · refunded ${fmt(s.refund_minor)}` : ''}
+                    Sale {fmt(s.gross_minor)}
+                    {s.goods_returned_minor ? ` · returned −${fmt(s.goods_returned_minor)}` : ''}
+                    {` · fee −${fmt(s.platform_fee_minor)}`}
+                    {s.payment_fee_minor ? ` · payment −${fmt(s.payment_fee_minor)}` : ''}
+                    {s.tax_minor ? ` · tax −${fmt(s.tax_minor)}` : ''}
                     {s.adjustment_minor
                       ? ` · adjusted ${s.adjustment_minor > 0 ? '+' : '−'}${fmt(Math.abs(s.adjustment_minor))}`
                       : ''}
-                    {s.tax_minor ? ` · tax ${fmt(s.tax_minor)}` : ''}
-                    {s.payment_fee_minor ? ` · payment ${fmt(s.payment_fee_minor)}` : ''}
+                    {s.adjustment_outstanding_minor
+                      ? ` (${fmt(Math.abs(s.adjustment_outstanding_minor))} settled separately)`
+                      : ''}
                   </span>
                   <em>
                     {fmt(s.net_minor)}{' '}
@@ -200,9 +244,9 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
                     onClick={() =>
                       setChallenge({
                         component: 'ITEM_PROCEEDS',
-                        expected: (s.net_minor / 100).toFixed(2),
+                        entry: s,
+                        expected: (statementFigure(s, 'ITEM_PROCEEDS') / 100).toFixed(2),
                         note: '',
-                        settlementId: s.settlement_id,
                       })
                     }
                   >
@@ -222,9 +266,14 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
                 Which part
                 <select
                   value={challenge.component}
-                  onChange={(event) =>
-                    setChallenge({ ...challenge, component: event.target.value })
-                  }
+                  onChange={(event) => {
+                    const component = event.target.value as VendorDisputableComponent;
+                    setChallenge({
+                      ...challenge,
+                      component,
+                      expected: (statementFigure(challenge.entry, component) / 100).toFixed(2),
+                    });
+                  }}
                 >
                   {DISPUTABLE.map(([id, label]) => (
                     <option key={id} value={id}>
@@ -275,7 +324,7 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
                         ? 'You withdrew this.'
                         : `Settled at ${fmt(Number(dispute.resolved_amount_minor ?? '0'))}${
                             dispute.adjustment_delta_minor
-                              ? `, ${Number(dispute.adjustment_delta_minor) > 0 ? 'paying you' : 'taking back'} ${fmt(Math.abs(Number(dispute.adjustment_delta_minor)))}`
+                              ? `, ${Number(dispute.adjustment_delta_minor) > 0 ? 'paying you' : 'taking back'} ${fmt(Math.abs(Number(dispute.adjustment_delta_minor)))}${dispute.applied_to_settlement === false ? ' separately from this payout' : ''}`
                               : ', changing nothing'
                           }.`}
                   </span>
