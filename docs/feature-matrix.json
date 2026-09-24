@@ -8330,8 +8330,8 @@
     "total_features": 354,
     "launch_features": 309,
     "by_status": {
-      "backend_only": 14,
-      "complete_local_synthetic": 266,
+      "backend_only": 13,
+      "complete_local_synthetic": 267,
       "excluded": 15,
       "gated": 7,
       "later": 23,
@@ -8346,8 +8346,8 @@
       "Launch": 309
     },
     "launch_by_status": {
-      "backend_only": 14,
-      "complete_local_synthetic": 266,
+      "backend_only": 13,
+      "complete_local_synthetic": 267,
       "not_started": 10,
       "partial_workflow": 17,
       "ui_only": 2
