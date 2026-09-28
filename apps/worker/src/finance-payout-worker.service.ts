@@ -1,15 +1,16 @@
-import { createDatabasePool } from '@neighbourhood-store/database';
 import {
+  Inject,
   Injectable,
   type OnApplicationBootstrap,
   type OnApplicationShutdown,
 } from '@nestjs/common';
 import {
-  CompleteMoneyLifecycleService,
-  LocalFakeMoneyProvider,
   runDurableJobBatch,
+  type CompleteMoneyLifecycleService,
+  type DomainServices,
   type DurableJob,
 } from '@neighbourhood-store/database';
+import { DOMAIN_SERVICES } from './tokens.js';
 import {
   createAuthenticatedActor,
   createRequestContext,
@@ -39,21 +40,13 @@ export class FinancePayoutWorkerService implements OnApplicationBootstrap, OnApp
   #running = false;
   #stopping = false;
 
-  constructor() {
+  constructor(@Inject(DOMAIN_SERVICES) services: DomainServices) {
     const config = loadRuntimeConfig();
     this.#shutdownGraceMs = config.shutdownGraceMs;
-    this.#pool = createDatabasePool({
-      application_name: 'neighbourhood-store-finance-worker',
-      connectionString: config.databaseUrl,
-      max: 4,
-    });
-    this.#money = new CompleteMoneyLifecycleService({
-      connection_string: config.databaseUrl,
-      provider: new LocalFakeMoneyProvider({
-        clearing_account_reference: config.providerClearingAccountReference,
-        webhook_key: config.paymentWebhookKey,
-      }),
-    });
+    // The shared composition: the same complete-money service and pool the
+    // operations worker and the API use, closed by the module at shutdown.
+    this.#pool = services.pool;
+    this.#money = services.completeMoney;
     const queueOptions = {
       connection: { url: config.valkeyUrl, maxRetriesPerRequest: null },
       prefix: config.queuePrefix,
@@ -107,7 +100,8 @@ export class FinancePayoutWorkerService implements OnApplicationBootstrap, OnApp
       logger: workerLogger,
     });
     await this.#queue.close();
-    await Promise.all([this.#pool.end(), this.#money.close()]);
+    // The pool and service belong to the module's composition, which closes
+    // after every provider's hook has finished.
   }
 
   async #poll(): Promise<void> {

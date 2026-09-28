@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -141,12 +141,12 @@ export class OrderMonitorService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly fulfilment: VendorFulfilmentService;
     readonly money: MoneyLifecycleService;
     readonly assignments: AssignmentCustodyService;
   }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-order-monitor',
       max: 6,
     });
@@ -156,7 +156,7 @@ export class OrderMonitorService {
   }
 
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

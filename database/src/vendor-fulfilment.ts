@@ -1,5 +1,5 @@
 import { deriveCheckoutGroupState } from './checkout-group-state.js';
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { randomInt } from 'node:crypto';
 import {
   createUuidV7,
@@ -1199,6 +1199,7 @@ export class VendorFulfilmentService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly inventory: InventoryReservationService;
     /**
      * Material the collection and delivery codes are keyed with. Absent, the
@@ -1207,8 +1208,7 @@ export class VendorFulfilmentService {
      */
     readonly hash_key?: string;
   }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-vendor-fulfilment',
       max: 8,
     });
@@ -1224,7 +1224,7 @@ export class VendorFulfilmentService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

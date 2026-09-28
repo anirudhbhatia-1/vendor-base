@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -88,15 +88,14 @@ function requiredRow<T>(row: T | undefined, message: string): T {
 
 export class PartnerWaitPolicyService {
   readonly #pool: Pool;
-  constructor(input: { connection_string: string }) {
-    this.#pool = createDatabasePool({
+  constructor(input: { connection_string: string; pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'partner-wait-policy',
-      connectionString: input.connection_string,
       max: 6,
     });
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

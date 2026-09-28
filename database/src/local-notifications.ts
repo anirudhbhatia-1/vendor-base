@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -53,19 +53,19 @@ export class LocalNotificationService {
   readonly #smsProvider: SmsProvider;
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly push_provider?: PushProvider;
     readonly sms_provider?: SmsProvider;
   }) {
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'local-notifications',
-      connectionString: input.connection_string,
       max: 6,
     });
     this.#pushProvider = input.push_provider ?? new LocalDeterministicMessageProvider();
     this.#smsProvider = input.sms_provider ?? new LocalDeterministicMessageProvider();
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async enqueue(input: {

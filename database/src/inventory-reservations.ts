@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -553,10 +553,9 @@ export async function commitReservationsLocked(
 
 export class InventoryReservationService {
   readonly #pool: Pool;
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-inventory-reservations',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 12,
       query_timeout: 30_000,
@@ -564,7 +563,7 @@ export class InventoryReservationService {
     });
   }
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async createItem(input: {

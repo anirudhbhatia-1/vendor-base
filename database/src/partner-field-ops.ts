@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -200,16 +200,15 @@ function projectException(row: Record<string, unknown>): ExceptionEvent {
 export class PartnerFieldOpsService {
   readonly #pool: Pool;
 
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-partner-field-ops',
       max: 8,
     });
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   // -----------------------------------------------------------------------

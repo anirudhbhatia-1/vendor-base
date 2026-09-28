@@ -1,32 +1,32 @@
-import { createDatabasePool } from '@neighbourhood-store/database';
 import {
+  Inject,
   Injectable,
   type OnApplicationBootstrap,
   type OnApplicationShutdown,
 } from '@nestjs/common';
 import {
-  AssignmentCustodyService,
-  AdminControlPlaneService,
-  SupportCaseService,
-  GroupedCheckoutService,
-  InventoryReservationService,
-  LocalProtectedObjectStorage,
-  PartnerAvailabilityService,
-  PartnerLifecycleService,
-  PartnerFieldOpsService,
-  PartnerWaitPolicyService,
-  LocalNotificationService,
-  LocalFakeMoneyProvider,
-  CompleteMoneyLifecycleService,
-  ConfigurationAdminService,
-  DeliveryDispatchOrchestrator,
-  MoneyLifecycleService,
-  OrderMoneyOrchestrator,
-  VendorFulfilmentService,
-  VendorOnboardingService,
+  type AssignmentCustodyService,
+  type AdminControlPlaneService,
+  type DomainServices,
+  type SupportCaseService,
+  type GroupedCheckoutService,
+  type InventoryReservationService,
+  type PartnerAvailabilityService,
+  type PartnerLifecycleService,
+  type PartnerFieldOpsService,
+  type PartnerWaitPolicyService,
+  type LocalNotificationService,
+  type CompleteMoneyLifecycleService,
+  type ConfigurationAdminService,
+  type DeliveryDispatchOrchestrator,
+  type MoneyLifecycleService,
+  type OrderMoneyOrchestrator,
+  type VendorFulfilmentService,
+  type VendorOnboardingService,
   dispatchOutboxBatch,
   processInboxEvent,
 } from '@neighbourhood-store/database';
+import { DOMAIN_SERVICES } from './tokens.js';
 import {
   createAuthenticatedActor,
   createRequestContext,
@@ -98,60 +98,29 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
    */
   #stopping = false;
 
-  constructor() {
+  constructor(@Inject(DOMAIN_SERVICES) services: DomainServices) {
     const config = loadRuntimeConfig();
     this.#shutdownGraceMs = config.shutdownGraceMs;
-    const { databaseUrl } = config;
-    this.#pool = createDatabasePool({
-      application_name: 'neighbourhood-store-operations-worker',
-      connectionString: databaseUrl,
-      max: 4,
-    });
-    this.#inventory = new InventoryReservationService({ connection_string: databaseUrl });
-    this.#adminControl = new AdminControlPlaneService({ connection_string: databaseUrl });
-    this.#supportCases = new SupportCaseService({ connection_string: databaseUrl });
-    this.#assignments = new AssignmentCustodyService({ connection_string: databaseUrl });
-    // One provider for every service that moves money here: the checkout
-    // that authorises, the money service that captures, the complete
-    // lifecycle that voids. Each used to build its own, and only the
-    // checkout's carried the configured clearing account and webhook key.
-    const provider = new LocalFakeMoneyProvider({
-      clearing_account_reference: config.providerClearingAccountReference,
-      webhook_key: config.paymentWebhookKey,
-    });
-    this.#checkout = new GroupedCheckoutService({ connection_string: databaseUrl, provider });
-    this.#partnerField = new PartnerFieldOpsService({ connection_string: databaseUrl });
-    this.#partnerWait = new PartnerWaitPolicyService({ connection_string: databaseUrl });
-    this.#notifications = new LocalNotificationService({ connection_string: databaseUrl });
-    this.#configuration = new ConfigurationAdminService({ connection_string: databaseUrl });
-    this.#availability = new PartnerAvailabilityService({ connection_string: databaseUrl });
-    this.#partnerLifecycle = new PartnerLifecycleService({ connection_string: databaseUrl });
-    this.#money = new MoneyLifecycleService({ connection_string: databaseUrl, provider });
-    this.#completeMoney = new CompleteMoneyLifecycleService({
-      connection_string: databaseUrl,
-      provider,
-    });
-    this.#orderMoney = new OrderMoneyOrchestrator({
-      complete_money: this.#completeMoney,
-      connection_string: databaseUrl,
-      money: this.#money,
-    });
-    this.#dispatch = new DeliveryDispatchOrchestrator({
-      assignments: this.#assignments,
-      availability: this.#availability,
-      connection_string: databaseUrl,
-    });
-    this.#fulfilment = new VendorFulfilmentService({
-      connection_string: databaseUrl,
-      inventory: this.#inventory,
-    });
-    this.#onboarding = new VendorOnboardingService({
-      connection_string: databaseUrl,
-      storage: new LocalProtectedObjectStorage({
-        grant_key: config.objectStorageGrantKey,
-        root_directory: config.objectStorageRoot,
-      }),
-    });
+    // The shared composition (composition.ts): the same wiring the API runs,
+    // on one pool this module — not this service — closes at shutdown.
+    this.#pool = services.pool;
+    this.#inventory = services.inventory;
+    this.#adminControl = services.adminControl;
+    this.#supportCases = services.supportCases;
+    this.#assignments = services.assignments;
+    this.#checkout = services.checkout;
+    this.#partnerField = services.partnerField;
+    this.#partnerWait = services.partnerWait;
+    this.#notifications = services.notifications;
+    this.#configuration = services.configuration;
+    this.#availability = services.availability;
+    this.#partnerLifecycle = services.partnerLifecycle;
+    this.#money = services.money;
+    this.#completeMoney = services.completeMoney;
+    this.#orderMoney = services.orderMoney;
+    this.#dispatch = services.dispatch;
+    this.#fulfilment = services.fulfilment;
+    this.#onboarding = services.onboarding;
     const connection = { url: config.valkeyUrl, maxRetriesPerRequest: null } as const;
     const queueOptions = { connection, prefix: config.queuePrefix } as const;
     this.#queue = new Queue<OperationsJob>(QUEUE_NAME, {
@@ -217,26 +186,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     });
     await this.#queueEvents.close();
     await this.#queue.close();
-    await Promise.all([
-      this.#pool.end(),
-      this.#assignments.close(),
-      this.#partnerLifecycle.close(),
-      this.#adminControl.close(),
-      this.#supportCases.close(),
-      this.#checkout.close(),
-      this.#inventory.close(),
-      this.#partnerField.close(),
-      this.#partnerWait.close(),
-      this.#notifications.close(),
-      this.#configuration.close(),
-      this.#fulfilment.close(),
-      this.#onboarding.close(),
-      this.#availability.close(),
-      this.#dispatch.close(),
-      this.#money.close(),
-      this.#completeMoney.close(),
-      this.#orderMoney.close(),
-    ]);
+    // The domain services and their shared pool belong to the module's
+    // composition, which closes after every provider's hook has finished.
   }
 
   async #handleQueueJob(job: Job<OperationsJob>): Promise<void> {
@@ -310,9 +261,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         session_id: this.#workerId,
       }),
     });
-    // Each domain service owns a small pool. Run maintenance claims in a
-    // bounded sequence so a worker bootstrap cannot exhaust a hosted
-    // database's connection cap before idle pool connections are released.
+    // Maintenance claims run in a bounded sequence on the one shared pool, so
+    // a tick's concurrency stays the pool's, not the sum of every service's.
     //
     // Each pass is isolated: they all ran inside one try/catch with outbox
     // dispatch last, so a single failing pass — an expiry sweep, say — skipped

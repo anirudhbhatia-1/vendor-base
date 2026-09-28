@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { createHash } from 'node:crypto';
 import {
   createUuidV7,
@@ -212,17 +212,17 @@ export class CatalogueProductService {
   readonly #storage: ProtectedObjectStorage | undefined;
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly storage?: ProtectedObjectStorage;
   }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-catalogue-products',
       max: 8,
     });
     this.#storage = input.storage;
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async uploadImage(input: {

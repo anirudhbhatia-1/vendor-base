@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { createHash } from 'node:crypto';
 import {
   createUuidV7,
@@ -346,13 +346,13 @@ export class GroupedCheckoutService {
   readonly #routing: RoutingService;
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly provider?: MoneyProviderAdapter;
     /** Road distance and travel time; without one, every route is a labelled estimate. */
     readonly routing?: RoutingService;
     readonly webhook_key?: string;
   }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-grouped-checkout',
       max: 12,
     });
@@ -364,7 +364,7 @@ export class GroupedCheckoutService {
     this.#routing = input.routing ?? new RoutingService({ pool: this.#pool });
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async createQuote(input: {

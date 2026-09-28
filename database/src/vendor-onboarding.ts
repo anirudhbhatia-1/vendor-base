@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -363,12 +363,12 @@ export class VendorOnboardingService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly storage: ProtectedObjectStorage;
   }) {
     this.#storage = input.storage;
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-vendor-onboarding',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 8,
       query_timeout: 30_000,
@@ -377,7 +377,7 @@ export class VendorOnboardingService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async #create(input: {

@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -53,16 +53,15 @@ function admin(context: RequestContext): UuidV7 {
 export class GatedCapabilityService {
   readonly #pool: Pool;
 
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-gated-capabilities',
-      connectionString: input.connection_string,
       max: 4,
     });
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async list(input: {

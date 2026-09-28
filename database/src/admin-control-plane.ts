@@ -1,5 +1,5 @@
 import { deriveCheckoutGroupState } from './checkout-group-state.js';
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { createHash } from 'node:crypto';
 import {
   createUuidV7,
@@ -61,15 +61,14 @@ function financeSeverity(kind: string, amountMinor: number): WorkSeverity {
 
 export class AdminControlPlaneService {
   readonly #pool: Pool;
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-admin-control',
       max: 10,
     });
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
   /**
    * The operator's work, ranked (11.1).

@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { enrolCustomerInTransaction } from './customer-enrolment.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import {
@@ -136,6 +136,7 @@ export class IdentitySessionService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly otp_service: OtpIdentityService;
     readonly token_hash_key: string;
     readonly token_generator?: () => string;
@@ -146,9 +147,8 @@ export class IdentitySessionService {
     this.#otp = input.otp_service;
     this.#tokenHashKey = input.token_hash_key;
     this.#tokenGenerator = input.token_generator ?? (() => randomBytes(32).toString('base64url'));
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-identity-sessions',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 8,
       query_timeout: 30_000,
@@ -157,7 +157,7 @@ export class IdentitySessionService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   #newToken(prefix: 'nsa' | 'nsr'): string {

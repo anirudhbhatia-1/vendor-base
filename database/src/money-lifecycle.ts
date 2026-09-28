@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -108,17 +108,17 @@ export class MoneyLifecycleService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly provider?: MoneyProviderAdapter;
   }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-money',
       max: 12,
     });
     this.#provider = input.provider ?? new LocalFakeMoneyProvider();
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

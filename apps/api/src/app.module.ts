@@ -1,5 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
-import { Module } from '@nestjs/common';
+import { Inject, Module, type OnApplicationShutdown } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { HealthController } from './health.controller.js';
 import { apiLogger } from './json-logger.js';
@@ -8,46 +7,9 @@ import { RequestExceptionFilter } from './request-exception.filter.js';
 import { RequestReferenceInterceptor } from './request-reference.interceptor.js';
 import { loadRuntimeConfig, RUNTIME_CONFIG } from './runtime-config.js';
 import {
-  IdentityAccessService,
-  IdentityPreferencesService,
-  IdentitySessionService,
-  IdentityPasswordService,
-  LocalProtectedObjectStorage,
-  type ProtectedObjectStorage,
-  SupabaseProtectedObjectStorage,
-  OtpIdentityService,
-  VendorOnboardingService,
-  VendorPublicationService,
-  InventoryReservationService,
-  AssignmentCustodyService,
-  MoneyLifecycleService,
-  CatalogueFreshnessModerationService,
-  CatalogueProductService,
-  CustomerAddressService,
-  CustomerDiscoveryService,
-  CustomerCartService,
-  GroupedCheckoutService,
-  VendorStaffService,
-  VendorFulfilmentService,
-  PartnerLifecycleService,
-  PartnerFieldOpsService,
-  CompleteMoneyLifecycleService,
-  AdminControlPlaneService,
-  OrderMonitorService,
-  SupportCaseService,
-  LocaleRegistryService,
-  PartnerAvailabilityService,
-  PartnerWaitPolicyService,
-  LocalNotificationService,
-  LocalFakeMoneyProvider,
-  RoutingService,
-  createDatabasePool,
-  createRoutingService,
-  ConfigurationAdminService,
-  AdminOnboardingService,
-  VendorSettingsService,
-  GatedCapabilityService,
-  VendorNetworkService,
+  createDomainServices,
+  createProtectedObjectStorage,
+  type DomainServices,
 } from '@neighbourhood-store/database';
 import { OtpController } from './otp.controller.js';
 import { OtpLifecycleService } from './otp-lifecycle.service.js';
@@ -88,7 +50,7 @@ import {
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
 import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
-import { ADMIN_CONTROL_PLANE, ORDER_MONITOR, SUPPORT_CASES } from './tokens.js';
+import { ADMIN_CONTROL_PLANE, DOMAIN_SERVICES, ORDER_MONITOR, SUPPORT_CASES } from './tokens.js';
 import { AdminControlPlaneController } from './admin-control-plane.controller.js';
 import { AdminOrderMonitorController } from './admin-order-monitor.controller.js';
 import {
@@ -169,6 +131,58 @@ import {
   MapsConfigController,
   PublicDiscoveryController,
 } from './customer-catalogue.controller.js';
+
+/**
+ * Each controller token resolves to its member of the one composition
+ * (composition.ts): the token indirection stays so controllers and their
+ * specs keep their inject sites; only the construction moved.
+ */
+const memberProviders: ReadonlyMap<symbol, (services: DomainServices) => unknown> = new Map<
+  symbol,
+  (services: DomainServices) => unknown
+>([
+  [ACCESS_IDENTITY, (services) => services.access],
+  [ADMIN_CONTROL_PLANE, (services) => services.adminControl],
+  [ADMIN_ONBOARDING, (services) => services.adminOnboarding],
+  [ASSIGNMENT_CUSTODY, (services) => services.assignments],
+  [CATALOGUE_FRESHNESS_MODERATION, (services) => services.catalogueModeration],
+  [CATALOGUE_PRODUCTS, (services) => services.catalogueProducts],
+  [COMPLETE_MONEY_LIFECYCLE, (services) => services.completeMoney],
+  [CONFIGURATION_ADMIN, (services) => services.configuration],
+  [CUSTOMER_ADDRESSES, (services) => services.customerAddresses],
+  [CUSTOMER_CART, (services) => services.cart],
+  [CUSTOMER_DISCOVERY, (services) => services.discovery],
+  [GATED_CAPABILITIES, (services) => services.gatedCapabilities],
+  [GROUPED_CHECKOUT, (services) => services.checkout],
+  [IDENTITY_PASSWORD, (services) => services.password],
+  [IDENTITY_PREFERENCES, (services) => services.preferences],
+  [INVENTORY_RESERVATIONS, (services) => services.inventory],
+  [LOCALE_REGISTRY, (services) => services.localeRegistry],
+  [LOCAL_NOTIFICATIONS, (services) => services.notifications],
+  [MONEY_LIFECYCLE, (services) => services.money],
+  [ORDER_MONITOR, (services) => services.orderMonitor],
+  [OTP_IDENTITY, (services) => services.otp],
+  [PARTNER_AVAILABILITY, (services) => services.availability],
+  [PARTNER_FIELD_OPS, (services) => services.partnerField],
+  [PARTNER_LIFECYCLE, (services) => services.partnerLifecycle],
+  [PARTNER_WAIT_POLICY, (services) => services.partnerWait],
+  [PROTECTED_OBJECT_STORAGE, (services) => services.storage],
+  [ROUTING, (services) => services.routing],
+  [SESSION_IDENTITY, (services) => services.sessions],
+  [SUPPORT_CASES, (services) => services.supportCases],
+  [VENDOR_FULFILMENT, (services) => services.fulfilment],
+  [VENDOR_NETWORK, (services) => services.vendorNetwork],
+  [VENDOR_ONBOARDING, (services) => services.onboarding],
+  [VENDOR_PUBLICATION, (services) => services.publication],
+  [VENDOR_SETTINGS, (services) => services.vendorSettings],
+  [VENDOR_STAFF, (services) => services.vendorStaff],
+]);
+
+const serviceProviders = [...memberProviders].map(([token, select]) => ({
+  provide: token,
+  inject: [DOMAIN_SERVICES],
+  useFactory: select,
+}));
 
 @Module({
   controllers: [
@@ -257,309 +271,37 @@ import {
       useFactory: loadRuntimeConfig,
     },
     {
-      provide: OTP_IDENTITY,
+      // Every domain service, on one shared pool. The worker builds this same
+      // composition, so the two processes cannot drift apart in wiring, and
+      // the process stays inside a hosted pooler's connection cap.
+      // LifecycleService closes it on shutdown.
+      provide: DOMAIN_SERVICES,
       inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new OtpIdentityService({
-          connection_string: config.databaseUrl,
-          hash_key: config.otpHashKey,
-        }),
-    },
-    {
-      provide: SESSION_IDENTITY,
-      inject: [RUNTIME_CONFIG, OTP_IDENTITY],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, otpService: OtpIdentityService) =>
-        new IdentitySessionService({
-          connection_string: config.databaseUrl,
-          otp_service: otpService,
-          token_hash_key: config.sessionTokenHashKey,
-        }),
-    },
-    {
-      provide: ACCESS_IDENTITY,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new IdentityAccessService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: IDENTITY_PREFERENCES,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new IdentityPreferencesService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: PROTECTED_OBJECT_STORAGE,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>): ProtectedObjectStorage => {
-        if (config.objectStorageDriver === 'filesystem') {
-          return new LocalProtectedObjectStorage({
-            grant_key: config.objectStorageGrantKey,
-            root_directory: config.objectStorageRoot,
-          });
-        }
-        // loadRuntimeConfig has already refused this driver without buckets; the
-        // check is here so a future edit cannot reach the client with none.
-        if (!config.objectStorageBuckets || !config.supabaseUrl || !config.supabaseServiceRoleKey) {
-          throw new Error('The supabase object-storage driver needs its buckets, URL and key');
-        }
-        return new SupabaseProtectedObjectStorage({
-          buckets: config.objectStorageBuckets,
-          grant_key: config.objectStorageGrantKey,
-          storage: createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
-            auth: { persistSession: false },
-          }).storage,
-        });
-      },
-    },
-    {
-      provide: VENDOR_ONBOARDING,
-      inject: [RUNTIME_CONFIG, PROTECTED_OBJECT_STORAGE],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, storage: ProtectedObjectStorage) =>
-        new VendorOnboardingService({ connection_string: config.databaseUrl, storage }),
-    },
-    {
-      provide: VENDOR_PUBLICATION,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new VendorPublicationService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: INVENTORY_RESERVATIONS,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new InventoryReservationService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: CATALOGUE_FRESHNESS_MODERATION,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new CatalogueFreshnessModerationService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: CATALOGUE_PRODUCTS,
-      inject: [RUNTIME_CONFIG, PROTECTED_OBJECT_STORAGE],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, storage: ProtectedObjectStorage) =>
-        new CatalogueProductService({
-          connection_string: config.databaseUrl,
-          storage,
-        }),
-    },
-    {
-      provide: CUSTOMER_ADDRESSES,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new CustomerAddressService({ connection_string: config.databaseUrl }),
-    },
-    {
-      // One road-routing service for every module that needs a distance or a
-      // travel time (D-17): Mapbox with the injected token, or the labelled
-      // estimate. The cache lives in the same database.
-      provide: ROUTING,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>): RoutingService =>
-        createRoutingService({
-          routing: config.routing,
-          pool: createDatabasePool({
-            connectionString: config.databaseUrl,
-            application_name: 'neighbourhood-store-routing',
-            max: 4,
-          }),
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>): DomainServices =>
+        createDomainServices({
+          application_name: 'neighbourhood-store-api',
+          config,
           log: (event, fields) => apiLogger.event(event, fields),
-        }),
-    },
-    {
-      provide: CUSTOMER_DISCOVERY,
-      inject: [RUNTIME_CONFIG, ROUTING],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, routing: RoutingService) =>
-        new CustomerDiscoveryService({ connection_string: config.databaseUrl, routing }),
-    },
-    {
-      provide: CUSTOMER_CART,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new CustomerCartService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: GROUPED_CHECKOUT,
-      inject: [RUNTIME_CONFIG, ROUTING],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, routing: RoutingService) =>
-        new GroupedCheckoutService({
-          connection_string: config.databaseUrl,
-          provider: new LocalFakeMoneyProvider({
-            clearing_account_reference: config.providerClearingAccountReference,
-            webhook_key: config.paymentWebhookKey,
-          }),
-          routing,
-        }),
-    },
-    {
-      provide: VENDOR_STAFF,
-      inject: [RUNTIME_CONFIG, ACCESS_IDENTITY],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>, access: IdentityAccessService) =>
-        new VendorStaffService({
-          access,
-          connection_string: config.databaseUrl,
-          hash_key: config.otpHashKey,
-        }),
-    },
-    {
-      provide: VENDOR_FULFILMENT,
-      inject: [RUNTIME_CONFIG, INVENTORY_RESERVATIONS],
-      useFactory: (
-        config: ReturnType<typeof loadRuntimeConfig>,
-        inventory: InventoryReservationService,
-      ) =>
-        new VendorFulfilmentService({
-          connection_string: config.databaseUrl,
-          inventory,
-          // Collection and delivery codes are keyed under the OTP material,
-          // with their own domain label (8.6).
-          hash_key: config.otpHashKey,
-        }),
-    },
-    {
-      provide: PARTNER_LIFECYCLE,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new PartnerLifecycleService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: PARTNER_FIELD_OPS,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new PartnerFieldOpsService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: LOCALE_REGISTRY,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new LocaleRegistryService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: PARTNER_AVAILABILITY,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new PartnerAvailabilityService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: PARTNER_WAIT_POLICY,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new PartnerWaitPolicyService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: LOCAL_NOTIFICATIONS,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new LocalNotificationService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: CONFIGURATION_ADMIN,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new ConfigurationAdminService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: ASSIGNMENT_CUSTODY,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new AssignmentCustodyService({
-          connection_string: config.databaseUrl,
-          hash_key: config.otpHashKey,
-        }),
-    },
-    {
-      provide: MONEY_LIFECYCLE,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new MoneyLifecycleService({
-          connection_string: config.databaseUrl,
-          provider: new LocalFakeMoneyProvider({
-            clearing_account_reference: config.providerClearingAccountReference,
-            webhook_key: config.paymentWebhookKey,
+          otp_hash_key: config.otpHashKey,
+          session_token_hash_key: config.sessionTokenHashKey,
+          storage: createProtectedObjectStorage({
+            config,
+            ...(config.supabaseServiceRoleKey
+              ? { supabase_service_role_key: config.supabaseServiceRoleKey }
+              : {}),
+            ...(config.supabaseUrl ? { supabase_url: config.supabaseUrl } : {}),
           }),
         }),
     },
-    {
-      provide: COMPLETE_MONEY_LIFECYCLE,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new CompleteMoneyLifecycleService({
-          connection_string: config.databaseUrl,
-          provider: new LocalFakeMoneyProvider({
-            clearing_account_reference: config.providerClearingAccountReference,
-            webhook_key: config.paymentWebhookKey,
-          }),
-        }),
-    },
-    {
-      provide: ADMIN_CONTROL_PLANE,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new AdminControlPlaneService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: ORDER_MONITOR,
-      inject: [RUNTIME_CONFIG, VENDOR_FULFILMENT, MONEY_LIFECYCLE, ASSIGNMENT_CUSTODY],
-      useFactory: (
-        config: ReturnType<typeof loadRuntimeConfig>,
-        fulfilment: VendorFulfilmentService,
-        money: MoneyLifecycleService,
-        assignments: AssignmentCustodyService,
-      ) =>
-        new OrderMonitorService({
-          assignments,
-          connection_string: config.databaseUrl,
-          fulfilment,
-          money,
-        }),
-    },
-    {
-      provide: SUPPORT_CASES,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new SupportCaseService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: IDENTITY_PASSWORD,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new IdentityPasswordService({
-          connection_string: config.databaseUrl,
-          hash_key: config.otpHashKey,
-        }),
-    },
-    {
-      provide: ADMIN_ONBOARDING,
-      inject: [RUNTIME_CONFIG, IDENTITY_PASSWORD],
-      useFactory: (
-        config: ReturnType<typeof loadRuntimeConfig>,
-        passwords: IdentityPasswordService,
-      ) =>
-        new AdminOnboardingService({
-          connection_string: config.databaseUrl,
-          hash_key: config.otpHashKey,
-          password_service: passwords,
-        }),
-    },
-    {
-      provide: VENDOR_SETTINGS,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new VendorSettingsService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: VENDOR_NETWORK,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new VendorNetworkService({ connection_string: config.databaseUrl }),
-    },
-    {
-      provide: GATED_CAPABILITIES,
-      inject: [RUNTIME_CONFIG],
-      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
-        new GatedCapabilityService({ connection_string: config.databaseUrl }),
-    },
+    ...serviceProviders,
   ],
 })
-export class AppModule {}
+export class AppModule implements OnApplicationShutdown {
+  constructor(@Inject(DOMAIN_SERVICES) private readonly services: DomainServices) {}
+
+  // Runs after every provider's own shutdown hook (Nest calls the module
+  // class last), so nothing is still using the shared pool when it ends.
+  async onApplicationShutdown(): Promise<void> {
+    await this.services.close();
+  }
+}

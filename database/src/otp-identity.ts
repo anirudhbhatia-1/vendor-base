@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import {
   createUuidV7,
@@ -141,6 +141,7 @@ export class OtpIdentityService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly hash_key: string;
     readonly code_generator?: () => string;
   }) {
@@ -149,9 +150,8 @@ export class OtpIdentityService {
     this.#hashKey = input.hash_key;
     this.#codeGenerator =
       input.code_generator ?? (() => randomInt(0, 1_000_000).toString().padStart(6, '0'));
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-otp-identity',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 8,
       query_timeout: 30_000,
@@ -160,7 +160,7 @@ export class OtpIdentityService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async requestChallenge(input: {

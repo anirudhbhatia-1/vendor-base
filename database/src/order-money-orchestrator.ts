@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -41,19 +41,19 @@ export class OrderMoneyOrchestrator {
   constructor(input: {
     readonly complete_money: CompleteMoneyLifecycleService;
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly money: MoneyLifecycleService;
   }) {
     this.#complete = input.complete_money;
     this.#money = input.money;
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-order-money',
-      connectionString: input.connection_string,
       max: 4,
     });
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

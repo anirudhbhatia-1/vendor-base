@@ -18,7 +18,52 @@ const SAFE_NETWORK_CODES = new Set([
  * this package is shared by both composition roots.
  */
 export function createDatabasePool(config: PoolConfig): Pool {
-  const pool = new Pool(config);
+  return instrumentPool(new Pool(config));
+}
+
+/** Pools created by resolveServicePool, which releaseServicePool may end. */
+const ownedPools = new WeakSet<Pool>();
+
+export interface ServicePoolInput {
+  readonly connection_string?: string;
+  /**
+   * A pool shared by a composition root. When present the service uses it and
+   * never ends it: the root that created the pool ends it. Sharing one pool
+   * across the domain services keeps a process within a hosted pooler's
+   * connection cap, which ~35 per-service pools exceed.
+   */
+  readonly pool?: Pool;
+}
+
+/**
+ * Resolves the pool a domain service runs on: the injected shared pool when a
+ * composition root provides one, otherwise a pool of the service's own with
+ * the given defaults, which the service releases in close().
+ */
+export function resolveServicePool(
+  input: ServicePoolInput,
+  defaults: Omit<PoolConfig, 'connectionString'>,
+): Pool {
+  if (input.pool) return input.pool;
+  if (!input.connection_string) {
+    throw new Error('A domain service needs a connection_string or a shared pool');
+  }
+  const pool = createDatabasePool({ ...defaults, connectionString: input.connection_string });
+  ownedPools.add(pool);
+  return pool;
+}
+
+/**
+ * Ends a pool the calling service owns; a no-op for an injected shared pool,
+ * and for a pool already released by a service it was forwarded to.
+ */
+export async function releaseServicePool(pool: Pool): Promise<void> {
+  if (!ownedPools.has(pool)) return;
+  ownedPools.delete(pool);
+  await pool.end();
+}
+
+function instrumentPool(pool: Pool): Pool {
   const report = (event: string, error: Error & { readonly code?: string }) => {
     const code = error.code ?? 'DATABASE_POOL_ERROR';
     process.stderr.write(

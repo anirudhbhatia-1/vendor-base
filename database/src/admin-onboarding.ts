@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { createHmac } from 'node:crypto';
 import {
   createUuidV7,
@@ -477,6 +477,7 @@ export class AdminOnboardingService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly hash_key: string;
     readonly password_service: IdentityPasswordService;
   }) {
@@ -485,9 +486,8 @@ export class AdminOnboardingService {
     }
     this.#hashKey = input.hash_key;
     this.#passwords = input.password_service;
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-admin-onboarding',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 4,
       query_timeout: 30_000,
@@ -496,7 +496,7 @@ export class AdminOnboardingService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async provisionVendor(input: ProvisionVendorInput): Promise<ProvisionVendorResult> {

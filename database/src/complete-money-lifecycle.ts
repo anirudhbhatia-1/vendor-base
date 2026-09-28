@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 /* eslint-disable @typescript-eslint/no-explicit-any -- SQL projections are validated at this persistence boundary. */
 import { createHash } from 'node:crypto';
 import {
@@ -305,21 +305,22 @@ export class CompleteMoneyLifecycleService {
   readonly #money: MoneyLifecycleService;
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly provider?: MoneyProviderAdapter;
   }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-complete-money',
       max: 12,
     });
     this.#provider = input.provider ?? new LocalFakeMoneyProvider();
     this.#money = new MoneyLifecycleService({
       connection_string: input.connection_string,
+      pool: this.#pool,
       provider: this.#provider,
     });
   }
   async close() {
-    await Promise.all([this.#pool.end(), this.#money.close()]);
+    await Promise.all([releaseServicePool(this.#pool), this.#money.close()]);
   }
 
   async voidAuthorization(input: {

@@ -2,7 +2,7 @@ import {
   availabilityFreshness,
   type AvailabilityFreshness,
 } from './catalogue-freshness-moderation.js';
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { RoutingService, type RouteSource } from './routing.js';
 import {
   createUuidV7,
@@ -297,9 +297,12 @@ export class CustomerDiscoveryService {
   readonly #pool: Pool;
 
   readonly #routing: RoutingService;
-  constructor(input: { readonly connection_string: string; readonly routing?: RoutingService }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+  constructor(input: {
+    readonly connection_string: string;
+    readonly pool?: Pool;
+    readonly routing?: RoutingService;
+  }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-customer-discovery',
       max: 8,
     });
@@ -307,7 +310,7 @@ export class CustomerDiscoveryService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

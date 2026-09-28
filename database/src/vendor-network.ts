@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -325,10 +325,9 @@ function locationRecord(row: Record<string, unknown>): VendorLocationRecord {
 export class VendorNetworkService {
   readonly #pool: Pool;
 
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-vendor-network',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 8,
       query_timeout: 30_000,
@@ -337,7 +336,7 @@ export class VendorNetworkService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

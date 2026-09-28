@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import { createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import {
@@ -66,14 +66,17 @@ export class IdentityPasswordService {
   readonly #pool: Pool;
   readonly #hashKey: string;
 
-  constructor(input: { readonly connection_string: string; readonly hash_key: string }) {
+  constructor(input: {
+    readonly connection_string: string;
+    readonly pool?: Pool;
+    readonly hash_key: string;
+  }) {
     if (input.hash_key.length < 32) {
       throw new PasswordInputError('Password hash key must contain at least 32 characters');
     }
     this.#hashKey = input.hash_key;
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-identity-password',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 8,
       query_timeout: 30_000,
@@ -82,7 +85,7 @@ export class IdentityPasswordService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

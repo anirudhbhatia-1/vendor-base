@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -165,12 +165,12 @@ export class VendorStaffService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     readonly access: IdentityAccessService;
     readonly hash_key: string;
   }) {
     if (!input.hash_key) throw new Error('VendorStaffService requires a hash key');
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-vendor-staff',
       max: 8,
     });
@@ -213,7 +213,7 @@ export class VendorStaffService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

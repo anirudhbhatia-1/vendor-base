@@ -57,3 +57,4 @@ export * from './correction-impact.js';
 export * from './order-monitor.js';
 export * from './admin-capabilities.js';
 export * from './support-cases.js';
+export * from './composition.js';

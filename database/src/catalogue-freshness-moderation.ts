@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -130,10 +130,9 @@ interface ModerationRow {
 
 export class CatalogueFreshnessModerationService {
   readonly #pool: Pool;
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-catalogue-freshness-moderation',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 8,
       query_timeout: 30_000,
@@ -141,7 +140,7 @@ export class CatalogueFreshnessModerationService {
     });
   }
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async listCustomerAvailability(input: {

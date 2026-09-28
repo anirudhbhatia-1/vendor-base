@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -169,10 +169,9 @@ function profile(row: ProfileRow): CustomerProfile {
 export class IdentityPreferencesService {
   readonly #pool: Pool;
 
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-identity-preferences',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 8,
       query_timeout: 30_000,
@@ -181,7 +180,7 @@ export class IdentityPreferencesService {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async getProfile(userId: UuidV7): Promise<CustomerProfile> {

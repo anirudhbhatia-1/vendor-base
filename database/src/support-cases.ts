@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -290,16 +290,15 @@ const CASE_COLUMNS = new Set([
 export class SupportCaseService {
   readonly #pool: Pool;
 
-  constructor(input: { readonly connection_string: string }) {
-    this.#pool = createDatabasePool({
-      connectionString: input.connection_string,
+  constructor(input: { readonly connection_string: string; readonly pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-support-cases',
       max: 6,
     });
   }
 
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /** First response by severity (D-09); medium reads the configured P2 acknowledgement. */

@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -47,15 +47,14 @@ export const PARTNER_DAY_TIMEZONE = 'Asia/Kolkata';
 
 export class PartnerAvailabilityService {
   readonly #pool: Pool;
-  constructor(i: { connection_string: string }) {
-    this.#pool = createDatabasePool({
-      connectionString: i.connection_string,
+  constructor(i: { connection_string: string; pool?: Pool }) {
+    this.#pool = resolveServicePool(i, {
       application_name: 'partner-availability',
       max: 6,
     });
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
   async set(input: {
     context: RequestContext;

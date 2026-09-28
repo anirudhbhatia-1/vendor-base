@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -649,12 +649,12 @@ export class AssignmentCustodyService {
 
   constructor(input: {
     readonly connection_string: string;
+    readonly pool?: Pool;
     /** Material the delivery codes are keyed with (8.6); absent, none can be minted or checked. */
     readonly hash_key?: string;
   }) {
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-assignment-custody',
-      connectionString: input.connection_string,
       connectionTimeoutMillis: 5_000,
       max: 12,
     });
@@ -669,7 +669,7 @@ export class AssignmentCustodyService {
   }
 
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   /**

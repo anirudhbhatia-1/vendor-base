@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import type { RequestContext, UuidV7 } from '@neighbourhood-store/domain-types';
 import { parseUuidV7 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
@@ -49,18 +49,18 @@ export class DeliveryDispatchOrchestrator {
     readonly assignments: AssignmentCustodyService;
     readonly availability: PartnerAvailabilityService;
     readonly connection_string: string;
+    readonly pool?: Pool;
   }) {
     this.#assignments = input.assignments;
     this.#availability = input.availability;
-    this.#pool = createDatabasePool({
+    this.#pool = resolveServicePool(input, {
       application_name: 'neighbourhood-store-delivery-dispatch',
-      connectionString: input.connection_string,
       max: 4,
     });
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
 
   async dispatchPlacedOrder(input: {

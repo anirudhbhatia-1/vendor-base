@@ -1,4 +1,4 @@
-import { createDatabasePool } from './database-pool.js';
+import { releaseServicePool, resolveServicePool } from './database-pool.js';
 import {
   createUuidV7,
   parseRequestId,
@@ -861,15 +861,14 @@ export async function snapshotConfigurationVersions(
 
 export class ConfigurationAdminService {
   readonly #pool: Pool;
-  constructor(input: { connection_string: string }) {
-    this.#pool = createDatabasePool({
+  constructor(input: { connection_string: string; pool?: Pool }) {
+    this.#pool = resolveServicePool(input, {
       application_name: 'configuration-admin',
-      connectionString: input.connection_string,
       max: 6,
     });
   }
   async close() {
-    await this.#pool.end();
+    await releaseServicePool(this.#pool);
   }
   async list(input: { limit?: number; status?: ConfigurationStatus }) {
     const limit = requireInteger(input.limit ?? 100, 'Configuration list limit', 1, 200);
