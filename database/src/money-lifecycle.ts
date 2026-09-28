@@ -888,8 +888,11 @@ export class MoneyLifecycleService {
                   AS order_total
            FROM marketplace.refunds
           WHERE payment_transaction_id=$1
-            AND refund_state IN ('PENDING_APPROVAL','SUBMITTED','SUCCEEDED','FAILED_REVIEW')`,
-        [input.payment_transaction_id, sourceOrder],
+            AND refund_state IN ('PENDING_APPROVAL','SUBMITTED','SUCCEEDED','FAILED_REVIEW')
+            -- A proposal whose approval window has passed can never be
+            -- approved, so it no longer holds its share of the cap.
+            AND NOT (refund_state='PENDING_APPROVAL' AND approval_expires_at<=$3)`,
+        [input.payment_transaction_id, sourceOrder, now],
       );
       if (Number(previous.rows[0]?.total ?? 0) + total > Number(payment.rows[0].amount_minor)) {
         throw new MoneyInputError('Refund exceeds the remaining captured amount');

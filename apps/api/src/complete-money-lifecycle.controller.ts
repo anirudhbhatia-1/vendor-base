@@ -63,6 +63,26 @@ const resolveDispute = RequireAuthorization({
   conceal_resource: true,
 });
 
+/** A correction's replacement entries, as the preview and the proposal read them. */
+function correctionEntries(raw: readonly unknown[]) {
+  return raw.map((rawEntry) => {
+    const entry = object(rawEntry);
+    const partnerUserId = optionalUuid(entry, 'partner_user_id');
+    const vendorLocationId = optionalUuid(entry, 'vendor_location_id');
+    return {
+      account_reference: stringField(entry, 'account_reference'),
+      component: stringField(entry, 'component'),
+      credit_minor: integerField(entry, 'credit_minor', 0),
+      debit_minor: integerField(entry, 'debit_minor', 0),
+      ...(partnerUserId ? { partner_user_id: partnerUserId } : {}),
+      ...(entry['source_order_reference'] === undefined
+        ? {}
+        : { source_order_reference: stringField(entry, 'source_order_reference') }),
+      ...(vendorLocationId ? { vendor_location_id: vendorLocationId } : {}),
+    };
+  });
+}
+
 function optionalPeriod(body: Record<string, unknown>) {
   const start = optionalDate(body, 'period_start');
   const end = optionalDate(body, 'period_end');
@@ -196,6 +216,54 @@ export class CompleteMoneyAdminController {
     }
   }
 
+  /** What a correction would move, before it is proposed (10.6). */
+  @Post('corrections/preview')
+  @manage
+  @HttpCode(200)
+  async previewCorrection(@Body() raw: unknown) {
+    const body = object(raw);
+    if (!Array.isArray(body['entries'])) throw new BadRequestException();
+    try {
+      return await this.money.previewCorrection({
+        context: currentRequestContext(),
+        entries: correctionEntries(body['entries']),
+        original_ledger_transaction_id: uuid(stringField(body, 'original_ledger_transaction_id')),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  /** Corrections with their history (10.6). */
+  @Get('corrections')
+  @manage
+  async corrections() {
+    try {
+      return await this.money.listCorrections({ context: currentRequestContext() });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
+  @Post('corrections/:correction_id/reject')
+  @manage
+  @HttpCode(200)
+  async rejectCorrection(@Param('correction_id') id: string, @Body() raw: unknown) {
+    const body = object(raw);
+    try {
+      return await this.money.rejectCorrection({
+        context: currentRequestContext(),
+        expected_version: integerField(body, 'expected_version', 1),
+        financial_correction_id: uuid(id),
+        reason_code: stringField(body, 'reason_code'),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
   @Post('corrections')
   @manage
   async proposeCorrection(@Body() raw: unknown) {
@@ -206,22 +274,7 @@ export class CompleteMoneyAdminController {
         amount_minor: integerField(body, 'amount_minor', 1),
         context: currentRequestContext(),
         correction_reference: stringField(body, 'correction_reference'),
-        entries: body['entries'].map((rawEntry) => {
-          const entry = object(rawEntry);
-          const partnerUserId = optionalUuid(entry, 'partner_user_id');
-          const vendorLocationId = optionalUuid(entry, 'vendor_location_id');
-          return {
-            account_reference: stringField(entry, 'account_reference'),
-            component: stringField(entry, 'component'),
-            credit_minor: integerField(entry, 'credit_minor', 0),
-            debit_minor: integerField(entry, 'debit_minor', 0),
-            ...(partnerUserId ? { partner_user_id: partnerUserId } : {}),
-            ...(entry['source_order_reference'] === undefined
-              ? {}
-              : { source_order_reference: stringField(entry, 'source_order_reference') }),
-            ...(vendorLocationId ? { vendor_location_id: vendorLocationId } : {}),
-          };
-        }),
+        entries: correctionEntries(body['entries']),
         evidence_reference: stringField(body, 'evidence_reference'),
         original_ledger_transaction_id: uuid(stringField(body, 'original_ledger_transaction_id')),
         reason_code: stringField(body, 'reason_code'),

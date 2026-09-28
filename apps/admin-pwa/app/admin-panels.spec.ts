@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { correctionAmount, impactSentence } from './corrections-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -49,12 +50,15 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
       'admin/finance/v2/ledger',
     ],
   ],
+  ['order-intervention-panel.tsx', ['admin/control/orders']],
   [
-    'order-intervention-panel.tsx',
+    'corrections-panel.tsx',
     [
-      'admin/control/orders',
+      'admin/finance/v2/ledger/transactions/${transactionId.trim()}',
+      'admin/finance/v2/corrections/preview',
       'admin/finance/v2/corrections',
-      'admin/finance/v2/corrections/${correctionId}/approve-post',
+      'admin/finance/v2/corrections/${id}/approve-post',
+      'admin/finance/v2/corrections/${id}/reject',
     ],
   ],
   [
@@ -144,5 +148,42 @@ test('an operator places a provisioned store on the map rather than typing coord
   assert.ok(
     !/vLat|vLng|26\.8505|75\.7628/.test(source),
     'no typed coordinates and no default point remain',
+  );
+});
+
+test('a correction is proposed with what the API requires, after a preview (10.6)', () => {
+  const source = panel('corrections-panel.tsx');
+  for (const field of [
+    'original_ledger_transaction_id',
+    'evidence_reference',
+    'reason_code',
+    'amount_minor: correctionAmount(entries)',
+    'expected_version: correction.version',
+  ]) {
+    assert.ok(source.includes(field), `the panel sends ${field}`);
+  }
+  assert.ok(source.includes('disabled={!preview}'), 'nothing is proposed unpreviewed');
+  // The order monitor no longer proposes a correction it cannot describe.
+  assert.ok(
+    !panel('order-intervention-panel.tsx').includes("correction_kind: 'ORDER_INTERVENTION'"),
+  );
+});
+
+test('a correction amount is its debits, and its impact reads per owner (10.6)', () => {
+  assert.equal(
+    correctionAmount([
+      { account_reference: 'A', component: 'ADJUSTMENT', debit_minor: 250, credit_minor: 0 },
+      { account_reference: 'B', component: 'ADJUSTMENT', debit_minor: 0, credit_minor: 250 },
+    ]),
+    250,
+  );
+  assert.equal(
+    impactSentence({
+      account_reference: 'SYNTH-ACCOUNT-VENDOR-PAYABLE',
+      vendor_location_id: '01a0e73e-8d62-75b2',
+      partner_user_id: null,
+      change_debit_minor: 100,
+    }),
+    'vendor payable for shop 01a0e73e debited ₹1.00 more',
   );
 });

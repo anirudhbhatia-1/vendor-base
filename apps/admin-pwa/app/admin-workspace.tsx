@@ -8,6 +8,7 @@ import { revokeAndSignOut } from '@neighbourhood-store/pwa-auth';
 import { RequireWorkspaceRole } from '@neighbourhood-store/pwa-auth/guard';
 import { AppShell, Button, StatusPill, TopBar } from '@neighbourhood-store/ui';
 import { adminRequest, apiUrl } from './authenticated-api';
+import { CorrectionsPanel } from './corrections-panel';
 import { FinanceQueuesPanel } from './finance-queues-panel';
 import { IncidentsPanel } from './incidents-panel';
 import { OperationsHealthPanel } from './operations-health-panel';
@@ -1146,6 +1147,7 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
           </section>
           <OrderInterventionPanel />
           <FinanceQueuesPanel />
+          <CorrectionsPanel />
           <section
             className="catalogue-oversight"
             style={{ marginTop: '1.5rem' }}

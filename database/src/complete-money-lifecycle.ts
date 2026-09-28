@@ -24,6 +24,8 @@ import {
 import { transaction } from './transaction.js';
 import { assembleTrialBalance, type LedgerAccountBalanceRow } from './ledger-balance.js';
 import { divideOrder, OrderDivisionError, type OrderDivision } from './settlement-division.js';
+import { correctionImpact, CorrectionImpactError } from './correction-impact.js';
+import { resolveConfiguration } from './versioned-configuration.js';
 
 type StatementKind = 'PAYMENT' | 'PAYOUT' | 'REFUND';
 type ProviderState = 'FAILED' | 'SUCCEEDED' | 'UNKNOWN';
@@ -118,6 +120,30 @@ export type ResolvedVendorSettlementDispute = VendorSettlementDisputeRecord & {
   readonly adjustment_delta_minor?: number;
   readonly applied_to_settlement?: boolean;
 };
+
+/**
+ * JSON with object keys sorted, so a value read back from jsonb (which keeps
+ * its own key order) compares equal to the value that was written.
+ */
+function canonicalJson(value: unknown): string {
+  const sorted = (item: unknown): unknown =>
+    Array.isArray(item)
+      ? item.map(sorted)
+      : item !== null && typeof item === 'object'
+        ? Object.fromEntries(
+            Object.entries(item as Record<string, unknown>)
+              .filter(([, field]) => field !== undefined)
+              .sort(([left], [right]) => (left < right ? -1 : 1))
+              .map(([key, field]) => [key, sorted(field)]),
+          )
+        : item;
+  return JSON.stringify(sorted(value));
+}
+
+/** How long a correction proposal waits for its approver (10.6). */
+const CORRECTION_APPROVAL_WINDOW_MS = 15 * 60_000;
+/** The versioned setting that holds the single-approval limit (10.6). */
+const CORRECTION_APPROVAL_KEY = 'finance.correction_approval';
 
 /** A challenge is answered within seven days (VEN-50). */
 const VENDOR_DISPUTE_ANSWER_MS = 7 * 24 * 3_600_000;
@@ -1067,6 +1093,33 @@ export class CompleteMoneyLifecycleService {
     }));
   }
 
+  /**
+   * What a correction would do, before it is proposed (10.6): the original
+   * posting, the replacement, and the net change per account and per owner,
+   * with whether a second person must approve it. Nothing is written.
+   */
+  async previewCorrection(input: {
+    readonly context: RequestContext;
+    readonly entries: readonly CorrectionEntry[];
+    readonly original_ledger_transaction_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    admin(input.context);
+    return transaction(this.#pool, (client) =>
+      this.#correctionPlan(client, {
+        entries: input.entries,
+        now: input.now ?? new Date(),
+        original_ledger_transaction_id: input.original_ledger_transaction_id,
+      }),
+    );
+  }
+
+  /**
+   * Proposes a correction (10.6): the original posting is reversed whole and
+   * the replacement posted when it is approved. The proposal records its
+   * reason, its evidence, its impact and the approval limit in force, and is
+   * history from then on. Replayed by its reference.
+   */
   async proposeCorrection(input: {
     readonly amount_minor: number;
     readonly context: RequestContext;
@@ -1082,22 +1135,39 @@ export class CompleteMoneyLifecycleService {
     const contextRefs = refs(input.context);
     marked(input.correction_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Correction reference');
     marked(input.evidence_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Evidence reference');
+    marked(input.reason_code, /^[A-Z][A-Z0-9_]{2,63}$/, 'Reason code');
     const total = this.#validateEntries(input.entries);
     if (total !== amount(input.amount_minor, 'Correction amount'))
       throw new MoneyInputError('Correction amount must equal proposed entry debits');
     return transaction(this.#pool, async (client) => {
-      const original = await client.query(
-        `SELECT 1 FROM marketplace.ledger_transactions WHERE ledger_transaction_id=$1`,
-        [input.original_ledger_transaction_id],
+      const replay = await client.query<any>(
+        `SELECT * FROM marketplace.financial_corrections WHERE correction_reference=$1`,
+        [input.correction_reference],
       );
-      if (!original.rows[0]) throw new MoneyNotFoundError('Original ledger transaction not found');
+      if (replay.rows[0]) {
+        const prior = replay.rows[0];
+        if (
+          prior.original_ledger_transaction_id !== input.original_ledger_transaction_id ||
+          canonicalJson(prior.proposed_entries) !== canonicalJson(input.entries) ||
+          prior.reason_code !== input.reason_code ||
+          prior.evidence_reference !== input.evidence_reference
+        )
+          throw new MoneyStateError('A correction with this reference proposes something else');
+        return prior;
+      }
+      const plan = await this.#correctionPlan(client, {
+        entries: input.entries,
+        now,
+        original_ledger_transaction_id: input.original_ledger_transaction_id,
+      });
       const correctionId = createUuidV7();
       const inserted = await client.query(
         `INSERT INTO marketplace.financial_corrections
           (financial_correction_id,correction_reference,original_ledger_transaction_id,
            reason_code,evidence_reference,amount_minor,proposed_entries,proposed_by_user_id,
-           approval_expires_at,request_id,correlation_id,created_at,updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12) RETURNING *`,
+           approval_expires_at,request_id,correlation_id,created_at,updated_at,
+           impact,impact_minor,single_approval_limit_minor,second_approval_required)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12,$13,$14,$15,$16) RETURNING *`,
         [
           correctionId,
           input.correction_reference,
@@ -1107,10 +1177,14 @@ export class CompleteMoneyLifecycleService {
           input.amount_minor,
           JSON.stringify(input.entries),
           who,
-          new Date(now.getTime() + 900_000),
+          new Date(now.getTime() + CORRECTION_APPROVAL_WINDOW_MS),
           contextRefs.request,
           contextRefs.correlation,
           now,
+          JSON.stringify(plan.impact),
+          plan.impact_minor,
+          plan.single_approval_limit_minor,
+          plan.second_approval_required,
         ],
       );
       await this.#correctionEvent(client, {
@@ -1128,6 +1202,12 @@ export class CompleteMoneyLifecycleService {
     });
   }
 
+  /**
+   * Approves and posts a correction: the reversal of the original and the
+   * replacement, in one transaction with the correction's state. Over the
+   * policy's limit the approver must be someone other than the proposer;
+   * at or under it the proposer may post their own.
+   */
   async approveAndPostCorrection(input: {
     readonly context: RequestContext;
     readonly expected_version: number;
@@ -1148,7 +1228,7 @@ export class CompleteMoneyLifecycleService {
         correction.lifecycle_state !== 'PROPOSED' ||
         correction.version !== input.expected_version ||
         correction.approval_expires_at <= now ||
-        correction.proposed_by_user_id === who
+        (correction.second_approval_required && correction.proposed_by_user_id === who)
       )
         throw new MoneyStateError('Correction approval is stale, expired, or self-approved');
       const originalEntries = await client.query<any>(
@@ -1196,6 +1276,241 @@ export class CompleteMoneyLifecycleService {
       });
       return updated.rows[0];
     });
+  }
+
+  /**
+   * Declines a proposal (10.6). Any finance operator may, the proposer
+   * included -- withdrawing one's own proposal moves no money -- and the
+   * reason is recorded on the correction and its history.
+   */
+  async rejectCorrection(input: {
+    readonly context: RequestContext;
+    readonly expected_version: number;
+    readonly financial_correction_id: UuidV7;
+    readonly reason_code: string;
+    readonly now?: Date;
+  }) {
+    const who = admin(input.context);
+    const now = input.now ?? new Date();
+    const reason = marked(input.reason_code, /^[A-Z][A-Z0-9_]{2,63}$/, 'Reason code');
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<any>(
+        `SELECT * FROM marketplace.financial_corrections
+          WHERE financial_correction_id=$1 FOR UPDATE`,
+        [input.financial_correction_id],
+      );
+      const correction = found.rows[0];
+      if (!correction) throw new MoneyNotFoundError('Correction not found');
+      if (
+        correction.lifecycle_state !== 'PROPOSED' ||
+        correction.version !== input.expected_version
+      )
+        throw new MoneyStateError('Only a current proposal can be rejected');
+      const updated = await client.query(
+        `UPDATE marketplace.financial_corrections
+            SET lifecycle_state='REJECTED', closed_by_user_id=$2, closing_reason_code=$3,
+                version=2, updated_at=$4
+          WHERE financial_correction_id=$1 RETURNING *`,
+        [input.financial_correction_id, who, reason, now],
+      );
+      await this.#correctionEvent(client, {
+        actor_id: who,
+        context: input.context,
+        correction_id: input.financial_correction_id,
+        event_type: 'CORRECTION_REJECTED',
+        now,
+        previous_state: 'PROPOSED',
+        reason_code: reason,
+        resulting_state: 'REJECTED',
+        version: 2,
+      });
+      return updated.rows[0];
+    });
+  }
+
+  /**
+   * The worker's pass: a proposal nobody approved within its window expires
+   * (10.6), so it stops holding its original against another correction.
+   */
+  async expireCorrections(input: { readonly context: RequestContext; readonly now?: Date }) {
+    const who = financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    const due = await this.#pool.query<{ financial_correction_id: string }>(
+      `SELECT financial_correction_id FROM marketplace.financial_corrections
+        WHERE lifecycle_state='PROPOSED' AND approval_expires_at<=$1
+        ORDER BY approval_expires_at LIMIT 100`,
+      [now],
+    );
+    let expired = 0;
+    for (const row of due.rows)
+      await transaction(this.#pool, async (client) => {
+        const moved = await client.query(
+          `UPDATE marketplace.financial_corrections
+              SET lifecycle_state='EXPIRED', closing_reason_code='APPROVAL_WINDOW_ELAPSED',
+                  version=2, updated_at=$2
+            WHERE financial_correction_id=$1 AND lifecycle_state='PROPOSED'
+              AND approval_expires_at<=$2`,
+          [row.financial_correction_id, now],
+        );
+        if (!moved.rowCount) return;
+        await this.#correctionEvent(client, {
+          actor_id: who,
+          context: input.context,
+          correction_id: parseUuidV7(row.financial_correction_id),
+          event_type: 'CORRECTION_EXPIRED',
+          now,
+          previous_state: 'PROPOSED',
+          reason_code: 'APPROVAL_WINDOW_ELAPSED',
+          resulting_state: 'EXPIRED',
+          version: 2,
+        });
+        expired += 1;
+      });
+    return expired;
+  }
+
+  /** Corrections with their history, newest first, for the finance console. */
+  async listCorrections(input: { readonly context: RequestContext; readonly limit?: number }) {
+    admin(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const corrections = await this.#pool.query<any>(
+      `SELECT financial_correction_id, correction_reference, original_ledger_transaction_id,
+              lifecycle_state, reason_code, evidence_reference, amount_minor::text,
+              proposed_entries, impact, impact_minor::text, single_approval_limit_minor::text,
+              second_approval_required, proposed_by_user_id, approved_by_user_id,
+              closed_by_user_id, closing_reason_code, reversal_ledger_transaction_id,
+              adjustment_ledger_transaction_id, approval_expires_at, version, created_at, updated_at
+         FROM marketplace.financial_corrections
+        ORDER BY created_at DESC, financial_correction_id DESC LIMIT $1`,
+      [limit],
+    );
+    const ids = corrections.rows.map((row: any) => row.financial_correction_id);
+    const events = ids.length
+      ? await this.#pool.query<any>(
+          `SELECT financial_correction_id, correction_version, event_type, previous_state,
+                  resulting_state, actor_id, reason_code, occurred_at
+             FROM marketplace.financial_correction_events
+            WHERE financial_correction_id = ANY($1::uuid[])
+            ORDER BY correction_version`,
+          [ids],
+        )
+      : { rows: [] };
+    return {
+      corrections: corrections.rows.map((row: any) => ({
+        ...row,
+        events: events.rows.filter(
+          (event: any) => event.financial_correction_id === row.financial_correction_id,
+        ),
+      })),
+    };
+  }
+
+  /**
+   * The plan a proposal is made from: the original, whether it may be
+   * corrected, the replacement checked against the account catalogue, the
+   * impact, and the approval limit in force.
+   */
+  async #correctionPlan(
+    client: PoolClient,
+    input: {
+      readonly entries: readonly CorrectionEntry[];
+      readonly now: Date;
+      readonly original_ledger_transaction_id: UuidV7;
+    },
+  ) {
+    this.#validateEntries(input.entries);
+    const original = await client.query<{ transaction_kind: string }>(
+      `SELECT transaction_kind FROM marketplace.ledger_transactions WHERE ledger_transaction_id=$1`,
+      [input.original_ledger_transaction_id],
+    );
+    const header = original.rows[0];
+    if (!header) throw new MoneyNotFoundError('Original ledger transaction not found');
+    // A reversal is half of a correction already posted; the fact is corrected
+    // by correcting that correction's adjustment.
+    if (header.transaction_kind === 'REVERSAL')
+      throw new MoneyStateError('A reversal is corrected through the adjustment it accompanies');
+    const live = await client.query(
+      `SELECT 1 FROM marketplace.financial_corrections
+        WHERE original_ledger_transaction_id=$1
+          AND lifecycle_state IN ('PROPOSED','APPROVED','POSTED')`,
+      [input.original_ledger_transaction_id],
+    );
+    if (live.rows[0])
+      throw new MoneyStateError('This posting already has a correction; correct that instead');
+    // Every account named must be postable, and one with an owner must name
+    // it: refused here rather than at approval, after a second person looked.
+    const accounts = await client.query<{
+      account_reference: string;
+      lifecycle_state: string;
+      owner_dimension: string;
+    }>(
+      `SELECT account_reference, lifecycle_state, owner_dimension
+         FROM marketplace.ledger_accounts WHERE account_reference = ANY($1::text[])`,
+      [[...new Set(input.entries.map((entry) => entry.account_reference))]],
+    );
+    const catalogue = new Map(accounts.rows.map((row) => [row.account_reference, row]));
+    for (const entry of input.entries) {
+      const account = catalogue.get(entry.account_reference);
+      if (!account || account.lifecycle_state !== 'ACTIVE')
+        throw new MoneyInputError(`${entry.account_reference} is not an open account`);
+      if (account.owner_dimension === 'VENDOR_LOCATION' && !entry.vendor_location_id)
+        throw new MoneyInputError(`An entry on ${entry.account_reference} must name its vendor`);
+      if (account.owner_dimension === 'PARTNER_USER' && !entry.partner_user_id)
+        throw new MoneyInputError(`An entry on ${entry.account_reference} must name its partner`);
+    }
+    const originalEntries = await client.query<{
+      account_reference: string;
+      component: string;
+      debit_minor: string;
+      credit_minor: string;
+      vendor_location_id: string | null;
+      partner_user_id: string | null;
+      source_order_reference: string | null;
+    }>(
+      `SELECT account_reference, component, debit_minor::text, credit_minor::text,
+              vendor_location_id, partner_user_id, source_order_reference
+         FROM marketplace.ledger_entries WHERE ledger_transaction_id=$1 ORDER BY ledger_entry_id`,
+      [input.original_ledger_transaction_id],
+    );
+    const before = originalEntries.rows.map((entry) => ({
+      ...entry,
+      debit_minor: Number(entry.debit_minor),
+      credit_minor: Number(entry.credit_minor),
+    }));
+    let impact;
+    try {
+      impact = correctionImpact(before, input.entries);
+    } catch (error) {
+      if (error instanceof CorrectionImpactError) throw new MoneyInputError(error.message);
+      throw error;
+    }
+    const limit = await this.#singleApprovalLimit(client, input.now);
+    return {
+      original_ledger_transaction_id: input.original_ledger_transaction_id,
+      original_transaction_kind: header.transaction_kind,
+      original_entries: before,
+      entries: input.entries,
+      impact: impact.rows,
+      impact_minor: impact.impact_minor,
+      single_approval_limit_minor: limit,
+      second_approval_required: impact.impact_minor > limit,
+    };
+  }
+
+  /**
+   * The most a correction may move and be posted by its proposer alone, from
+   * the versioned `finance.correction_approval` setting. With no setting, or
+   * one that does not say, every correction needs a second person.
+   */
+  async #singleApprovalLimit(client: PoolClient, at: Date): Promise<number> {
+    const resolved = await resolveConfiguration(client, {
+      at,
+      configuration_key: CORRECTION_APPROVAL_KEY,
+      configuration_kind: 'SETTING',
+    });
+    const value = resolved?.configuration_value as Record<string, unknown> | undefined;
+    const limit = value?.['single_approval_limit_minor'];
+    return typeof limit === 'number' && Number.isSafeInteger(limit) && limit >= 0 ? limit : 0;
   }
 
   async postPartnerEarning(input: {
@@ -2682,7 +2997,20 @@ export class CompleteMoneyLifecycleService {
         ORDER BY ledger_entry_id`,
       [input.ledger_transaction_id],
     );
-    return { ...header, entries: entries.rows };
+    // A posting's correction history (10.6): corrections that reverse it,
+    // and the correction this posting is itself the reversal or adjustment of.
+    const corrections = await this.#pool.query<any>(
+      `SELECT financial_correction_id, correction_reference, lifecycle_state, reason_code,
+              CASE WHEN original_ledger_transaction_id=$1 THEN 'ORIGINAL'
+                   WHEN reversal_ledger_transaction_id=$1 THEN 'REVERSAL'
+                   ELSE 'ADJUSTMENT' END AS role
+         FROM marketplace.financial_corrections
+        WHERE $1 IN (original_ledger_transaction_id, reversal_ledger_transaction_id,
+                     adjustment_ledger_transaction_id)
+        ORDER BY created_at`,
+      [input.ledger_transaction_id],
+    );
+    return { ...header, entries: entries.rows, corrections: corrections.rows };
   }
 
   /**

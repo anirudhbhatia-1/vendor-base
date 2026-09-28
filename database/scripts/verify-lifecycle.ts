@@ -42,6 +42,7 @@ import { verifyAssignmentCustody } from './verify-assignment-custody.js';
 import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
 import { verifyPartnerPayouts } from './verify-partner-payouts.js';
 import { verifyStatementReconciliation } from './verify-statement-reconciliation.js';
+import { verifyFinancialCorrections } from './verify-financial-corrections.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -801,6 +802,7 @@ await withDatabaseClient(config, async (client) => {
   await measure('statement_reconciliation', () =>
     verifyStatementReconciliation(config.connectionString),
   );
+  await measure('financial_corrections', () => verifyFinancialCorrections(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);
@@ -840,6 +842,7 @@ await withDatabaseClient(config, async (client) => {
     marketplace.customer_shop_requests, marketplace.customer_preferred_store,
     marketplace.customer_favourite_stores,
     marketplace.customer_address_events, marketplace.customer_addresses,
+    marketplace.financial_correction_events, marketplace.financial_corrections,
     marketplace.finance_exceptions, marketplace.provider_statement_rows,
     marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
     marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,

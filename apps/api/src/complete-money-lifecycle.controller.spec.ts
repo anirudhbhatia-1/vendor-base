@@ -28,6 +28,10 @@ test('maker-checker and reconciliation commands require global finance authority
     'importStatement',
     'proposeCorrection',
     'approveCorrection',
+    // The correction's preview, history and rejection (10.6).
+    'previewCorrection',
+    'corrections',
+    'rejectCorrection',
     'postPartnerEarning',
     'exceptions',
     // The books themselves (10.1) are read under the same authority that

@@ -357,6 +357,12 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       );
       // A refund the provider refused is proposed again for a person to
       // approve (10.5); one whose outcome is unknown is not.
+      // A correction nobody approved in its window expires (10.6).
+      const correctionsExpired = await pass(
+        'completeMoney.expireCorrections',
+        () => this.#completeMoney.expireCorrections({ context, now }),
+        0,
+      );
       const refundRetries = await pass(
         'money.reproposeDeclinedRefunds',
         () => this.#money.reproposeDeclinedRefunds({ context, now }),
@@ -527,6 +533,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         earningAdjustments +
         compensations +
         refundRetries +
+        correctionsExpired +
         redivided +
         settlementAdjustments +
         controls.trust +
@@ -549,6 +556,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           earning_adjustments: earningAdjustments,
           compensations_posted: compensations,
           refund_retries_proposed: refundRetries,
+          corrections_expired: correctionsExpired,
           redivided_settlements: redivided,
           settlement_adjustments: settlementAdjustments,
           trust_controls: controls.trust,

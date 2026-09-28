@@ -2437,6 +2437,53 @@ Five requirements. None held whole. The import was idempotent by reference or di
 
 **Step 10.5: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 71 (28 September 2026) — step 10.6, financial correction workflow
+
+Five requirements. One held (reason and evidence were required, in their shapes) and one held in part (the reversal and the replacement posted together, linked to the correction). There was no preview: a correction stored its replacement entries and nothing of what they would move, so its approver saw a list of lines and not how much any shop's or partner's payable would move. There was no policy threshold: every correction needed two people whatever its size, with no setting saying where that line is, and nothing let a small one be posted by its maker. Nothing stopped two corrections of one posting, each reversing it; a posting's own reversal could be corrected; a replacement naming a closed account or an owner-less payable was accepted and failed only when a second person tried to post it. A proposal nobody answered stayed PROPOSED past its window with no way to reject it; its entries, amount and reason could be rewritten by an UPDATE; and no route read a correction or its history. The admin console's only correction control sent a body the API refused — no entries, no amount, no original posting, no evidence, and no version on approval — so no correction had ever been proposed from the console, while ADM-31 recorded the panel as done. One migration (0114); a new connected walk of 27 assertions; four unit tests for the impact, three for the new panel; eleven mutation probes, and one more for the refund cap carried from run 70.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Preview amount and participant impact | **Not met:** nothing computed or showed what a correction moves — P71-01. |
+| 2 | Require reason and evidence | Met (shapes checked); the reason is now checked before the database is asked. |
+| 3 | Require maker-checker approval above policy threshold | **No threshold existed**; two people always, and the console could not reach the command at all — P71-02, P71-05. |
+| 4 | Correct through reversal and adjustment entries | Met for one correction; **a posting could be reversed twice, a reversal corrected, and a bad account found only at approval** — P71-03. |
+| 5 | Preserve original and correction history | Ledger met; **the proposal could be rewritten, nothing expired or rejected it, and nothing read its history** — P71-04. |
+
+**P71-01 — the preview.** `correctionImpact` is the replacement's net less the original's, per account and per owner (a shop's or partner's payable is reported per shop or partner); the impact is the sum of the increases, equal to the decreases because both postings balance. `previewCorrection` (`POST /admin/finance/v2/corrections/preview`) returns the original, the replacement, the impact rows, the impact, the single-approval limit and whether a second operator is needed, and writes nothing. The proposal records the same impact, which is what its approver reads.
+
+**P71-02 — the threshold.** The single-approval limit is the versioned setting `finance.correction_approval` (`single_approval_limit_minor`); with none set, every correction needs two people. A proposal records the limit in force and whether a second approver is required (`impact_minor > limit`); 0114 holds the two together and lets the proposer approve only where no second approver is required. The threshold is measured on the impact, not on the size of the replacement, which says nothing about how far it moves from the original.
+
+**P71-03 — one correction per posting, checked at proposal.** 0114 allows one live correction (proposed or posted) per original; a later correction of the same fact corrects the first correction's adjustment. A reversal cannot be corrected on its own. Every account in the replacement must be open and, where it has an owner, name it — refused at preview and proposal, not after a second person has looked. A proposal is replayed by its reference and refused when the reference is reused for something else (compared key-sorted: jsonb keeps its own key order, so a plain string comparison would have refused every replay).
+
+**P71-04 — history.** 0114 makes a proposal history: its reference, original, reason, evidence, entries, amount, impact, limit, proposer and window cannot change, and it moves once out of PROPOSED. `rejectCorrection` closes one with a reason; the operations worker expires one unanswered in its window (`APPROVAL_WINDOW_ELAPSED`), freeing its original. `GET /admin/finance/v2/corrections` lists corrections with their events; a ledger posting's read names the corrections it is the original, reversal or adjustment of.
+
+**P71-05 — the console.** `corrections-panel.tsx` loads the posting to correct, starts the replacement as the original so only what was wrong is changed, previews it (impact per account and owner, in words, and whether a second operator must approve), proposes it with its reason and evidence, and lists corrections with their history and an approve or reject that sends the version it read. The order-intervention panel's broken controls are gone.
+
+**Carried from run 70.** A person's refund proposal that lapsed unapproved kept its share of the refund cap for ever, though it could never be approved; the cap now leaves out a PENDING_APPROVAL refund whose window has passed.
+
+**Mutation results.** Twelve probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| Two people always (old) | **The schema**: `financial_correction_threshold_shape` |
+| The threshold measured on the replacement's size | **The schema**: same constraint |
+| The proposer may always post | *A correction over the limit was posted by its proposer* — raised by `financial_correction_maker_checker` |
+| Maker-checker ignores the limit (old) | *Correction approval is stale, expired, or self-approved* at the proposer's own post within the limit |
+| No guard on a second correction (old) | **The schema**: `financial_corrections_one_live_per_original` |
+| A reversal may be corrected (old) | *A reversal was corrected on its own* |
+| No catalogue check at proposal (old) | *A correction with an owner-less payable was previewed* |
+| No reason check in the service | **The schema**: `financial_correction_reason_shape` (raised as a database error, not an input error) |
+| No expiry (old) | *A proposal nobody answered did not expire* |
+| Replay compared as strings | *A correction with this reference proposes something else* on the exact replay |
+| No impact stored (old) | *The proposal did not record the impact its approver will see* |
+| A lapsed refund proposal holds the cap (old) | *Refund exceeds the remaining captured amount* (statement walk) |
+
+**Forward findings.** (10.7, 11.5) A correction moves the books, not the operational record it came from: correcting a settlement posting leaves the settlement's payable as it was, so its payout pays the recorded figure and the payable reads the difference owed — paid or recovered by finance, as 10.3's post-payout adjustments are. (11.5) No correction can be raised from a finance exception directly; the operator enters the posting. (D-12) Evidence is a reference, not an uploaded document.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 115 migration files (0000–0114), full ladder; `financial_corrections` 27 assertions (new), `statement_reconciliation` 26, `money_lifecycle` 43, `partner_payouts` 28, `vendor_fulfilment` 313. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 612 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack; all twelve probes on rebuilt databases.
+
+**Step 10.6: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

@@ -28,7 +28,6 @@ export function OrderInterventionPanel() {
   const [timeline, setTimeline] = useState<Record<string, unknown>[]>([]);
   const [assignments, setAssignments] = useState<Record<string, unknown>[]>([]);
   const [preview, setPreview] = useState<string>('');
-  const [correctionId, setCorrectionId] = useState('');
   const [message, setMessage] = useState('Loading the checkout-group monitor…');
 
   const load = useCallback(async () => {
@@ -120,73 +119,14 @@ export function OrderInterventionPanel() {
     setMessage('Preview only. Nothing has changed yet.');
   }
 
-  /**
-   * Protected intervention approval (ADM-31).
-   *
-   * A correction to money or order state is proposed by one operator and posted
-   * by another. The two steps are separate calls on purpose: the same person
-   * cannot quietly do both, and the reversal is appended rather than editing
-   * financial history (EXC-13).
-   */
-  async function proposeCorrection() {
-    if (!selectedOrder) {
-      setMessage('Select an order first.');
-      return;
-    }
-    try {
-      const result = await adminRequest<{ correction_id?: string }>(
-        'admin/finance/v2/corrections',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            command_reference: `CORRECTION-${Date.now().toString(36).toUpperCase()}`,
-            correction_kind: 'ORDER_INTERVENTION',
-            reason_code: 'ADMIN_ORDER_INTERVENTION',
-            source_order_reference: String(
-              selectedOrder['reference'] ?? selectedOrder['order_reference'] ?? '',
-            ),
-            evidence_note: preview || 'Intervention proposed from the order monitor.',
-          }),
-        },
-      );
-      if (result.correction_id) setCorrectionId(result.correction_id);
-      setMessage(
-        result.correction_id
-          ? `Correction ${result.correction_id} proposed. A second approver must post it.`
-          : 'Correction proposed.',
-      );
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The correction could not be proposed.');
-    }
-  }
-
-  async function approveCorrection() {
-    if (!correctionId) {
-      setMessage('Propose a correction first, or paste its identifier.');
-      return;
-    }
-    try {
-      await adminRequest(`admin/finance/v2/corrections/${correctionId}/approve-post`, {
-        method: 'POST',
-        body: JSON.stringify({
-          command_reference: `CORRECTION-POST-${Date.now().toString(36).toUpperCase()}`,
-          reason_code: 'ADMIN_CORRECTION_APPROVED',
-        }),
-      });
-      setMessage(`Correction ${correctionId} approved and posted as a reversal.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The correction could not be posted.');
-    }
-  }
-
   return (
     <section className="catalogue-oversight" id="order-interventions">
       <div>
         <p className="eyebrow">ORDER INTERVENTION</p>
         <h2>{groups.length} checkout groups</h2>
         <p>
-          Corrections run through controlled commands with a preview and a second approver, never
-          through direct data edits.
+          Interventions are previewed here. A correction to money is proposed, previewed and
+          approved against the ledger posting it corrects, under Finance → Corrections.
         </p>
       </div>
       <p aria-live="polite">{message}</p>
@@ -254,18 +194,6 @@ export function OrderInterventionPanel() {
             </button>
           </div>
           {preview && <p>{preview}</p>}
-          <label>
-            Correction identifier
-            <input value={correctionId} onChange={(e) => setCorrectionId(e.target.value)} />
-          </label>
-          <div className="actions">
-            <button type="button" onClick={() => void proposeCorrection()}>
-              Propose correction
-            </button>
-            <button type="button" onClick={() => void approveCorrection()}>
-              Approve and post
-            </button>
-          </div>
           {assignments.length > 0 && (
             <p>
               Eligible partners now:{' '}

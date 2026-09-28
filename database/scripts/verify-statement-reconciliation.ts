@@ -190,6 +190,43 @@ export async function verifyStatementReconciliation(connectionString: string): P
         refusedRefund.refund_state === 'FAILED_RETRYABLE',
       'The refunds did not land unanswered and refused',
     );
+    // A person's refund proposal that lapses unapproved stops holding the
+    // cap: the captured payment has 8,700 left, all of it proposed and never
+    // approved; an hour later a new refund against it is allowed.
+    await money.proposeRefund({
+      command_reference: `SYNTH-CMD-RECON-LAPSED-${tag}`,
+      context: ops,
+      delivery_minor: 0,
+      discount_reversal_minor: 0,
+      item_minor: 8_700,
+      now: at(4),
+      payment_transaction_id: captured.payment_transaction_id,
+      provider_operation_reference: `SYNTH-REF-RECON-LAPSED-${tag}`,
+      provider_scenario: 'SUCCESS',
+      source_order_reference: captured.order,
+      tax_minor: 0,
+      tip_minor: 0,
+      trigger_code: 'PARTIAL_ITEM_REFUND',
+    });
+    const afterLapse = await money.proposeRefund({
+      command_reference: `SYNTH-CMD-RECON-AFTER-LAPSE-${tag}`,
+      context: ops,
+      delivery_minor: 0,
+      discount_reversal_minor: 0,
+      item_minor: 100,
+      now: at(5),
+      payment_transaction_id: captured.payment_transaction_id,
+      provider_operation_reference: `SYNTH-REF-RECON-AFTER-LAPSE-${tag}`,
+      provider_scenario: 'SUCCESS',
+      source_order_reference: captured.order,
+      tax_minor: 0,
+      tip_minor: 0,
+      trigger_code: 'PARTIAL_ITEM_REFUND',
+    });
+    check(
+      afterLapse.refund_state === 'PENDING_APPROVAL',
+      'A lapsed refund proposal still held the refund cap',
+    );
     const settlement = await money.createSettlement({
       completed: true,
       context: ops,

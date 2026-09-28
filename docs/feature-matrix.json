@@ -5363,7 +5363,7 @@
       "name": "Protected intervention approval",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Corrections are proposed by one operator and posted by another",
+      "notes": "Corrections are previewed, proposed and approved against the ledger posting they correct in apps/admin-pwa/app/corrections-panel.tsx; over the published single-approval limit a second operator must post them (audit run 71 -- until then the order-intervention panel sent a body the API refused, so no correction was ever proposed from the console)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5375,13 +5375,14 @@
         "tests": true
       },
       "files": [
-        "apps/admin-pwa/app/order-intervention-panel.tsx",
+        "apps/admin-pwa/app/corrections-panel.tsx",
         "apps/admin-pwa/app/admin-panels.spec.ts"
       ],
       "phase_steps": ["11.2"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-admin-control-plane.ts",
+        "database/scripts/verify-financial-corrections.ts"
       ]
     },
     {
@@ -5820,7 +5821,7 @@
       "name": "Idempotent financial correction",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/admin-pwa/app/admin-workspace.tsx uses the maker-checker refund approval",
+      "notes": "A correction is replayed by its reference and refused when the reference is reused for something else; one live correction per ledger posting, so a posting is never reversed twice (audit run 71)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5835,6 +5836,7 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/complete-money-lifecycle.controller.spec.ts",
+        "database/scripts/verify-financial-corrections.ts",
         "database/scripts/verify-money-lifecycle.ts"
       ]
     },
@@ -6835,7 +6837,7 @@
       "name": "Maker-checker controls",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Config + trust + financial corrections all separated",
+      "notes": "Config + trust + financial corrections all separated; a correction needs a second operator above the versioned finance.correction_approval limit, held by the schema (audit run 71)",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6851,6 +6853,7 @@
         "apps/api/src/complete-money-lifecycle.controller.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
         "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-financial-corrections.ts",
         "database/scripts/verify-money-lifecycle.ts"
       ],
       "client_applicability": "no_client"
