@@ -4,7 +4,31 @@ import path from 'node:path';
 import test from 'node:test';
 import { onlineTimeSentence } from './profile-panel.js';
 import { earningsToCsv, payoutStateLabel } from './earnings-panel.js';
-import { offerDeadlineSentence, waitPolicySentence } from './display.js';
+import { offerDeadlineSentence, waitPolicySentence, zoneSentence } from './display.js';
+
+test('the proof check settles instead of looping the refresh (9.7)', () => {
+  const source = panel('partner-workspace.tsx');
+  // Rebuilding syncHeld on every new identity object re-ran the mount effect,
+  // which refreshed, which stored a new identity: the check never left
+  // "loading", so Retry stayed disabled and offers could not be accepted.
+  assert.ok(source.includes('}, [partnerUserId]);'), 'syncHeld is keyed on the user id');
+  assert.ok(!source.includes('}, [identity]);'), 'nothing is keyed on the identity object');
+  assert.ok(
+    source.includes('}, [refresh, loadProofQueue]);'),
+    'the mount effect does not depend on syncHeld',
+  );
+  assert.ok(
+    source.includes("previous.status === 'ready' ? previous : { status: 'loading' }"),
+    'a background re-check keeps the last answer',
+  );
+});
+
+test('a position in many zones names three and counts the rest (9.2)', () => {
+  assert.equal(zoneSentence(['A', 'B']), 'In A, B');
+  assert.equal(zoneSentence(['SYNTH Myshop']), 'In Myshop', 'the synthetic marker is not shown');
+  assert.equal(zoneSentence(['A', 'B', 'C', 'D']), 'In A, B, C and 1 more zone');
+  assert.equal(zoneSentence(['A', 'B', 'C', 'D', 'E']), 'In A, B, C and 2 more zones');
+});
 
 const directory = path.resolve(import.meta.dirname);
 

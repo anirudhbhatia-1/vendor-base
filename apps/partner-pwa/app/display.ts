@@ -5,6 +5,18 @@ export function displayArea(value: string): string {
   return value.replace(/^SYNTH(?:ETIC)?[ _-]*/i, '').trim() || value;
 }
 
+/**
+ * The zones the partner's position falls in (9.2), named up to three: where
+ * zones overlap, a position can sit in many, and listing every one pushed the
+ * work itself off the screen.
+ */
+export function zoneSentence(zones: readonly string[]): string {
+  const named = zones.map(displayArea);
+  if (named.length <= 3) return `In ${named.join(', ')}`;
+  const more = named.length - 3;
+  return `In ${named.slice(0, 3).join(', ')} and ${more} more zone${more === 1 ? '' : 's'}`;
+}
+
 /** A reference short enough to read aloud, without losing meaning. */
 export function shortReference(value: string): string {
   const tail = value.split('-').at(-1) ?? value;

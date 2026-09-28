@@ -30,7 +30,13 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiUrl, partnerRequest } from './authenticated-api';
 import { PartnerApplicationPanel } from './application-panel';
-import { displayArea, offerDeadlineSentence, shortReference, waitPolicySentence } from './display';
+import {
+  displayArea,
+  offerDeadlineSentence,
+  shortReference,
+  waitPolicySentence,
+  zoneSentence,
+} from './display';
 import {
   directionSentence,
   forgetAssignments,
@@ -736,7 +742,10 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
 
   const loadProofQueue = useCallback(async () => {
     const sequence = ++proofReadSequence.current;
-    setProofQueue({ status: 'loading' });
+    // A background re-check keeps the last answer on screen while it runs:
+    // resetting to "loading" every time disabled Retry and blocked offers for
+    // the length of every refresh, and for good while refreshes overlapped.
+    setProofQueue((previous) => (previous.status === 'ready' ? previous : { status: 'loading' }));
     const state = await readProofQueue(() =>
       partnerRequest<unknown>('partner/field/offline-proofs'),
     );
@@ -774,9 +783,14 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
    * twice. A refusal is kept on the record for the support path; a dropped
    * connection simply stops until the next reconnect.
    */
+  // Keyed on the partner's id, not the identity object: every refresh stores a
+  // new object for the same person, and depending on it rebuilt this callback,
+  // re-ran the effect below, and refreshed again -- a loop that held the proof
+  // check in "loading" for good (the stuck "Checking your held proofs" banner).
+  const partnerUserId = identity?.user_id ?? null;
   const syncHeld = useCallback(async () => {
     const keys = heldKeys.current;
-    const partnerId = identity?.user_id;
+    const partnerId = partnerUserId;
     if (!keys || !partnerId) return;
     for (const record of listHeld(window.localStorage)) {
       if (record.failure) continue;
@@ -847,7 +861,13 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       }
     }
     setHeld(listHeld(window.localStorage));
-  }, [identity]);
+  }, [partnerUserId]);
+  // The reconnect handler reaches the latest replay through a ref, so the
+  // effect that registers it runs once rather than on every identity change.
+  const syncHeldRef = useRef(syncHeld);
+  useEffect(() => {
+    syncHeldRef.current = syncHeld;
+  }, [syncHeld]);
 
   useEffect(() => {
     setConnected(navigator.onLine);
@@ -856,7 +876,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     const online = () => {
       setConnected(true);
       void loadProofQueue();
-      void syncHeld();
+      void syncHeldRef.current();
     };
     const offline = () => {
       setConnected(false);
@@ -883,12 +903,13 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       window.removeEventListener('online', online);
       window.removeEventListener('offline', offline);
     };
-  }, [refresh, loadProofQueue, syncHeld]);
+  }, [refresh, loadProofQueue]);
 
-  // Once the session is known, anything held is replayed.
+  // Once the session is known, anything held is replayed -- once per partner
+  // and reconnect, not once per refresh.
   useEffect(() => {
-    if (identity && connected) void syncHeld();
-  }, [identity, connected, syncHeld]);
+    if (partnerUserId && connected) void syncHeld();
+  }, [partnerUserId, connected, syncHeld]);
 
   useEffect(() => {
     if (!connected) return;
@@ -1432,7 +1453,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
                 {/* The active zone (9.2): where the position falls, by name,
                     which is as much of the position as the screen says. */}
                 {(availability?.active_zones ?? []).length > 0 ? (
-                  <p className="ns-eyebrow">In {(availability?.active_zones ?? []).join(', ')}</p>
+                  <p className="ns-eyebrow">{zoneSentence(availability?.active_zones ?? [])}</p>
                 ) : null}
               </div>
               <Button onClick={() => void refresh()} variant="secondary">
