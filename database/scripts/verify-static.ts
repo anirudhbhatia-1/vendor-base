@@ -679,9 +679,42 @@ assert(
   `These tables no longer need an exemption in UNDECLARED_TABLE_DEBT: ${staleDebt.sort().join(', ')}`,
 );
 
+// 10.7: no interface can edit or force-balance the books. The ledger is
+// written only by the two money services' posting paths -- every posting
+// balanced, keyed, and made with the state it records -- and nothing anywhere
+// updates or deletes a ledger row; the append-only triggers refuse it, and
+// this refuses the code that would try.
+const LEDGER_WRITERS = new Set([
+  'database/src/money-lifecycle.ts',
+  'database/src/complete-money-lifecycle.ts',
+]);
+const sourceRoots = ['../src/', '../../apps/api/src/', '../../apps/worker/src/'];
+const ledgerWrites: string[] = [];
+for (const root of sourceRoots) {
+  const directory = new URL(root, import.meta.url);
+  for (const entry of await readdir(directory, { recursive: true })) {
+    const file = String(entry);
+    if (!file.endsWith('.ts') || file.endsWith('.spec.ts')) continue;
+    const source = await readFile(new URL(file, directory), 'utf8');
+    const label = `${root.replace(/^(\.\.\/)+/, root.startsWith('../../') ? '' : 'database/')}${file}`;
+    for (const match of source.matchAll(
+      /(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+marketplace\.ledger_(entries|transactions)\b/gi,
+    )) {
+      const verb = (match[1] as string).toUpperCase().replace(/\s+/g, ' ');
+      if (verb !== 'INSERT INTO' || !LEDGER_WRITERS.has(label))
+        ledgerWrites.push(`${label}: ${verb} ledger_${match[2] as string}`);
+    }
+  }
+}
+assert(
+  ledgerWrites.length === 0,
+  `Only the money services' posting paths may write the ledger, and nothing may edit it: ${ledgerWrites.join('; ')}`,
+);
+
 writeEvent('database.static_controls.verified', {
   compose_services: 2,
   migration_pairs: upNames.length,
   schema_tables_declared: declaredTables.size,
   schema_tables_undeclared: UNDECLARED_TABLE_DEBT.size,
+  ledger_writers: LEDGER_WRITERS.size,
 });

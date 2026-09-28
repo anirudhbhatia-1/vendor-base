@@ -2484,6 +2484,63 @@ Five requirements. One held (reason and evidence were required, in their shapes)
 
 **Step 10.6: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 72 (28 September 2026) — step 10.7, prove money conservation
+
+One requirement, twelve scenarios, and five kinds of test. Every scenario was exercised by some walk, and every money walk ended by checking that the ledger's debits equalled its credits — which the database already guarantees on every posting, so the check could not fail. Nothing read the books against the records they summarise: a settlement that says a shop is owed 900 while the shop's payable reads 1,000 balances perfectly, and would have passed every walk. The first run of a real check found exactly that kind of break, made by the harness rather than the product: the assignment-custody walk's cleanup ran `TRUNCATE delivery_assignments CASCADE`, which silently deleted every partner earning, dispute answer and compensation the fulfilment and partner walks had posted and left their ledger postings owed to nobody. There was no money concurrency test after checkout — the refund cap, the payout submission, the batch run and the correction approval were each guarded only by a lock or a key nobody had raced — and the one property of the division that can drift was not tested at all. No static control stopped code outside the money services writing, or anything editing, the ledger.
+
+| Kind | Coverage |
+|---|---|
+| Unit / property | `settlement-division.spec` and `correction-impact.spec` gain seeded properties over 2,000 cases each: a division always leaves the customer's net split exactly, and the shop's goods always split exactly into payable and fee; any correction of any posting moves as much out as in, and correcting a posting to itself moves nothing. |
+| Integration | The ladder: 38 modules, each followed by `auditMoneyConservation` — the ledger against captures and refunds, each shop's settlements and payouts, each partner's settlement shares, return earnings, dispute answers, compensations and payouts, and the provider's payouts, with posted corrections counted on the record side; unmatched statement rows owned; history tables guarded. |
+| Concurrency | `money_conservation`: eight refunds on eight connections race for one allowance (three fit); one payout submitted twice at once (paid and posted once); two partner batch runs at once (one batch, one item); one correction approved by two operators at once (posted once). |
+| Provider contract | `provider-ports.spec` (unchanged): every provider operation's outcome, including a thrown or malformed answer contained as unknown. |
+| End-to-end | The fulfilment walk carries real orders from checkout through picking, delivery, settlement, refund, statement and payout against the real services; the Playwright journeys were not run in this pass. |
+
+| Scenario | Where it runs, conserved after |
+|---|---|
+| Partial vendor failure | Fulfilment: one shop of a two-shop order declines, its share released (`impact.released_minor`) |
+| Substitution | Fulfilment: `SUBSTITUTION_APPROVED` lines, the order then captured and settled |
+| Weight change | Fulfilment: `WEIGHT_APPROVED` lines, the order then captured and settled |
+| Timeout | Grouped checkout: unanswered payments abandoned after their deadline; fulfilment: overdue accepts and decisions timed out |
+| Duplicate webhook | Grouped checkout: replay suppressed, concurrent deliveries received once |
+| Refund | Fulfilment (G10 and the delivery-fee refund), statement walk, conservation race |
+| Waiting | Fulfilment: the counter wait paid on the earning and the settlement (9.5) |
+| Return | Fulfilment: the returned trip earned from the subsidy; partner payouts |
+| Dispute | Partner lifecycle and payouts (partner lines), fulfilment (VEN-50) |
+| Payout failure | Partner payouts: refused, held, released, re-paid; paid twice and owed back |
+| Reversal | Financial corrections |
+| Statement mismatch | Statement reconciliation and fulfilment |
+
+**P72-01 — conservation is read, not assumed.** `auditMoneyConservation` (`database/src/money-conservation.ts`) returns every breach with its subject and both figures. The ladder runs it after every module and fails naming the module; `GET /admin/finance/v2/ledger/conservation` shows it on the finance screen beside the trial balance.
+
+**P72-02 — the harness no longer destroys history.** The custody walk's cascading TRUNCATE is gone; its assignments stay until the rollback rehearsal clears them with everything else. With it removed, every module conserves money.
+
+**P72-03 — no interface can edit or force-balance the books.** A static control in `verify-static` allows ledger inserts only in the two money services and refuses any ledger UPDATE or DELETE in the database, API or worker source; the audit refuses a history table without its guard; corrections, the one path that posts chosen entries, are maker-checker above the policy limit (run 71).
+
+**Mutation results.** Each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| A settlement credits the shop one paisa more than its record | **The audit only**: VENDOR_PAYABLE after `partner_payouts`, whose own assertions passed |
+| A reconciled refund is marked succeeded and not posted | **The audit only**: CUSTOMER_CLEARING after `statement_reconciliation` |
+| A history table loses its guard | **The audit only**: HISTORY_EDITABLE after `money_lifecycle` |
+| A compensation posts one paisa more than decided | The partner walk's own balance check, before the audit |
+| No statement row routed at all | The fulfilment walk's own routing check, before the audit; the audit's statement check is proven on a planted row |
+| The refund cap read without its row lock | *Refunds racing for one allowance overran it* (8 of 8 fitted, three runs of three) — after the race was rebuilt on eight warmed connections: two calls on shared pools never overlapped, and the first form passed with the lock removed |
+| A division pays the shop one paisa more for 1 amount in 997 | The goods-split property — after it was added: the platform's share is the remainder, so the first property (the three shares sum) passed |
+| A stray ledger UPDATE in API source; a money service missing from the writers | The static control, both ways |
+| One planted breach of each kind in a rolled-back transaction | The audit names each: vendor, partner, customer, provider, statement, history |
+
+One probe was inconclusive and is not counted: a refund posting at its goods amount alone produced a zero posting on a delivery-fee refund, which the ledger refused before any audit ran.
+
+**Forward findings.** (11.5) A correction moves the books and not the record it corrects, so the audit counts corrections beside the records; paying or recovering the difference is a finance action with no screen yet. (D-12) Statements, payouts and provider calls are synthetic. (carried) The Playwright journeys were not run in this pass; a vendor payout the bank refuses opens no case; a refused capture is not retried.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 115 migration files, full ladder, 38 conservation checks (one per module); `money_conservation` 14 assertions (new), `financial_corrections` 27, `statement_reconciliation` 26, `partner_payouts` 28, `money_lifecycle` 43, `vendor_fulfilment` 313, `assignment_custody` 65. `pnpm typecheck`, `pnpm lint` (with the new static control), `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 615 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack.
+
+**Step 10.7: VERIFIED_LOCAL.**
+
+**Phase 10 exit gate.** Every scenario conserves money and balances per currency: the audit holds after every module, over everything each leaves (P72-01). Provider statements reconcile or create an owned, visible exception: run 70, and the audit's routing check. No interface can edit or force-balance history: the append-only guards, the audit's history check and the static control (P72-03), with corrections the only chosen-entry posting, maker-checker above the limit (run 71). **Phase 10 is VERIFIED_LOCAL** on every step (runs 66–72), with the carried findings above; production money remains gated by D-12.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

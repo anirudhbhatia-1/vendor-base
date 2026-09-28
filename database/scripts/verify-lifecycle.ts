@@ -43,6 +43,8 @@ import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
 import { verifyPartnerPayouts } from './verify-partner-payouts.js';
 import { verifyStatementReconciliation } from './verify-statement-reconciliation.js';
 import { verifyFinancialCorrections } from './verify-financial-corrections.js';
+import { auditMoneyConservation } from '../src/money-conservation.js';
+import { verifyMoneyConservation } from './verify-money-conservation.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -749,11 +751,21 @@ await withDatabaseClient(config, async (client) => {
   // with inline `throw new Error(...)` is not counted and reports null rather
   // than a zero that would read as "asserts nothing".
   const measured: Record<string, number | null> = {};
+  // 10.7: whatever a module left in the books must agree with what everyone
+  // is owed, so a breach names the module that caused it rather than being
+  // found at the end of the ladder.
+  let conservationChecks = 0;
   const measure = async (name: string, run: () => Promise<void>) => {
     takeAssertionCount();
     await run();
     const count = takeAssertionCount();
     measured[`${name}_assertions`] = count > 0 ? count : null;
+    const report = await auditMoneyConservation(client);
+    if (!report.conserved)
+      throw new Error(
+        `Money is not conserved after ${name}: ${JSON.stringify(report.breaches.slice(0, 10))}`,
+      );
+    conservationChecks += 1;
   };
   await measure('database_pool_resilience', () =>
     verifyDatabasePoolResilience(config.connectionString),
@@ -803,6 +815,7 @@ await withDatabaseClient(config, async (client) => {
     verifyStatementReconciliation(config.connectionString),
   );
   await measure('financial_corrections', () => verifyFinancialCorrections(config.connectionString));
+  await measure('money_conservation', () => verifyMoneyConservation(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);
@@ -1151,6 +1164,7 @@ await withDatabaseClient(config, async (client) => {
   writeEvent('database.lifecycle.verified', {
     fixture_hash: rebuiltHash,
     ...measured,
+    money_conservation_checks: conservationChecks,
     assertions_note: 'null: the module asserts with inline throws and is not yet counted',
     migrations: statuses.length,
     target: 'test',

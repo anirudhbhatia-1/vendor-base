@@ -5743,7 +5743,7 @@
       "name": "Ledger integrity queue",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/admin-pwa/app/admin-workspace.tsx loads the finance exception queue",
+      "notes": "The finance screen shows the trial balance and the conservation report -- the ledger read against captures, refunds, settlements, earnings and payouts per shop and partner -- beside the finance exception queue (audit run 72)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5754,7 +5754,11 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/admin-workspace.tsx", "e2e/cross-role-journey.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/finance-queues-panel.tsx",
+        "apps/admin-pwa/app/admin-workspace.tsx",
+        "e2e/cross-role-journey.spec.ts"
+      ],
       "phase_steps": ["10.7", "11.5"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",

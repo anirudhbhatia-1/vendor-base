@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { correctionAmount, impactSentence } from './corrections-panel.js';
+import { conservationSentence } from './finance-queues-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -48,6 +49,7 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
       'admin/finance/refunds',
       'admin/finance/v2/payout-jobs/daily',
       'admin/finance/v2/ledger',
+      'admin/finance/v2/ledger/conservation',
     ],
   ],
   ['order-intervention-panel.tsx', ['admin/control/orders']],
@@ -185,5 +187,22 @@ test('a correction amount is its debits, and its impact reads per owner (10.6)',
       change_debit_minor: 100,
     }),
     'vendor payable for shop 01a0e73e debited ₹1.00 more',
+  );
+});
+
+test('the finance screen says whether the books agree with the records (10.7)', () => {
+  assert.equal(
+    conservationSentence({ conserved: true, checked: { vendors: 3, partners: 2 }, breaches: [] }),
+    'The books agree with what 3 shops and 2 partners are owed.',
+  );
+  assert.match(
+    conservationSentence({
+      conserved: false,
+      checked: { vendors: 1, partners: 0 },
+      breaches: [
+        { invariant: 'VENDOR_PAYABLE', subject: 'shop-a', ledger_minor: 1, expected_minor: 0 },
+      ],
+    }),
+    /1 disagreement\(s\).*vendor payable for shop-a/,
   );
 });

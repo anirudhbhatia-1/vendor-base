@@ -57,3 +57,61 @@ test('an unbalanced side is refused', () => {
     CorrectionImpactError,
   );
 });
+
+function seeded(seed: number) {
+  let state = seed >>> 0;
+  return (below: number) => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state % below;
+  };
+}
+
+/** A random balanced posting over a handful of accounts and owners. */
+function posting(next: (below: number) => number) {
+  const accounts = [
+    ['SYNTH-ACCOUNT-PLATFORM-CLEARING', null],
+    ['SYNTH-ACCOUNT-VENDOR-PAYABLE', 'vendor-a'],
+    ['SYNTH-ACCOUNT-VENDOR-PAYABLE', 'vendor-b'],
+    ['SYNTH-ACCOUNT-PLATFORM-REVENUE', null],
+  ] as const;
+  const entries = [];
+  let open = 0;
+  for (let index = 0; index < 1 + next(4); index += 1) {
+    const [account, vendor] = accounts[next(accounts.length)] ?? accounts[0];
+    const value = 1 + next(50_000);
+    entries.push({
+      account_reference: account,
+      debit_minor: value,
+      credit_minor: 0,
+      vendor_location_id: vendor,
+    });
+    open += value;
+  }
+  const [account, vendor] = accounts[next(accounts.length)] ?? accounts[0];
+  entries.push({
+    account_reference: account,
+    debit_minor: 0,
+    credit_minor: open,
+    vendor_location_id: vendor,
+  });
+  return entries;
+}
+
+test('any correction of any posting moves as much money out as in (10.7)', () => {
+  const next = seeded(20_270_708);
+  for (let run = 0; run < 2_000; run += 1) {
+    const before = posting(next);
+    const after = posting(next);
+    const impact = correctionImpact(before, after);
+    const seen = JSON.stringify({ run, before, after, impact });
+    const change = impact.rows.reduce((sum, row) => sum + row.change_debit_minor, 0);
+    assert.equal(change, 0, seen);
+    assert.equal(
+      impact.impact_minor,
+      impact.rows.reduce((sum, row) => sum + Math.max(0, row.change_debit_minor), 0),
+      seen,
+    );
+    // Correcting a posting back to itself moves nothing.
+    assert.equal(correctionImpact(after, after).impact_minor, 0, seen);
+  }
+});

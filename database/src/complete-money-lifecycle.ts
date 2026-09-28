@@ -26,6 +26,7 @@ import { assembleTrialBalance, type LedgerAccountBalanceRow } from './ledger-bal
 import { divideOrder, OrderDivisionError, type OrderDivision } from './settlement-division.js';
 import { correctionImpact, CorrectionImpactError } from './correction-impact.js';
 import { resolveConfiguration } from './versioned-configuration.js';
+import { auditMoneyConservation } from './money-conservation.js';
 
 type StatementKind = 'PAYMENT' | 'PAYOUT' | 'REFUND';
 type ProviderState = 'FAILED' | 'SUCCEEDED' | 'UNKNOWN';
@@ -2955,6 +2956,16 @@ export class CompleteMoneyLifecycleService {
    * The books as they stand (10.1): every account in the catalogue with its
    * postings, and the two totals — shown only when they agree.
    */
+  /**
+   * Whether the books agree with what everyone is owed (10.7): the ledger read
+   * against captures, refunds, settlements, earnings and payouts per
+   * participant, with statement routing and history guards. Read-only.
+   */
+  async conservationReport(input: { readonly context: RequestContext }) {
+    admin(input.context);
+    return auditMoneyConservation(this.#pool);
+  }
+
   async ledgerTrialBalance(input: { readonly context: RequestContext }) {
     admin(input.context);
     const rows = await this.#pool.query<LedgerAccountBalanceRow>(

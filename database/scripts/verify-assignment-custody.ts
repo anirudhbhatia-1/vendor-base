@@ -1845,12 +1845,10 @@ export async function verifyAssignmentCustody(connectionString: string): Promise
     await service.close();
     await waits.close();
     await fieldOps.close();
-    await pool
-      .query(
-        `TRUNCATE marketplace.return_tasks, marketplace.custody_events,
-        marketplace.assignment_events, marketplace.delivery_assignments CASCADE`,
-      )
-      .catch(() => undefined);
+    // No TRUNCATE of the assignments here (10.7): CASCADE carried it into
+    // every partner earning, dispute answer and compensation earlier modules
+    // had posted, and left their ledger postings owed to nobody. The
+    // assignments stay; the rollback rehearsal clears them with the rest.
     await pool
       .query('DELETE FROM marketplace.access_membership_events WHERE user_id=ANY($1)', [
         [partnerOneId, partnerTwoId],

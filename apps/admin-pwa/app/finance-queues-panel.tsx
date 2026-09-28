@@ -32,6 +32,25 @@ type TrialBalance = {
   readonly totals: { readonly debit_minor: number; readonly credit_minor: number };
 };
 
+/** The conservation report (10.7), as the finance screen reads it. */
+export type Conservation = {
+  readonly conserved: boolean;
+  readonly checked: { readonly vendors: number; readonly partners: number };
+  readonly breaches: readonly {
+    readonly invariant: string;
+    readonly subject: string;
+    readonly ledger_minor: number | null;
+    readonly expected_minor: number | null;
+  }[];
+};
+
+export function conservationSentence(report: Conservation): string {
+  if (report.conserved)
+    return `The books agree with what ${report.checked.vendors} shops and ${report.checked.partners} partners are owed.`;
+  const first = report.breaches[0];
+  return `${report.breaches.length} disagreement(s) between the books and the records; first: ${first?.invariant.toLowerCase().replaceAll('_', ' ')} for ${first?.subject}.`;
+}
+
 function rupees(minor: unknown): string {
   const value = Number(minor ?? 0);
   return `₹${(Number.isFinite(value) ? value / 100 : 0).toFixed(2)}`;
@@ -50,6 +69,7 @@ export function FinanceQueuesPanel() {
   const [exceptions, setExceptions] = useState<Row[]>([]);
   const [ledger, setLedger] = useState<TrialBalance | null>(null);
   const [ledgerNotice, setLedgerNotice] = useState('Loading the trial balance…');
+  const [conservation, setConservation] = useState('Checking the books against the records…');
   const [payoutId, setPayoutId] = useState('');
   const [message, setMessage] = useState('Loading the money queues…');
 
@@ -82,6 +102,16 @@ export function FinanceQueuesPanel() {
       setLedger(null);
       setLedgerNotice(
         error instanceof Error ? error.message : 'The trial balance could not be read.',
+      );
+    }
+    // A balanced book can still disagree with what everyone is owed (10.7):
+    // the conservation report reads the ledger against the records.
+    try {
+      const report = await adminRequest<Conservation>('admin/finance/v2/ledger/conservation');
+      setConservation(conservationSentence(report));
+    } catch (error) {
+      setConservation(
+        error instanceof Error ? error.message : 'The conservation report could not be read.',
       );
     }
   }, []);
@@ -176,6 +206,7 @@ export function FinanceQueuesPanel() {
       <div className="catalogue-flag" style={{ marginTop: '1rem' }}>
         <p className="eyebrow">TRIAL BALANCE</p>
         <p aria-live="polite">{ledgerNotice}</p>
+        <p aria-live="polite">{conservation}</p>
         {ledger ? (
           <ul>
             {ledger.accounts.map((account) => (

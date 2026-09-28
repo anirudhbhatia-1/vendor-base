@@ -340,6 +340,17 @@ export class CompleteMoneyAdminController {
     }
   }
 
+  /** Whether the books agree with what everyone is owed (10.7). */
+  @Get('ledger/conservation')
+  @manage
+  async conservation() {
+    try {
+      return await this.money.conservationReport({ context: currentRequestContext() });
+    } catch (error) {
+      translateDomainError(error);
+    }
+  }
+
   @Get('ledger/transactions/:ledger_transaction_id')
   @manage
   async ledgerTransaction(@Param('ledger_transaction_id') ledgerTransactionId: string) {

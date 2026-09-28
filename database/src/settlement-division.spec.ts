@@ -89,3 +89,56 @@ test('impossible inputs are refused rather than divided', () => {
   assert.throws(() => divideOrder(order({ goods_minor: 1.5 })), OrderDivisionError);
   assert.throws(() => divideOrder(order({ partner_payable_minor: -1 })), OrderDivisionError);
 });
+
+/** A seeded generator, so a failing case reproduces from its seed. */
+function seeded(seed: number) {
+  let state = seed >>> 0;
+  return (below: number) => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state % below;
+  };
+}
+
+test('every division conserves what the customer paid, whatever the order (10.7)', () => {
+  const next = seeded(20_270_707);
+  for (let run = 0; run < 2_000; run += 1) {
+    const goods = next(200_000);
+    const delivery = next(10_000);
+    const tip = next(5_000);
+    const captured = goods + delivery + tip;
+    const refunds = next(captured + 1);
+    const goodsRefunds = Math.min(next(refunds + 1), goods);
+    const partner = next(delivery + tip + 1);
+    const input = order({
+      captured_minor: captured,
+      refunds_minor: refunds,
+      goods_minor: goods,
+      goods_refunds_minor: goodsRefunds,
+      partner_payable_minor: partner,
+      commission_basis_points: next(3_001),
+      fee_applies: next(2) === 1,
+    });
+    const division = divideOrder(input);
+    const seen = JSON.stringify({ run, input, division });
+    assert.equal(division.customer_net_minor, captured - refunds, seen);
+    assert.equal(
+      division.vendor_payable_minor +
+        division.partner_payable_minor +
+        division.platform_remainder_minor,
+      division.customer_net_minor,
+      seen,
+    );
+    assert.ok(division.vendor_payable_minor >= 0 && division.vendor_fee_minor >= 0, seen);
+    // The platform's share is the remainder, so the three always sum; what
+    // can drift is the shop's goods, which divide exactly into its payable
+    // and the fee.
+    assert.equal(
+      division.vendor_payable_minor + division.vendor_fee_minor,
+      division.remaining_goods_minor,
+      seen,
+    );
+    assert.equal(division.remaining_goods_minor, goods - goodsRefunds, seen);
+    assert.ok(division.vendor_payable_minor <= goods - goodsRefunds, seen);
+    for (const value of Object.values(division)) assert.ok(Number.isSafeInteger(value), seen);
+  }
+});
