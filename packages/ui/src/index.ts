@@ -71,6 +71,16 @@ export {
 } from './shell.js';
 export { Icon, type IconName } from './icons.js';
 export {
+  DataTable,
+  DescriptionList,
+  type DataTableColumn,
+  type DataTableProps,
+  type DescriptionItem,
+} from './data-table.js';
+export { ConfirmDialog, type ConfirmDialogProps, type ConfirmReason } from './confirm-dialog.js';
+export { usePolledResource, type PolledResource } from './use-polled-resource.js';
+export { actionErrorText, describeError, type PresentableError } from './error-presentation.js';
+export {
   DEFAULT_MAP_CENTRE,
   LocationPicker,
   type LocationPickerCopy,

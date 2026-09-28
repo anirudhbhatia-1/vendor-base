@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { VendorLocationSettings } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   ErrorState,
@@ -85,7 +86,7 @@ export function StoreSettingsPanel({ vendorLocationId }: { readonly vendorLocati
       const client = await vendorApiClient();
       adopt(await client.vendor.settings.readLocation(vendorLocationId));
     } catch (cause) {
-      setLoadError(cause instanceof Error ? cause.message : 'Your settings could not be loaded.');
+      setLoadError(actionErrorText(cause, 'Your settings could not be loaded.'));
     } finally {
       setLoading(false);
     }
@@ -171,7 +172,7 @@ export function StoreSettingsPanel({ vendorLocationId }: { readonly vendorLocati
       );
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'That could not be changed.');
+      setError(actionErrorText(cause, 'That could not be changed.'));
     } finally {
       setBusy(false);
     }

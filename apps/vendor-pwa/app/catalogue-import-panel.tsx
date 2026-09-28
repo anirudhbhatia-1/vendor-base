@@ -1,5 +1,6 @@
 'use client';
 
+import { actionErrorText } from '@neighbourhood-store/ui';
 import { useState } from 'react';
 import { vendorRequest } from './authenticated-api';
 
@@ -33,7 +34,7 @@ export function CatalogueImportPanel({ vendorLocationId }: { vendorLocationId: s
       setCsv(result.content);
       setMessage(`Template ${result.template_version} loaded. Replace the example rows.`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The template failed to load.');
+      setMessage(actionErrorText(error, 'The template failed to load.'));
     }
   }
 
@@ -68,7 +69,7 @@ export function CatalogueImportPanel({ vendorLocationId }: { vendorLocationId: s
         `Staged: ${result.accepted_rows ?? 0} rows accepted, ${result.rejected_rows ?? 0} rejected. Nothing is live yet.`,
       );
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The import could not be staged.');
+      setMessage(actionErrorText(error, 'The import could not be staged.'));
     }
   }
 
@@ -85,7 +86,7 @@ export function CatalogueImportPanel({ vendorLocationId }: { vendorLocationId: s
       setMessage(`${result.committed_rows ?? staged.accepted_rows ?? 0} products are now live.`);
       setStaged(null);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The import could not be committed.');
+      setMessage(actionErrorText(error, 'The import could not be committed.'));
     }
   }
 

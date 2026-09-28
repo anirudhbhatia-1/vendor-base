@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -101,7 +102,7 @@ export function CatalogueStudio({ vendorLocationId }: { readonly vendorLocationI
       >(`vendor/locations/${vendorLocationId}/catalogue/products`);
       setProducts(productList(response));
     } catch (cause) {
-      setLoadError(cause instanceof Error ? cause.message : 'Your catalogue could not be loaded.');
+      setLoadError(actionErrorText(cause, 'Your catalogue could not be loaded.'));
     } finally {
       setLoading(false);
     }
@@ -172,7 +173,7 @@ export function CatalogueStudio({ vendorLocationId }: { readonly vendorLocationI
       await load();
       setNotice('Product created and published to customer discovery.');
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : 'The product could not be created.');
+      setFormError(actionErrorText(cause, 'The product could not be created.'));
     } finally {
       setBusy(false);
     }
@@ -193,7 +194,7 @@ export function CatalogueStudio({ vendorLocationId }: { readonly vendorLocationI
           : 'Product is hidden from customer discovery.',
       );
     } catch (cause) {
-      setNotice(cause instanceof Error ? cause.message : 'The status could not be changed.');
+      setNotice(actionErrorText(cause, 'The status could not be changed.'));
     } finally {
       setBusy(false);
     }

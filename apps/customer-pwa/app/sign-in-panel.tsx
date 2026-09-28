@@ -1,5 +1,6 @@
 'use client';
 
+import { actionErrorText } from '@neighbourhood-store/ui';
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import type {
@@ -135,7 +136,7 @@ export function SignInPanel({
       setStep('code');
       showStatus('Verification code requested. Enter the six-digit code to continue.');
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'The request could not be completed.');
+      showError(actionErrorText(error, 'The request could not be completed.'));
     } finally {
       setBusy(false);
     }
@@ -168,7 +169,7 @@ export function SignInPanel({
         ),
       );
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Verification could not be completed.');
+      showError(actionErrorText(error, 'Verification could not be completed.'));
     } finally {
       setBusy(false);
     }
@@ -189,7 +190,7 @@ export function SignInPanel({
       await reloadSettings();
       showStatus('Optional profile and language preference saved.');
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Profile was not saved.');
+      showError(actionErrorText(error, 'Profile was not saved.'));
     } finally {
       setBusy(false);
     }
@@ -213,7 +214,7 @@ export function SignInPanel({
       await reloadSettings();
       showStatus(granted ? 'Marketing consent withdrawn.' : 'Marketing consent granted.');
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Consent was not changed.');
+      showError(actionErrorText(error, 'Consent was not changed.'));
     } finally {
       setBusy(false);
     }
@@ -232,7 +233,7 @@ export function SignInPanel({
       await reloadSettings();
       showStatus('Notification preference saved. Required alerts remain enabled.');
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Preference was not changed.');
+      showError(actionErrorText(error, 'Preference was not changed.'));
     } finally {
       setBusy(false);
     }
@@ -253,7 +254,7 @@ export function SignInPanel({
       router.replace('/login');
       router.refresh();
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Sign-out could not be completed.');
+      showError(actionErrorText(error, 'Sign-out could not be completed.'));
     } finally {
       setBusy(false);
     }

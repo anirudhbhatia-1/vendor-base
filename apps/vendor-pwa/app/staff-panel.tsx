@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -120,7 +121,7 @@ export function StaffPanel({ vendorLocationId }: { readonly vendorLocationId: st
       setActivity(history.activity);
       setAccess(mine);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'The staff list failed to load.');
+      setLoadError(actionErrorText(error, 'The staff list failed to load.'));
     } finally {
       setLoading(false);
     }
@@ -152,7 +153,7 @@ export function StaffPanel({ vendorLocationId }: { readonly vendorLocationId: st
     } catch (error) {
       setNotice({
         tone: 'danger',
-        text: error instanceof Error ? error.message : 'The invitation failed.',
+        text: actionErrorText(error, 'The invitation failed.'),
       });
     } finally {
       setBusy(false);
@@ -179,7 +180,7 @@ export function StaffPanel({ vendorLocationId }: { readonly vendorLocationId: st
     } catch (error) {
       setNotice({
         tone: 'danger',
-        text: error instanceof Error ? error.message : 'The change could not be saved.',
+        text: actionErrorText(error, 'The change could not be saved.'),
       });
     } finally {
       setBusy(false);

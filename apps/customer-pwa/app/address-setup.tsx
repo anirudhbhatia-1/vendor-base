@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from 'react';
 import {
+  actionErrorText,
   Button,
   Field,
   LocationPicker,
@@ -63,7 +64,7 @@ export function AddressSetup({ onSaved }: { readonly onSaved: () => void }) {
       window.dispatchEvent(new Event('neighbourhood:customer-address'));
       onSaved();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'That address could not be saved.');
+      setError(actionErrorText(cause, 'That address could not be saved.'));
     } finally {
       setBusy(false);
     }

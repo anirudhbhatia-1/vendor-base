@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { CustomerSupportCase } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -29,7 +30,7 @@ export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: strin
       else setCases((await client.orders.supportCases()).cases);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Support cases could not be loaded.');
+      setError(actionErrorText(cause, 'Support cases could not be loaded.'));
     } finally {
       setLoaded(true);
     }
@@ -48,7 +49,7 @@ export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: strin
       form.reset();
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Message could not be sent.');
+      setError(actionErrorText(cause, 'Message could not be sent.'));
     }
   }
 

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { catalogueImageUrl, type Product, type Storefront } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -203,7 +204,7 @@ export function StorePage({ vendorLocationId }: { readonly vendorLocationId: str
           : await client.catalogue.storefront(vendorLocationId),
       );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'This store could not be opened.');
+      setError(actionErrorText(cause, 'This store could not be opened.'));
     }
   }
 

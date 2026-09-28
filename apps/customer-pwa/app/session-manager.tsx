@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '@neighbourhood-store/contracts';
-import { Button, Card, ErrorState, LoadingState, PageHeader } from '@neighbourhood-store/ui';
+import {
+  actionErrorText,
+  Button,
+  Card,
+  ErrorState,
+  LoadingState,
+  PageHeader,
+} from '@neighbourhood-store/ui';
 import { clearCustomerSession, customerApiClient } from './customer-session';
 import { StatePill } from './state-pill';
 
@@ -15,7 +22,7 @@ export function SessionManager() {
       setSessions((await (await customerApiClient()).auth.sessions()).sessions);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Sessions could not be loaded.');
+      setError(actionErrorText(cause, 'Sessions could not be loaded.'));
     } finally {
       setLoaded(true);
     }

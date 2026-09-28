@@ -6,7 +6,18 @@ import { usePathname, useRouter } from 'next/navigation';
 import type { WhoAmI } from '@neighbourhood-store/contracts';
 import { revokeAndSignOut } from '@neighbourhood-store/pwa-auth';
 import { RequireWorkspaceRole } from '@neighbourhood-store/pwa-auth/guard';
-import { AppShell, Button, StatusPill, TopBar } from '@neighbourhood-store/ui';
+import {
+  actionErrorText,
+  AppShell,
+  Button,
+  ConfirmDialog,
+  DataTable,
+  formatMoneyMinor,
+  Notice as StatusNotice,
+  StatusPill,
+  TopBar,
+  type DataTableColumn,
+} from '@neighbourhood-store/ui';
 import { adminRequest, apiUrl } from './authenticated-api';
 import { CorrectionsPanel } from './corrections-panel';
 import { FinanceQueuesPanel } from './finance-queues-panel';
@@ -116,6 +127,66 @@ export type AdminView =
  * Cloudflare Pages build is a static export where no proxy runs, and the proxy
  * never checked the caller's role in any build.
  */
+/** Reads the first present string field, so rows from either finance surface render. */
+function rowText(row: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return '—';
+}
+
+function rowMoney(row: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return formatMoneyMinor(value);
+  }
+  return '—';
+}
+
+/**
+ * The finance exception queue as a table (design.md admin rules), in place of
+ * the JSON dump operators were reading. Field names are read defensively so
+ * the v2 exception shape and older rows both render.
+ */
+const FINANCE_EXCEPTION_COLUMNS: readonly DataTableColumn<Record<string, unknown>>[] = [
+  {
+    key: 'kind',
+    header: 'Kind',
+    render: (row) => rowText(row, ['exception_kind', 'kind', 'exception_type']),
+  },
+  {
+    key: 'state',
+    header: 'State',
+    render: (row) => rowText(row, ['exception_state', 'state', 'status']),
+  },
+  {
+    key: 'reference',
+    header: 'Payment / order',
+    render: (row) =>
+      rowText(row, [
+        'source_checkout_reference',
+        'source_order_reference',
+        'order_reference',
+        'payment_transaction_id',
+      ]),
+  },
+  {
+    key: 'amount',
+    header: 'Amount',
+    numeric: true,
+    render: (row) => rowMoney(row, ['amount_minor', 'disputed_minor', 'item_minor']),
+  },
+  {
+    key: 'opened',
+    header: 'Opened',
+    render: (row) => {
+      const opened = rowText(row, ['opened_at', 'created_at', 'recorded_at']);
+      return opened === '—' ? opened : new Date(opened).toLocaleString();
+    },
+  },
+];
+
 export function AdminWorkspace({ view }: { view: AdminView }) {
   return (
     <RequireWorkspaceRole
@@ -160,6 +231,12 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
   const [refundMinor, setRefundMinor] = useState('');
   const [refundId, setRefundId] = useState('');
   const [refundVersion, setRefundVersion] = useState(1);
+  // The decision modal for refund actions: which action is being confirmed,
+  // whether it is running, and its failure — kept inside the dialog so the
+  // operator's context survives the error (design.md §12).
+  const [refundConfirm, setRefundConfirm] = useState<'create' | 'approve' | null>(null);
+  const [refundBusy, setRefundBusy] = useState(false);
+  const [refundError, setRefundError] = useState<string | null>(null);
   const [ordersMonitor, setOrdersMonitor] = useState<Record<string, unknown>[]>([]);
   const [zones, setZones] = useState<
     readonly {
@@ -531,53 +608,53 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
   // operator therefore picks the payment and states the item component; tax,
   // delivery, tip and discount reversal are separate ledger components.
   async function createRefund() {
-    if (!refundPaymentId || !refundOrderReference || !refundMinor) {
-      setOutput('Select a payment, then enter the order reference and item amount.');
-      return;
-    }
     const reference = `REFUND-${Date.now().toString(36).toUpperCase()}`;
-    try {
-      const result = (await request('admin/finance/refunds', {
-        method: 'POST',
-        body: JSON.stringify({
-          command_reference: reference,
-          delivery_minor: 0,
-          discount_reversal_minor: 0,
-          item_minor: Number(refundMinor),
-          payment_transaction_id: refundPaymentId,
-          provider_operation_reference: `SYNTH-REFUND-${reference}`,
-          provider_scenario: 'SUCCESS',
-          source_order_reference: refundOrderReference,
-          tax_minor: 0,
-          tip_minor: 0,
-          trigger_code: 'PARTIAL_ITEM_REFUND',
-        }),
-      })) as { refund_id: string; version?: number };
-      setRefundId(result.refund_id);
-      setRefundVersion(result.version ?? 1);
-      setOutput(`Refund created: ${result.refund_id}`);
-    } catch (error) {
-      setOutput(error instanceof Error ? error.message : 'Refund creation failed.');
-    }
+    const result = (await request('admin/finance/refunds', {
+      method: 'POST',
+      body: JSON.stringify({
+        command_reference: reference,
+        delivery_minor: 0,
+        discount_reversal_minor: 0,
+        item_minor: Number(refundMinor),
+        payment_transaction_id: refundPaymentId,
+        provider_operation_reference: `SYNTH-REFUND-${reference}`,
+        provider_scenario: 'SUCCESS',
+        source_order_reference: refundOrderReference,
+        tax_minor: 0,
+        tip_minor: 0,
+        trigger_code: 'PARTIAL_ITEM_REFUND',
+      }),
+    })) as { refund_id: string; version?: number };
+    setRefundId(result.refund_id);
+    setRefundVersion(result.version ?? 1);
+    setOutput(`Refund created: ${result.refund_id}`);
   }
 
   async function approveRefund() {
-    if (!refundId) {
-      setOutput('Create a refund first.');
-      return;
-    }
+    const result = (await request(`admin/finance/refunds/${refundId}/approve-submit`, {
+      method: 'POST',
+      body: JSON.stringify({
+        command_reference: `APPROVE-${Date.now().toString(36).toUpperCase()}`,
+        expected_version: refundVersion,
+      }),
+    })) as { version?: number; refund_state?: string };
+    setRefundVersion(result.version ?? refundVersion + 1);
+    setOutput(`Refund ${refundId} ${result.refund_state ?? 'approved and submitted'}.`);
+  }
+
+  /** Runs the confirmed refund action; a failure stays inside the dialog. */
+  async function confirmRefundAction() {
+    if (!refundConfirm) return;
+    setRefundBusy(true);
+    setRefundError(null);
     try {
-      const result = (await request(`admin/finance/refunds/${refundId}/approve-submit`, {
-        method: 'POST',
-        body: JSON.stringify({
-          command_reference: `APPROVE-${Date.now().toString(36).toUpperCase()}`,
-          expected_version: refundVersion,
-        }),
-      })) as { version?: number; refund_state?: string };
-      setRefundVersion(result.version ?? refundVersion + 1);
-      setOutput(`Refund ${refundId} ${result.refund_state ?? 'approved and submitted'}.`);
-    } catch (error) {
-      setOutput(error instanceof Error ? error.message : 'Refund approval failed.');
+      if (refundConfirm === 'create') await createRefund();
+      else await approveRefund();
+      setRefundConfirm(null);
+    } catch (cause) {
+      setRefundError(actionErrorText(cause, 'The refund action failed.'));
+    } finally {
+      setRefundBusy(false);
     }
   }
 
@@ -1185,11 +1262,16 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
               </button>
             </div>
             {financeExceptions.length > 0 && (
-              <div className="catalogue-flag">
-                <pre style={{ fontSize: '11px', overflowX: 'auto' }}>
-                  {JSON.stringify(financeExceptions, null, 2)}
-                </pre>
-              </div>
+              <DataTable
+                caption="Finance exceptions"
+                columns={FINANCE_EXCEPTION_COLUMNS}
+                rows={financeExceptions}
+                rowKey={(row) =>
+                  rowText(row, ['finance_exception_id', 'exception_id']) !== '—'
+                    ? rowText(row, ['finance_exception_id', 'exception_id'])
+                    : JSON.stringify(row)
+                }
+              />
             )}
           </section>
           <OrderInterventionPanel />
@@ -1259,11 +1341,25 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
                 <button type="button" onClick={() => void loadOrdersMonitor()}>
                   Refresh order list
                 </button>
-                <button type="button" onClick={() => void createRefund()}>
-                  Create refund
+                <button
+                  type="button"
+                  disabled={!refundPaymentId || !refundOrderReference || !refundMinor}
+                  onClick={() => {
+                    setRefundError(null);
+                    setRefundConfirm('create');
+                  }}
+                >
+                  Create refund…
                 </button>
-                <button type="button" onClick={() => void approveRefund()} disabled={!refundId}>
-                  Approve &amp; submit
+                <button
+                  type="button"
+                  disabled={!refundId}
+                  onClick={() => {
+                    setRefundError(null);
+                    setRefundConfirm('approve');
+                  }}
+                >
+                  Approve &amp; submit…
                 </button>
               </div>
               {refundId && (
@@ -1273,6 +1369,35 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
               )}
             </div>
           </section>
+          <ConfirmDialog
+            busy={refundBusy}
+            confirmLabel={refundConfirm === 'approve' ? 'Approve and submit' : 'Create refund'}
+            error={refundError}
+            onCancel={() => setRefundConfirm(null)}
+            onConfirm={() => void confirmRefundAction()}
+            open={refundConfirm !== null}
+            title={
+              refundConfirm === 'approve'
+                ? 'Approve this refund and submit it to the provider'
+                : `Propose a refund of ${refundMinor ? formatMoneyMinor(Number(refundMinor)) : 'the entered amount'}`
+            }
+            tone="danger"
+          >
+            {refundConfirm === 'approve' ? (
+              <p>
+                Refund {refundId} will be submitted to the payment provider and posted to the
+                ledger. This is the independent second approval; it cannot be withdrawn once
+                submitted.
+              </p>
+            ) : (
+              <p>
+                A refund proposal of {refundMinor ? formatMoneyMinor(Number(refundMinor)) : '—'} on
+                order {refundOrderReference || '—'} will be created against the selected payment. It
+                moves no money until a second person approves it, and it holds part of the order's
+                refund cap while open.
+              </p>
+            )}
+          </ConfirmDialog>
         </section>
       )}
       {(view === 'reporting' || view === 'audit') && (
@@ -1289,7 +1414,7 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
             {notices.map((notice) => (
               <p key={notice.in_app_notification_id}>{notice.template_key.replaceAll('.', ' ')}</p>
             ))}
-            <pre>{output}</pre>
+            <StatusNotice tone="information">{output}</StatusNotice>
           </section>
         </>
       )}

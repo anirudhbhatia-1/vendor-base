@@ -12,6 +12,7 @@ import type {
   Storefront,
 } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -343,7 +344,7 @@ export function HomeFeed({ view = 'home' }: { readonly view?: FeedView }) {
         setLoaded(true);
       } catch (cause) {
         if (request.current !== ticket) return;
-        setError(cause instanceof Error ? cause.message : 'Stores could not be loaded.');
+        setError(actionErrorText(cause, 'Stores could not be loaded.'));
       } finally {
         if (request.current === ticket) setLoading(false);
       }
@@ -375,7 +376,7 @@ export function HomeFeed({ view = 'home' }: { readonly view?: FeedView }) {
         setAddresses([]);
         return null;
       }
-      setError(cause instanceof Error ? cause.message : 'Your addresses could not be loaded.');
+      setError(actionErrorText(cause, 'Your addresses could not be loaded.'));
       return null;
     } finally {
       setAddressesLoaded(true);

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -181,7 +182,7 @@ export function NotificationInbox() {
       setNotices('notifications' in result ? result.notifications : []);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Your updates could not be loaded.');
+      setError(actionErrorText(cause, 'Your updates could not be loaded.'));
     } finally {
       setLoaded(true);
     }

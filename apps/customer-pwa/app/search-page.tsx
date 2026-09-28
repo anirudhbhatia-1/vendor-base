@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { Address, SearchResult } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Card,
   EmptyState,
   ErrorState,
@@ -67,7 +68,7 @@ export function SearchPage() {
           if (active) setResults(body.results);
         })
         .catch((cause: unknown) => {
-          if (active) setError(cause instanceof Error ? cause.message : 'Search failed.');
+          if (active) setError(actionErrorText(cause, 'Search failed.'));
         })
         .finally(() => {
           if (active) setLoading(false);

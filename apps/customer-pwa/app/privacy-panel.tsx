@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   ErrorState,
@@ -30,7 +31,7 @@ export function PrivacyPanel() {
       setRequests(result.requests as PrivacyRequest[]);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Privacy requests could not be loaded.');
+      setError(actionErrorText(cause, 'Privacy requests could not be loaded.'));
     } finally {
       setLoaded(true);
     }
@@ -47,7 +48,7 @@ export function PrivacyPanel() {
       );
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The request could not be created.');
+      setError(actionErrorText(cause, 'The request could not be created.'));
     }
   }
   if (!loaded) return <LoadingState label="Loading privacy controls…" lines={3} />;

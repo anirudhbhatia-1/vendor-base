@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { LocationPicker, type GeoPoint } from '@neighbourhood-store/ui';
+import { actionErrorText, LocationPicker, type GeoPoint } from '@neighbourhood-store/ui';
 import { vendorApiClient } from './authenticated-api';
 import { useMapsConfig } from './maps-config';
 
@@ -51,7 +51,7 @@ export function VendorOnboardingPanel() {
       setStep('profile');
       setMessage(`Application created: ${result.onboarding_case_id}. Fill in your store profile.`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Application creation failed.');
+      setMessage(actionErrorText(error, 'Application creation failed.'));
     } finally {
       setBusy(false);
     }
@@ -68,7 +68,7 @@ export function VendorOnboardingPanel() {
       });
       setMessage(`Invitation claimed. Version: ${result.version}`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Claim failed.');
+      setMessage(actionErrorText(error, 'Claim failed.'));
     } finally {
       setBusy(false);
     }
@@ -104,7 +104,7 @@ export function VendorOnboardingPanel() {
       setStep('documents');
       setMessage('Profile submitted. Upload required verification documents.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Profile submission failed.');
+      setMessage(actionErrorText(error, 'Profile submission failed.'));
     } finally {
       setBusy(false);
     }
@@ -144,7 +144,7 @@ export function VendorOnboardingPanel() {
       setStep('status');
       setMessage('Document uploaded. Check status for admin review progress.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Document upload failed.');
+      setMessage(actionErrorText(error, 'Document upload failed.'));
     } finally {
       setBusy(false);
     }
@@ -159,7 +159,7 @@ export function VendorOnboardingPanel() {
       setCaseStatus(status as Record<string, unknown>);
       setMessage('Case status loaded from server.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Status check failed.');
+      setMessage(actionErrorText(error, 'Status check failed.'));
     } finally {
       setBusy(false);
     }

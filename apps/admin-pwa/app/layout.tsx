@@ -25,7 +25,7 @@ const body = Noto_Sans({
 
 export const metadata: Metadata = {
   title: 'Admin · Neighbourhood Store',
-  description: 'Synthetic vendor publication control room for local company development.',
+  description: 'Operations control plane: queues, orders, support and finance.',
 };
 
 // Without this Next 16 emits no viewport meta at all, so mobile browsers lay the

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -72,7 +73,7 @@ export function InsightsPanel({ vendorLocationId }: { readonly vendorLocationId:
       setInsights(summary);
       setCases(caseBody.cases ?? []);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Your numbers could not be loaded.');
+      setError(actionErrorText(cause, 'Your numbers could not be loaded.'));
     } finally {
       setLoading(false);
     }

@@ -11,6 +11,7 @@ import {
   type PaymentMethod,
 } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -333,7 +334,7 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
       setNow(Date.now());
     } catch (cause) {
       if (generation !== quoteGeneration.current) return;
-      setFailure(cause instanceof Error ? cause.message : 'A quote could not be created.');
+      setFailure(actionErrorText(cause, 'A quote could not be created.'));
     } finally {
       if (generation === quoteGeneration.current) setBusy(false);
     }

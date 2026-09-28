@@ -1,5 +1,6 @@
 'use client';
 
+import { actionErrorText } from '@neighbourhood-store/ui';
 import {
   createContext,
   useCallback,
@@ -140,7 +141,7 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
       const loaded = await client.cart.current();
       adopt(loaded.groups.length > 0 ? await ensureAddress(loaded) : loaded, ticket);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Your basket could not be loaded.');
+      setError(actionErrorText(cause, 'Your basket could not be loaded.'));
     }
   }, [adopt, ensureAddress]);
 
@@ -189,7 +190,7 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
           ticket,
         );
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'Your basket could not be updated.');
+        setError(actionErrorText(cause, 'Your basket could not be updated.'));
         // A rejected optimistic-version write means someone else moved the
         // line; re-reading is the only way back to a state worth showing.
         await refresh();
@@ -215,7 +216,7 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
           ticket,
         );
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'That preference could not be saved.');
+        setError(actionErrorText(cause, 'That preference could not be saved.'));
         await refresh();
       } finally {
         markBusy(line.catalogue_variant_id, false);
@@ -238,7 +239,7 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
           ticket,
         );
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'That store group could not be updated.');
+        setError(actionErrorText(cause, 'That store group could not be updated.'));
         await refresh();
       }
     },
@@ -262,7 +263,7 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
         ),
       };
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Your basket could not be rechecked.');
+      setError(actionErrorText(cause, 'Your basket could not be rechecked.'));
       return { changed: false };
     }
   }, [refresh]);
@@ -275,7 +276,7 @@ export function CartProvider({ children }: { readonly children: ReactNode }) {
         const client = await customerApiClient();
         adopt(await client.cart.removeLine(line.cart_line_id), ticket);
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'That line could not be removed.');
+        setError(actionErrorText(cause, 'That line could not be removed.'));
         await refresh();
       } finally {
         markBusy(line.catalogue_variant_id, false);

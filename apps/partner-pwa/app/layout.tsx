@@ -25,7 +25,7 @@ const body = Noto_Sans({
 
 export const metadata: Metadata = {
   title: 'Delivery Partner · Neighbourhood Store',
-  description: 'Synthetic assignment and custody workbench for local company development.',
+  description: 'Your deliveries: offers, pickups, proof of handover and earnings.',
 };
 
 // Without this Next 16 emits no viewport meta at all, so mobile browsers lay the

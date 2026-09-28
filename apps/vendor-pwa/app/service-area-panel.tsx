@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -139,7 +140,7 @@ export function ServiceAreaPanel({ vendorLocationId }: { readonly vendorLocation
       setZones(zoneResult.zones);
       setClosures(closureResult.closures);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'The service area failed to load.');
+      setLoadError(actionErrorText(error, 'The service area failed to load.'));
     } finally {
       setLoading(false);
     }
@@ -167,7 +168,7 @@ export function ServiceAreaPanel({ vendorLocationId }: { readonly vendorLocation
     } catch (error) {
       setNotice({
         tone: 'danger',
-        text: error instanceof Error ? error.message : 'That change did not save.',
+        text: actionErrorText(error, 'That change did not save.'),
       });
     } finally {
       setBusy(false);
@@ -191,7 +192,7 @@ export function ServiceAreaPanel({ vendorLocationId }: { readonly vendorLocation
     } catch (error) {
       setNotice({
         tone: 'danger',
-        text: error instanceof Error ? error.message : 'The boundary is not a polygon.',
+        text: actionErrorText(error, 'The boundary is not a polygon.'),
       });
       return;
     }

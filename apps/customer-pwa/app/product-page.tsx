@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { catalogueImageUrl, type Product, type Storefront } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   ErrorState,
@@ -53,7 +54,7 @@ export function ProductPage({
         if (active) setStore(result);
       })
       .catch((cause: unknown) => {
-        if (active) setError(cause instanceof Error ? cause.message : 'Product unavailable');
+        if (active) setError(actionErrorText(cause, 'Product unavailable'));
       });
     return () => {
       active = false;

@@ -1099,3 +1099,131 @@
 .ns-location--invalid .ns-location__map {
   border-color: var(--danger);
 }
+/* ---------------------------------------------------------------- */
+/* Operations table (DataTable)                                      */
+/* Flat rows, 44px admin targets, tabular numerals for money.        */
+/* ---------------------------------------------------------------- */
+
+.ns-table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.ns-table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.ns-table__head {
+  position: sticky;
+  inset-block-start: 0;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-align: start;
+  padding: 12px 16px;
+  border-block-end: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.ns-table__head--open {
+  inline-size: 56px;
+}
+
+.ns-table__cell {
+  padding: 12px 16px;
+  border-block-end: 1px solid var(--border);
+  color: var(--text-primary);
+  vertical-align: top;
+  min-block-size: 44px;
+}
+
+.ns-table__row:last-child .ns-table__cell {
+  border-block-end: none;
+}
+
+.ns-table__cell--numeric {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.ns-table__cell--open {
+  text-align: end;
+  padding-block: 6px;
+}
+
+.ns-table__row--interactive {
+  cursor: pointer;
+}
+
+.ns-table__row--interactive:hover {
+  background: var(--surface-subtle);
+}
+
+.ns-table-empty {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  padding: 24px;
+}
+
+/* ---------------------------------------------------------------- */
+/* Facts (DescriptionList) — the labelled replacement for JSON dumps */
+/* ---------------------------------------------------------------- */
+
+.ns-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.ns-facts__row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 2fr;
+  gap: 16px;
+  align-items: baseline;
+}
+
+.ns-facts__label {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.ns-facts__value {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- */
+/* ConfirmDialog                                                     */
+/* ---------------------------------------------------------------- */
+
+.ns-confirm .ns-sheet__body {
+  display: grid;
+  gap: 16px;
+}
+
+.ns-confirm__consequence {
+  color: var(--text-primary);
+}
+
+.ns-confirm__actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.ns-confirm__actions > * {
+  flex: 1 1 0;
+}
+
+@media (min-width: 640px) {
+  .ns-confirm__actions > * {
+    flex: 0 1 auto;
+  }
+}

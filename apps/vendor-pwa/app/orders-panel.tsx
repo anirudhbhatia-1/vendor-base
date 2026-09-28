@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -359,7 +360,7 @@ function OrderCard({
         onChanged(`Saved offline: it will send when you reconnect.`);
         return;
       }
-      setError(cause instanceof Error ? cause.message : 'That action failed.');
+      setError(actionErrorText(cause, 'That action failed.'));
     } finally {
       setBusy(false);
     }
@@ -372,7 +373,7 @@ function OrderCard({
       setPicks(body.picks);
       setPickSheet(true);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The pick list could not be loaded.');
+      setError(actionErrorText(cause, 'The pick list could not be loaded.'));
     }
   }
 
@@ -814,9 +815,7 @@ function OrderCard({
                         setPickupOtp(body.plaintext_otp);
                         setFallbackOpen(false);
                       } catch (cause) {
-                        setError(
-                          cause instanceof Error ? cause.message : 'The code could not be issued.',
-                        );
+                        setError(actionErrorText(cause, 'The code could not be issued.'));
                       }
                     })()
                   }
@@ -1180,7 +1179,7 @@ export function OrdersPanel({ vendorLocationId }: { readonly vendorLocationId: s
       setOrders(body.orders);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Orders could not be loaded.');
+      setError(actionErrorText(cause, 'Orders could not be loaded.'));
     } finally {
       setLoading(false);
     }

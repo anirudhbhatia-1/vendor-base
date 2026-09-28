@@ -4,6 +4,7 @@ import type { WhoAmI } from '@neighbourhood-store/contracts';
 import { revokeAndSignOut } from '@neighbourhood-store/pwa-auth';
 import { RequireWorkspaceRole } from '@neighbourhood-store/pwa-auth/guard';
 import {
+  actionErrorText,
   AppShell,
   Button,
   ErrorState,
@@ -126,7 +127,7 @@ function VendorWorkspaceContent({ view }: { view: VendorView }) {
           : (who.vendor_location_ids[0] ?? null);
       setLocationId(chosen);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Your store could not be loaded.');
+      setError(actionErrorText(cause, 'Your store could not be loaded.'));
     } finally {
       setLoading(false);
     }

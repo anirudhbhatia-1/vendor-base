@@ -7,7 +7,7 @@ import type {
   VendorSettlementEntry,
   VendorStatement,
 } from '@neighbourhood-store/contracts';
-import { parseRupeesToMinor } from '@neighbourhood-store/ui';
+import { actionErrorText, parseRupeesToMinor } from '@neighbourhood-store/ui';
 import { vendorApiClient } from './authenticated-api';
 
 /**
@@ -129,7 +129,7 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
       setDisputes(raised.disputes ?? []);
       setMessage(`Statement loaded. ${data.settlements.length} settlement record(s).`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Statement could not be loaded.');
+      setMessage(actionErrorText(error, 'Statement could not be loaded.'));
     } finally {
       setBusy(false);
     }
@@ -161,7 +161,7 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
       setMessage('Sent. Finance will answer this within seven days.');
       await load();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'That challenge could not be sent.');
+      setMessage(actionErrorText(error, 'That challenge could not be sent.'));
     } finally {
       setBusy(false);
     }
@@ -175,7 +175,7 @@ export function PayoutsPanel({ vendorLocationId }: { vendorLocationId: string })
       setMessage('Withdrawn.');
       await load();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'That could not be withdrawn.');
+      setMessage(actionErrorText(error, 'That could not be withdrawn.'));
     } finally {
       setBusy(false);
     }

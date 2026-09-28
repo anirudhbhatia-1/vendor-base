@@ -19,6 +19,7 @@ import {
   StatusPill,
   TabBar,
   TopBar,
+  actionErrorText,
   formatCountdown,
   formatDistanceMeters,
   formatTravelSeconds,
@@ -473,9 +474,7 @@ function ActiveJob({
                   });
                   setPickupCode({ code: issued.plaintext_otp, expiresAt: issued.expires_at });
                 } catch (cause) {
-                  setPickupCodeError(
-                    cause instanceof Error ? cause.message : 'The code could not be issued.',
-                  );
+                  setPickupCodeError(actionErrorText(cause, 'The code could not be issued.'));
                 } finally {
                   setMintingCode(false);
                 }
@@ -895,7 +894,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
         setAssignments(cached.assignments);
         setStaleSince(cached.confirmed_at);
       }
-      setError(cause instanceof Error ? cause.message : 'Dispatch could not be loaded.');
+      setError(actionErrorText(cause, 'Dispatch could not be loaded.'));
       setLoading(false);
     });
     return () => {
@@ -911,15 +910,64 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
     if (partnerUserId && connected) void syncHeld();
   }, [partnerUserId, connected, syncHeld]);
 
+  // Job polling pauses while the app is hidden — a rider's locked phone was
+  // being polled all shift — and catches up the moment it is looked at again.
+  // The presence heartbeat below is separate and keeps beating while hidden,
+  // because dispatch drops a partner whose device goes quiet.
   useEffect(() => {
     if (!connected) return;
-    const timer = window.setInterval(() => void refresh().catch(() => undefined), 15_000);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const start = () => {
+      if (timer !== undefined) return;
+      timer = window.setInterval(() => void refresh().catch(() => undefined), 15_000);
+    };
+    const stop = () => {
+      if (timer === undefined) return;
+      window.clearInterval(timer);
+      timer = undefined;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        stop();
+      } else {
+        void refresh().catch(() => undefined);
+        start();
+      }
+    };
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [connected, refresh]);
 
+  // The countdown clock also rests while hidden; it re-reads the real time on
+  // return, so nothing drifts.
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const start = () => {
+      if (timer === undefined) timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    };
+    const stop = () => {
+      if (timer === undefined) return;
+      window.clearInterval(timer);
+      timer = undefined;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        stop();
+      } else {
+        setNow(Date.now());
+        start();
+      }
+    };
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   const isOnline = availability?.availability_state === 'ONLINE';
@@ -994,7 +1042,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       await refresh();
       setMessage('Offer accepted. The delivery is yours.');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The offer could not be accepted.');
+      setError(actionErrorText(cause, 'The offer could not be accepted.'));
     } finally {
       setBusy(false);
     }
@@ -1016,7 +1064,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       // wording should not imply otherwise.
       setMessage('Declined. It goes back to the pool for another partner.');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The offer could not be declined.');
+      setError(actionErrorText(cause, 'The offer could not be declined.'));
     } finally {
       setBusy(false);
     }
@@ -1082,7 +1130,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
         setMessage(`${describedAs ?? action.replaceAll('-', ' ')} recorded.`);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'That step could not be recorded.');
+      setError(actionErrorText(cause, 'That step could not be recorded.'));
     } finally {
       setBusy(false);
     }
@@ -1137,7 +1185,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
         'Reported. Operations will close this delivery with you; the code is no longer held here.',
       );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The report could not be sent.');
+      setError(actionErrorText(cause, 'The report could not be sent.'));
     } finally {
       setBusy(false);
     }
@@ -1197,7 +1245,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
           : 'You are offline and will not receive new offers.',
       );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Availability could not be changed.');
+      setError(actionErrorText(cause, 'Availability could not be changed.'));
     } finally {
       setBusy(false);
     }
@@ -1217,7 +1265,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
       );
       setMessage('The customer has been told.');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The customer could not be told.');
+      setError(actionErrorText(cause, 'The customer could not be told.'));
     } finally {
       setBusy(false);
     }

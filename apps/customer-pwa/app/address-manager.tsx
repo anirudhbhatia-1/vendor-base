@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Address } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -33,7 +34,7 @@ export function AddressManager() {
       setAddresses((await client.addresses.list()).addresses);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Addresses could not be loaded.');
+      setError(actionErrorText(cause, 'Addresses could not be loaded.'));
     } finally {
       setLoaded(true);
     }
@@ -53,7 +54,7 @@ export function AddressManager() {
       window.dispatchEvent(new Event('neighbourhood:customer-address'));
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Address could not be changed. Try again.');
+      setError(actionErrorText(cause, 'Address could not be changed. Try again.'));
     } finally {
       setBusy(false);
     }
@@ -80,7 +81,7 @@ export function AddressManager() {
       await load();
       window.dispatchEvent(new Event('neighbourhood:customer-address'));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Address could not be updated.');
+      setError(actionErrorText(cause, 'Address could not be updated.'));
     } finally {
       setBusy(false);
     }

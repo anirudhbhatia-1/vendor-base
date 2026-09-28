@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -124,7 +125,7 @@ export function InventoryPanel({ vendorLocationId }: { readonly vendorLocationId
       setLines(stock.items);
       setProducts(productList(catalogue));
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'Stock failed to load.');
+      setLoadError(actionErrorText(error, 'Stock failed to load.'));
     } finally {
       setLoading(false);
     }
@@ -159,7 +160,7 @@ export function InventoryPanel({ vendorLocationId }: { readonly vendorLocationId
       await load();
       setNotice({
         tone: 'danger',
-        text: error instanceof Error ? error.message : 'That change did not save.',
+        text: actionErrorText(error, 'That change did not save.'),
       });
     } finally {
       setPending(null);
@@ -220,7 +221,7 @@ export function InventoryPanel({ vendorLocationId }: { readonly vendorLocationId
     } catch (error) {
       setNotice({
         tone: 'danger',
-        text: error instanceof Error ? error.message : 'The holds could not be loaded.',
+        text: actionErrorText(error, 'The holds could not be loaded.'),
       });
     } finally {
       setPending(null);

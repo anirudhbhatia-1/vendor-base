@@ -11,6 +11,7 @@ import type {
   CustomerReceipt,
 } from '@neighbourhood-store/contracts';
 import {
+  actionErrorText,
   Button,
   Card,
   EmptyState,
@@ -200,7 +201,7 @@ function OrderCard({
     try {
       await work(await customerApiClient());
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'That did not work. Try again.');
+      setError(actionErrorText(cause, 'That did not work. Try again.'));
     }
   }
 
@@ -704,7 +705,7 @@ export function OrdersPanel({
       setDecisions(pending.decisions);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Your orders could not be loaded.');
+      setError(actionErrorText(cause, 'Your orders could not be loaded.'));
     } finally {
       setLoaded(true);
     }
@@ -719,15 +720,38 @@ export function OrdersPanel({
     return () => window.clearInterval(timer);
   }, []);
 
-  // Polls only while something can still change. A history of finished orders
-  // does not need a request every ten seconds for as long as the tab is open.
+  // Polls only while something can still change, and only while the tab is
+  // being looked at. A history of finished orders does not need a request
+  // every ten seconds, and a backgrounded tab does not need any; returning to
+  // the tab refreshes immediately, so nothing shown is stale.
   useEffect(() => {
     const live = groups
       .flatMap((group) => group.vendor_orders)
       .some((order) => !TERMINAL.has(order.lifecycle_state.toUpperCase()));
     if (!live && loaded) return;
-    const timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    let timer: number | undefined;
+    const start = () => {
+      if (timer === undefined) timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
+    };
+    const stop = () => {
+      if (timer === undefined) return;
+      window.clearInterval(timer);
+      timer = undefined;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        stop();
+      } else {
+        void load();
+        start();
+      }
+    };
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [groups, load, loaded]);
 
   if (!loaded) {
