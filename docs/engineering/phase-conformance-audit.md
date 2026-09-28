@@ -2623,6 +2623,61 @@ Five requirements. None held. The monitor filtered by checkout group id and "sta
 
 **Step 11.2: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 75 (28 September 2026) — step 11.3, support case lifecycle
+
+Five requirements. One held in part. A case opened by operations or by the worker (a returned delivery) was invisible to the customer it was about — the customer read only cases they had opened — so the console's "send to participants" wrote to a thread nobody could read. A customer could open the same case as often as they liked; the operator path deduplicated with a `FOR UPDATE` over rows that did not exist yet, so two reports at once made two cases. The evidence and merge routes were unreachable: `support/:case_id/:action` was declared first and answered 400 to `evidence` and `merge`. There was no admin read of a case — no thread, no notes, no evidence, no history. Resolve, reopen, escalate and quality review ran in any state, with no version and no resolution; a merged case could be reopened, a resolved one resolved again, a reviewer could grade their own resolution; nobody could ask the customer a question; and every deadline was the browser's (30 or 240 minutes), with the worker's high-severity case given four hours where D-09 gives fifteen minutes. One migration (0117); a new support case service replacing the control plane's four methods and the fulfilment service's four customer methods; new admin and customer routes; a new connected walk; four unit tests; twenty mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Create or deduplicate structured cases | Customer cases **never deduplicated**; the operator's check raced; categories were the caller's — P75-01. |
+| 2 | Attach to the smallest affected object | A customer could name the line; operations could not, and nothing attached a delivery case to the delivery — P75-02. |
+| 3 | Assign owner/team and response deadline | Owner unchecked (a case could be assigned to anyone), team free text, **deadline from the browser** and never moved — P75-03. |
+| 4 | Separate internal notes and participant-visible messages | Stored apart, but **no operator could read either**, and the participant was only the opener — P75-04. |
+| 5 | Evidence, response request, resolution, merge, reopen, escalation, quality review | Evidence and merge **unreachable**; **no response request**; the rest with no state rule, version or resolution — P75-05. |
+
+**P75-01 — one case per trouble.** One `SupportCaseService.open` for the customer, operations and the worker. The category list, each category's subject and severity, and whether a customer may raise it are the server's (`SUPPORT_CATEGORIES`); a customer does not choose severity. A report about the same order, category and item as an open case is added to it — as a participant message when the customer wrote it, an internal note otherwise, with a `DUPLICATE_REPORTED` event — under a transaction advisory lock, with a partial unique index as the backstop. Duplicates already open when 0117 runs are merged into the oldest, on the record, by the platform user.
+
+**P75-02 — the smallest object.** An item case names the line (optional; it must be the order's); a delivery case (late, cancellation after pickup, returned, partner conduct) attaches to the order's latest delivery attempt, or the one named; the rest attach to the order. A line on a delivery case, or an attempt on an item case, is refused.
+
+**P75-03 — owner, team and whose turn it is.** A case opens with the D-09 owner of its severity as its team; `ASSIGN` names a person who holds `admin.support.case_manage` globally and/or one of the four D-09 teams. The deadline is whoever's turn it is (`awaiting`): the first response on the severity's window (medium reads `support.p2_staffed_ack_seconds`); after a reply, the next update at the D-09 cadence; after a question, the time support follow up. The customer writing puts support back on the first-response window (or keeps an earlier one). Escalation raises the severity, hands the case to the new owner unclaimed and tightens a reply owed. `response_clock_started_at` records when the current clock started, and the ranking (`due_since`, new in `rankWork`) escalates at 75% from there rather than from the case's creation.
+
+**P75-04 — two threads, and the right participant.** 0117 gives every case its participant: the order's customer, whoever opened it. `GET admin/support/cases/:id` shows the participant thread and the internal notes apart, with evidence, history, merged cases, the next action and the steps the state allows; each read writes `SUPPORT_CASE_VIEWED`. The customer's routes read every case about their orders, only the participant thread, each message as theirs or support's — never who at support, never a note, never evidence.
+
+**P75-05 — the lifecycle.** `POST admin/support/cases/:id/actions/:action` takes the version the operator read and a reason, and is refused when the state does not allow the step (`supportActionsFor`). `REQUEST_RESPONSE` asks the customer (one hour to seven days to answer). `RESOLVE` takes a resolution code and a summary the customer reads; `REFUNDED` must name a refund on the order that a second person approved; `CUSTOMER_UNRESPONSIVE` only once a question's time has passed. `QUALITY_REVIEW` needs `admin.support.quality_review` (0117: support agents and incident commanders), is once per resolution, and never by the resolver — also a table constraint. `REOPEN` (or the customer's reply) reopens a resolved case on its own timeline, clearing the resolution and review; a reply to a merged case goes to the case it joined. `MERGE` joins open cases about the same order; the case that stays takes the higher severity and the earlier reply owed, and cases merged into the one going follow it. `EVIDENCE` is classified, once. The customer is told of a reply, a question and a resolution (0117 copy, en and hi). Every step writes a case event and `SUPPORT_CASE_<ACTION>` with the state before and after. Incident commanders — the D-09 owner of critical cases — are granted `admin.support.case_manage`.
+
+**The console.** The admin support panel is rebuilt around the server's queue (open, quality sample, closed; mine or unassigned), the case view with its two threads, and a form per allowed step sent against the version on screen. The workspace's one-click resolve and escalate buttons are removed. The customer's case view marks a question waiting on them, names each message as theirs or support's, points a merged case at where it went, and says a reply reopens a resolved one.
+
+**Mutation results.** Twenty probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| No deduplication | the unique index: the second report fails on `support_cases_one_open_per_subject` |
+| No lock when opening | the unique index, when two operators report at once |
+| The customer reads only cases they opened | *A case operations opened is not … visible to its customer* |
+| Internal notes in the customer's view | *The note leaked…* |
+| A stale version accepted | *A step was taken against a stale version* |
+| The state's allowed steps ignored | *A critical case was escalated past critical* |
+| A refund awaiting approval resolves a case | *A refund still waiting for approval resolved a case* |
+| The resolver reviews their own resolution | the table constraint `support_case_quality_shape`, where the walk expected the service's refusal |
+| Escalation keeps the old deadline | *Escalation did not raise, hand over and tighten* |
+| The customer writing leaves support's deadline alone | *The customer writing did not bring support's reply forward* — after the walk gained the case: the first form only had the customer answer a question, never write while support owed a later update |
+| Merge across orders | *Cases about different orders were merged* |
+| Cases merged into a merged case left behind | *…left pointing at a closed case* |
+| Assign to anyone | *A case was assigned to someone who cannot work support cases* |
+| The customer not told | *…the reply did not reach the customer…* |
+| A reply leaves the deadline where it was | *…or the deadline did not move* |
+| Quality review without its capability | *Someone who works cases but may not review them reviewed a case* — after the walk gained a synthetic role holding only the case capability (removed at the end of the walk): every seeded role with one holds both, so the first form never reached the check |
+| A reply to a merged case lost | *This case is closed* |
+| Closed as unresponsive before the customer's time | *A case was closed as unresponsive before the customer had their time* |
+| Who at support leaks to the customer | *…the reply did not reach the customer…* (the view is checked for `author_user_id`) |
+| The dashboard escalates from creation | *The dashboard escalates from the case's creation, not from when its clock restarted* — after the walk gained the case: the first dashboard case's clock had never restarted |
+
+**Forward findings.** (CUS-65) The case thread is the customer's only channel to support; masked contact with a partner or shop is still not started. (11.4) A partner-conduct case does not reach trust and safety. (11.9) Case reads and steps are on the operational audit; the searchable audit interface is 11.9's. (D-09) The desk calendar is not modelled: staffed hours are read as clock hours, as in 11.1. (ops) Existing cases on the shared database are backfilled by 0117; any duplicate open ones there are merged on the record.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 118 migration files (0000–0117), full ladder, conservation after every module (41 checks); `support_cases` 65 assertions (new). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0 (error contract: 35 controllers; API contract: 280 served routes); `pnpm test:unit` 629 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack; all twenty probes on rebuilt databases. Verified in a separate worktree holding exactly this commit: a concurrent session's uncommitted shared-pool refactor in the main checkout is not part of it.
+
+**Step 11.3: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

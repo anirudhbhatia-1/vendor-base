@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { messageLabel } from './display.js';
 
 const directory = path.resolve(import.meta.dirname);
 
@@ -257,6 +258,25 @@ test('support asks what went wrong before opening a case', () => {
   const source = panel('orders-panel.tsx');
   assert.ok(source.includes('SUPPORT_CATEGORIES'), 'a category is chosen');
   assert.ok(source.includes('supportDescription'), 'the customer describes the problem');
+});
+
+test("a case's thread names the customer or support, never who at support (11.3)", () => {
+  const at = '2026-09-28T10:00:00.000Z';
+  const base = { support_case_message_id: 'm', body: 'x', created_at: at };
+  assert.equal(messageLabel({ ...base, from: 'YOU', message_kind: 'MESSAGE' }), 'You');
+  assert.equal(messageLabel({ ...base, from: 'SUPPORT', message_kind: 'MESSAGE' }), 'Support');
+  assert.equal(
+    messageLabel({ ...base, from: 'SUPPORT', message_kind: 'RESPONSE_REQUEST' }),
+    'Support asked',
+  );
+  assert.equal(
+    messageLabel({ ...base, from: 'SUPPORT', message_kind: 'RESOLUTION' }),
+    'Support resolved this case',
+  );
+  const source = panel('support-panel.tsx');
+  assert.ok(!source.includes('author_user_id'), 'no support identity reaches the customer');
+  assert.ok(source.includes('awaiting_you'), 'a question from support is shown as waiting on them');
+  assert.ok(source.includes('merged_into_case_id'), 'a merged case points at where it went');
 });
 
 test('notifications are rendered as sentences, never as serialised payloads', () => {

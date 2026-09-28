@@ -13,7 +13,7 @@ import {
   PageHeader,
 } from '@neighbourhood-store/ui';
 import { customerApiClient } from './customer-session';
-import { shortReference } from './display';
+import { messageLabel, shortReference } from './display';
 import { StatePill } from './state-pill';
 
 export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: string }) {
@@ -58,6 +58,7 @@ export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: strin
 
   if (supportCaseId) {
     if (!detail) return <EmptyState glyph="?" title="Case not found" />;
+    const messages = detail.messages ?? [];
     return (
       <div className="ns-stack">
         <PageHeader
@@ -66,22 +67,41 @@ export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: strin
           title={detail.category.replaceAll('_', ' ').toLowerCase()}
         />
         {error ? <Notice tone="danger">{error}</Notice> : null}
+        {detail.merged_into_case_id ? (
+          // Merged into the case already open about the same trouble; a reply
+          // here is carried there (11.3).
+          <Notice>
+            This case was joined with another one about the same problem.{' '}
+            <Link href={`/support/${detail.merged_into_case_id}`}>Open that case</Link>.
+          </Notice>
+        ) : null}
+        {detail.awaiting_you ? (
+          <Notice tone="warning">
+            Support asked you a question. Reply below so they can continue.
+          </Notice>
+        ) : null}
         <Card tone="raised">
           <div className="ns-row">
             <strong>Issue</strong>
             <StatePill state={detail.lifecycle_state} />
           </div>
           <p>{detail.description}</p>
+          {detail.line_title ? <small>About: {detail.line_title}</small> : null}
           {detail.response_due_at ? (
-            <small>Response due {new Date(detail.response_due_at).toLocaleString()}</small>
+            <small>We will reply by {new Date(detail.response_due_at).toLocaleString()}</small>
           ) : null}
         </Card>
         <section className="ns-stack" aria-label="Conversation">
-          {(detail.messages ?? []).length === 0 ? (
+          {messages.length === 0 ? (
             <p>No replies yet.</p>
           ) : (
-            (detail.messages ?? []).map((message) => (
-              <Card as="article" key={message.support_case_message_id} tone="sunken">
+            messages.map((message) => (
+              <Card
+                as="article"
+                key={message.support_case_message_id}
+                tone={message.from === 'YOU' ? 'sunken' : 'raised'}
+              >
+                <small>{messageLabel(message)}</small>
                 <p>{message.body}</p>
                 <small>{new Date(message.created_at).toLocaleString()}</small>
               </Card>
@@ -90,7 +110,11 @@ export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: strin
         </section>
         <form className="ns-stack" onSubmit={send}>
           <label className="ns-field">
-            <span className="ns-field__label">Reply</span>
+            <span className="ns-field__label">
+              {detail.lifecycle_state === 'RESOLVED'
+                ? 'Still wrong? Reply to reopen this case'
+                : 'Reply'}
+            </span>
             <textarea
               className="ns-field__control"
               maxLength={2000}
@@ -131,6 +155,9 @@ export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: strin
               <StatePill state={item.lifecycle_state} />
             </div>
             <p>{item.description}</p>
+            {item.awaiting_you ? (
+              <Notice tone="warning">Support is waiting for your reply.</Notice>
+            ) : null}
             <small>Order {shortReference(item.order_reference)}</small>
           </Card>
         ))

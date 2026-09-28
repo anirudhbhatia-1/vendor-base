@@ -32,3 +32,4 @@ export const VENDOR_NETWORK = Symbol('VENDOR_NETWORK');
 export const GATED_CAPABILITIES = Symbol('GATED_CAPABILITIES');
 export const ROUTING = Symbol('ROUTING');
 export const ORDER_MONITOR = Symbol('ORDER_MONITOR');
+export const SUPPORT_CASES = Symbol('SUPPORT_CASES');

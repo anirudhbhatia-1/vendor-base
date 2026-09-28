@@ -522,10 +522,13 @@ export function createApiClient(options: ApiClientOptions) {
         vendorOrderId: string,
         body: { category: string; description: string; vendor_order_line_id?: string },
       ) =>
-        r<Record<string, unknown>>(`/customer/orders/${vendorOrderId}/support`, {
-          method: 'POST',
-          json: body,
-        }),
+        r<{ support_case_id: string; deduplicated: boolean }>(
+          `/customer/orders/${vendorOrderId}/support`,
+          {
+            method: 'POST',
+            json: body,
+          },
+        ),
 
       /** What cancelling would do, before the customer commits to it. */
       cancellationPreview: (vendorOrderId: string) =>
@@ -576,10 +579,13 @@ export function createApiClient(options: ApiClientOptions) {
         r<CustomerSupportCase>(`/customer/support-cases/${supportCaseId}`),
 
       sendSupportMessage: (supportCaseId: string, body: string) =>
-        r<SupportCaseMessage>(`/customer/support-cases/${supportCaseId}/messages`, {
-          method: 'POST',
-          json: { body },
-        }),
+        r<SupportCaseMessage & { support_case_id: string; lifecycle_state: string }>(
+          `/customer/support-cases/${supportCaseId}/messages`,
+          {
+            method: 'POST',
+            json: { body },
+          },
+        ),
 
       /**
        * The money view of a checkout group, including any refunds against it.

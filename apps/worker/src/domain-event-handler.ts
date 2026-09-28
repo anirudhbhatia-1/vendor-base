@@ -50,13 +50,11 @@ export interface DomainEventDependencies {
       readonly vendor_order_id: UuidV7;
     }): Promise<{ readonly earning_posted: boolean }>;
   };
-  readonly adminControl: {
-    createSupportCase(input: {
+  readonly supportCases: {
+    open(input: {
       readonly category: string;
       readonly context: RequestContext;
       readonly description: string;
-      readonly response_due_at: Date;
-      readonly severity: string;
       readonly vendor_order_id: UuidV7;
     }): Promise<unknown>;
   };
@@ -105,9 +103,6 @@ export const ACKNOWLEDGED_WITHOUT_REACTION: ReadonlySet<string> = new Set([
   // telling the customer is the notifications slice's.
   'vendor_order.delayed',
 ]);
-
-/** How long an operator has to answer a returned delivery. */
-export const RETURNED_CASE_RESPONSE_MS = 4 * 60 * 60 * 1_000;
 
 export async function handleDomainEvent(
   deps: DomainEventDependencies,
@@ -223,14 +218,15 @@ export async function handleDomainEvent(
     //
     // What must happen is that a person sees it. A returned order has
     // already failed and the customer is owed an answer, so it opens a
-    // case rather than resting in a state nobody reads.
-    await deps.adminControl.createSupportCase({
+    // case rather than resting in a state nobody reads. The case is high
+    // (a return, D-09) with its first response due on that window, on the
+    // delivery attempt, and visible to the customer (11.3); a redelivered
+    // event lands on the same open case.
+    await deps.supportCases.open({
       category: 'DELIVERY_RETURNED',
       context,
       description:
         'Delivery was returned to the vendor. The customer has not received this order and the money has not been divided.',
-      response_due_at: new Date(deps.now().getTime() + RETURNED_CASE_RESPONSE_MS),
-      severity: 'HIGH',
       vendor_order_id: event.aggregate_id,
     });
     deps.log('vendor_order.return.case_opened', {

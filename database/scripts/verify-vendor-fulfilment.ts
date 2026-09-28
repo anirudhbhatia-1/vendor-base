@@ -52,7 +52,6 @@ import {
   FulfilmentAuthorizationError,
   FulfilmentConflictError,
   FulfilmentInputError,
-  DEFAULT_SUPPORT_RESPONSE_SECONDS,
   PICKUP_OTP_LIFETIME_SECONDS,
   PICKUP_OTP_MAX_ATTEMPTS,
   PickupOtpExhaustedError,
@@ -65,6 +64,12 @@ import {
   VendorFulfilmentService,
 } from '../src/vendor-fulfilment.js';
 import { handoverCodeDigest } from '../src/handover-code.js';
+import {
+  DEFAULT_SUPPORT_RESPONSE_SECONDS,
+  SupportCaseInputError,
+  SupportCaseNotFoundError,
+  SupportCaseService,
+} from '../src/support-cases.js';
 import { waitLeaveSeconds } from '../src/wait-timer.js';
 import { createDiscoverableStoreFixture } from './verify-discoverable-store-fixture.js';
 import {
@@ -95,6 +100,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     hash_key: HASH_KEY,
   });
   const notifications = new LocalNotificationService({ connection_string: connectionString });
+  const supportCases = new SupportCaseService({ connection_string: connectionString });
   const money = new MoneyLifecycleService({ connection_string: connectionString });
   const completeMoney = new CompleteMoneyLifecycleService({
     connection_string: connectionString,
@@ -2183,13 +2189,13 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     // case carried no deadline and no case event.
     await rejects(
       () =>
-        fulfilment.openSupportCase({
+        supportCases.open({
           context: customerContext(customerId),
           vendor_order_id: orderA.vendor_order_id,
           category: 'NOT_A_CATEGORY',
           description: 'SYNTH support case with a made-up category.',
         }),
-      FulfilmentInputError,
+      SupportCaseInputError,
       'A category outside the customer list opened a case',
     );
     const orderBLine = await pool.query<{ id: string }>(
@@ -2199,18 +2205,18 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     );
     await rejects(
       () =>
-        fulfilment.openSupportCase({
+        supportCases.open({
           context: customerContext(customerId),
           vendor_order_id: orderA.vendor_order_id,
           category: 'MISSING_ITEM',
           description: "SYNTH support case naming another order's line.",
           vendor_order_line_id: orderBLine.rows[0]?.id as UuidV7,
         }),
-      FulfilmentNotFoundError,
+      SupportCaseNotFoundError,
       "A case named another order's line",
     );
     const supportOpenedAt = new Date(now.getTime() + 66_000);
-    const supportCaseId = await fulfilment.openSupportCase({
+    const { support_case_id: supportCaseId } = await supportCases.open({
       context: customerContext(customerId),
       vendor_order_id: orderA.vendor_order_id,
       category: 'MISSING_ITEM',
@@ -5418,6 +5424,7 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
     await completeMoney.close();
     await money.close();
     await assignments.close();
+    await supportCases.close();
     await fulfilment.close();
     await checkout.close();
     await carts.close();

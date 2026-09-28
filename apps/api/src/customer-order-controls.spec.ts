@@ -2,10 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import 'reflect-metadata';
 import { AUTHORIZATION_REQUIREMENT, type AuthorizationRequirement } from './authorization.js';
-import {
-  CustomerOrderHistoryController,
-  CustomerSupportCaseController,
-} from './vendor-fulfilment.controller.js';
+import { CustomerOrderHistoryController } from './vendor-fulfilment.controller.js';
+import { CustomerSupportCaseController } from './support-case.controller.js';
 
 /**
  * Cancellation, tracking and support visibility are customer-scoped reads and

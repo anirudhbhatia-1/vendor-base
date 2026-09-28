@@ -540,9 +540,11 @@ export type InAppNotification = {
   created_at: string;
 };
 
+/** A message on a case's participant thread: the customer's, or support's -- never who at support. */
 export type SupportCaseMessage = {
   support_case_message_id: string;
-  author_user_id: string;
+  from: 'YOU' | 'SUPPORT';
+  message_kind: 'MESSAGE' | 'RESPONSE_REQUEST' | 'RESOLUTION' | 'DUPLICATE_REPORT';
   body: string;
   created_at: string;
 };
@@ -552,8 +554,14 @@ export type CustomerSupportCase = {
   category: string;
   description: string;
   lifecycle_state: string;
-  severity?: string;
+  /** Support asked a question and are waiting on the customer. */
+  awaiting_you: boolean;
+  /** When support owe the next word; absent while the customer is being asked. */
   response_due_at?: string | null;
+  resolution_code?: string | null;
+  /** The case this one was merged into; the customer's words go there. */
+  merged_into_case_id?: string | null;
+  line_title?: string | null;
   order_reference: string;
   created_at: string;
   updated_at: string;

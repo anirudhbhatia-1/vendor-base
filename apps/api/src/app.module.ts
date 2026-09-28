@@ -34,6 +34,7 @@ import {
   CompleteMoneyLifecycleService,
   AdminControlPlaneService,
   OrderMonitorService,
+  SupportCaseService,
   LocaleRegistryService,
   PartnerAvailabilityService,
   PartnerWaitPolicyService,
@@ -87,9 +88,13 @@ import {
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
 import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
-import { ADMIN_CONTROL_PLANE, ORDER_MONITOR } from './tokens.js';
+import { ADMIN_CONTROL_PLANE, ORDER_MONITOR, SUPPORT_CASES } from './tokens.js';
 import { AdminControlPlaneController } from './admin-control-plane.controller.js';
 import { AdminOrderMonitorController } from './admin-order-monitor.controller.js';
+import {
+  AdminSupportCaseController,
+  CustomerSupportCaseController,
+} from './support-case.controller.js';
 import {
   CompleteMoneyAdminController,
   CustomerFinanceController,
@@ -131,7 +136,6 @@ import {
   VendorOrderFulfilmentController,
   CustomerDecisionsController,
   CustomerOrderHistoryController,
-  CustomerSupportCaseController,
   PartnerHandoverController,
 } from './vendor-fulfilment.controller.js';
 import {
@@ -211,6 +215,7 @@ import {
     VendorFinanceController,
     AdminControlPlaneController,
     AdminOrderMonitorController,
+    AdminSupportCaseController,
     LocaleController,
     AdminLocaleController,
     PartnerAvailabilityController,
@@ -508,6 +513,12 @@ import {
           fulfilment,
           money,
         }),
+    },
+    {
+      provide: SUPPORT_CASES,
+      inject: [RUNTIME_CONFIG],
+      useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
+        new SupportCaseService({ connection_string: config.databaseUrl }),
     },
     {
       provide: IDENTITY_PASSWORD,

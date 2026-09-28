@@ -9,10 +9,14 @@ import {
   Param,
   Post,
 } from '@nestjs/common';
-import { AssignmentCustodyService, VendorFulfilmentService } from '@neighbourhood-store/database';
+import {
+  AssignmentCustodyService,
+  SupportCaseService,
+  VendorFulfilmentService,
+} from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
-import { ASSIGNMENT_CUSTODY, VENDOR_FULFILMENT } from './tokens.js';
+import { ASSIGNMENT_CUSTODY, SUPPORT_CASES, VENDOR_FULFILMENT } from './tokens.js';
 import {
   integerField,
   object,
@@ -549,60 +553,12 @@ export class CustomerDecisionsController {
   }
 }
 
-@Controller('customer/support-cases')
-export class CustomerSupportCaseController {
-  constructor(@Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService) {}
-
-  /** The customer's own cases, so an open issue is visible to the person who raised it. */
-  @Get()
-  @customerRead
-  async list() {
-    try {
-      return {
-        cases: await this.fulfilment.listCustomerSupportCases({
-          context: currentRequestContext(),
-        }),
-      };
-    } catch (error) {
-      translateDomainError(error);
-    }
-  }
-
-  @Get(':support_case_id')
-  @customerRead
-  async detail(@Param('support_case_id') caseId: string) {
-    try {
-      return await this.fulfilment.getCustomerSupportCase({
-        context: currentRequestContext(),
-        support_case_id: uuid(caseId),
-      });
-    } catch (error) {
-      translateDomainError(error);
-    }
-  }
-
-  @Post(':support_case_id/messages')
-  @customerRead
-  async message(@Param('support_case_id') caseId: string, @Body() raw: unknown) {
-    const body = object(raw);
-    if (typeof body.body !== 'string') throw new BadRequestException();
-    try {
-      return await this.fulfilment.addCustomerSupportMessage({
-        context: currentRequestContext(),
-        support_case_id: uuid(caseId),
-        body: body.body,
-      });
-    } catch (error) {
-      translateDomainError(error);
-    }
-  }
-}
-
 @Controller('customer/orders')
 export class CustomerOrderHistoryController {
   constructor(
     @Inject(VENDOR_FULFILMENT) private readonly fulfilment: VendorFulfilmentService,
     @Inject(ASSIGNMENT_CUSTODY) private readonly assignments: AssignmentCustodyService,
+    @Inject(SUPPORT_CASES) private readonly supportCases: SupportCaseService,
   ) {}
 
   @Get()
@@ -752,14 +708,15 @@ export class CustomerOrderHistoryController {
     const body = object(raw);
     try {
       const lineId = optionalString(body, 'vendor_order_line_id');
-      const supportCaseId = await this.fulfilment.openSupportCase({
+      // A second report of the same trouble lands on the open case (11.3).
+      const opened = await this.supportCases.open({
         context: currentRequestContext(),
         vendor_order_id: uuid(orderId),
         category: stringField(body, 'category'),
         description: stringField(body, 'description'),
         ...(lineId !== undefined ? { vendor_order_line_id: uuid(lineId) } : {}),
       });
-      return { support_case_id: supportCaseId };
+      return { support_case_id: opened.support_case_id, deduplicated: opened.deduplicated };
     } catch (error) {
       translateDomainError(error);
     }

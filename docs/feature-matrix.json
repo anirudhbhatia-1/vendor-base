@@ -1811,13 +1811,13 @@
       "name": "Structured support",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Support case creation with one of the customer categories, optionally naming the item it is about, at severity MEDIUM with the P2 response deadline and its own OPENED event (audit run 55)",
+      "notes": "11.3 (audit run 75): the category list, severity, deadline and subject are the server's; a case about an item names the line, a delivery case attaches to the delivery attempt; the same trouble reported again lands on the open case (advisory lock plus a unique index), with what was said kept on its thread",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
-        "worker": false,
+        "worker": true,
         "pwa": true,
         "android": "unverified",
         "tests": true
@@ -1825,21 +1825,22 @@
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/customer-pwa/app/customer-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
-      ]
+        "database/scripts/verify-support-cases.ts"
+      ],
+      "files": ["database/src/support-cases.ts"]
     },
     {
       "id": "CUS-64",
       "name": "Support case tracking",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Customers see the support cases they raised",
+      "notes": "11.3 (audit run 75): customers see every case about their orders, whoever opened it (until run 75 only cases they opened, so operations' and the worker's cases were invisible); a question from support shows as waiting on them; a reply reopens a resolved case; a reply to a merged case goes to the case it joined",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
-        "worker": false,
+        "worker": true,
         "pwa": true,
         "android": false,
         "tests": true
@@ -1847,12 +1848,14 @@
       "files": [
         "apps/customer-pwa/app/orders-panel.tsx",
         "apps/customer-pwa/app/customer-panels.spec.ts",
-        "apps/api/src/customer-order-controls.spec.ts"
+        "apps/api/src/customer-order-controls.spec.ts",
+        "apps/customer-pwa/app/support-panel.tsx",
+        "database/src/support-cases.ts"
       ],
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/customer-pwa/app/customer-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -2669,7 +2672,7 @@
       "name": "Server-driven timeout",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Acceptance countdown is driven by the order\u2019s own accept_by, which checkout writes at placement (Phase D, 16 Sep 2026: before that nothing in production set it)",
+      "notes": "Acceptance countdown is driven by the order’s own accept_by, which checkout writes at placement (Phase D, 16 Sep 2026: before that nothing in production set it)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2739,7 +2742,7 @@
       "name": "Substitution proposal",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Substitutions are proposed from the store\u2019s own published catalogue and answered by the customer; a replacement at no extra cost on an ALLOW_SAME_STORE line is applied under that rule and the customer told; the group\u2019s authorisation is captured only once every bag is final (audit run 52)",
+      "notes": "Substitutions are proposed from the store’s own published catalogue and answered by the customer; a replacement at no extra cost on an ALLOW_SAME_STORE line is applied under that rule and the customer told; the group’s authorisation is captured only once every bag is final (audit run 52)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -2880,7 +2883,7 @@
       "name": "Vendor self-delivery",
       "status": "complete_local_synthetic",
       "target_stage": "5",
-      "notes": "Start at the shop (READY \u2192 PICKED_UP with the carrying staff member recorded), customer delivery code on the order, complete at the door (\u2192 DELIVERED, settles with no partner earning); vendor console controls; Android shell unchanged (batch 10)",
+      "notes": "Start at the shop (READY → PICKED_UP with the carrying staff member recorded), customer delivery code on the order, complete at the door (→ DELIVERED, settles with no partner earning); vendor console controls; Android shell unchanged (batch 10)",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -3032,7 +3035,7 @@
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/vendor-pwa/app/vendor-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-vendor-fulfilment.ts"
       ]
     },
     {
@@ -3064,7 +3067,7 @@
       "name": "Sales dashboard",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Orders, completed sales, acceptance, cancellations, timeouts and typical preparation, counted from the store\u2019s own orders",
+      "notes": "Orders, completed sales, acceptance, cancellations, timeouts and typical preparation, counted from the store’s own orders",
       "owner": "vendor-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5498,7 +5501,7 @@
       "name": "Structured support cases",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Structured support cases can be opened with severity and response commitment",
+      "notes": "11.3 (audit run 75): opened by an operator, the customer or the worker through one service; severity from the category unless the operator sets it; the D-09 owner of the severity; first-response deadline from the severity (medium reads the P2 setting); duplicates added to the open case",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5509,11 +5512,16 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/support-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/support-panel.tsx",
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/support-cases.ts",
+        "apps/api/src/support-case.controller.ts"
+      ],
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -5521,7 +5529,7 @@
       "name": "SLA-ranked support queue",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Queue is ranked by amount at risk then age, from the server",
+      "notes": "11.3 (audit run 75): GET admin/support/cases ranks open cases with the dashboard's ranking; the deadline is whoever's turn it is (first response, next update at the D-09 cadence, or the follow-up of a question to the customer) and escalation runs from when that clock started; views for quality sampling and closed cases",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5532,11 +5540,15 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/support-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/support-panel.tsx",
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/support-cases.ts"
+      ],
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -5544,7 +5556,7 @@
       "name": "Safe evidence viewer",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Evidence is attached with an INTERNAL or RESTRICTED classification",
+      "notes": "11.3 (audit run 75): evidence is a SYNTH-EVIDENCE reference classified INTERNAL or RESTRICTED, attached once, listed in the operator's case view and never in the customer's (until run 75 the evidence and merge routes were unreachable: the action route was declared first and answered 400)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5555,11 +5567,15 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/support-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/support-panel.tsx",
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/support-cases.ts"
+      ],
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -5567,7 +5583,7 @@
       "name": "Internal and participant-visible messages",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Internal notes and participant-visible messages are separate actions",
+      "notes": "11.3 (audit run 75): the operator's case view shows the participant thread and the internal notes apart; the customer's view reads only the participant thread, each message as theirs or support's, never who at support",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5578,11 +5594,15 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/support-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/support-panel.tsx",
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/support-cases.ts"
+      ],
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -5590,7 +5610,7 @@
       "name": "Resolution templates",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/admin-pwa/app/admin-workspace.tsx resolves support cases",
+      "notes": "11.3 (audit run 75): resolving takes a resolution code and a summary the customer reads; REFUNDED names an approved refund on the order; CUSTOMER_UNRESPONSIVE only after an unanswered question's time passed; a resolved case is quality-reviewed once, by someone who did not resolve it and holds admin.support.quality_review; reopening keeps the timeline",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5604,8 +5624,9 @@
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
-      ]
+        "database/scripts/verify-support-cases.ts"
+      ],
+      "files": ["apps/admin-pwa/app/support-panel.tsx", "database/src/support-cases.ts"]
     },
     {
       "id": "ADM-41",

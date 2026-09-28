@@ -135,6 +135,19 @@ function describe(notice: Notice, t: (key: string, fallback: string) => string):
         'customer.notification.operations_will_contact',
         'Our support team will contact you about your order shortly.',
       );
+    // A case's participant thread moved (11.3).
+    case 'support_case.replied':
+      return t('customer.notification.support_replied', 'Support replied on your case.');
+    case 'support_case.response_requested':
+      return t(
+        'customer.notification.support_response_requested',
+        'Support needs an answer from you to continue with your case.',
+      );
+    case 'support_case.resolved':
+      return t(
+        'customer.notification.support_resolved',
+        'Your support case is resolved. Reply on it if something is still wrong.',
+      );
     case 'refund.completed':
       return amount
         ? `${t('customer.notification.refunded', 'A refund of')} ${amount} ${t('customer.notification.refunded_tail', 'is on its way back to you.')}`

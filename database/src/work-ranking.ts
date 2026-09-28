@@ -63,11 +63,17 @@ export type RawWorkItem = {
   readonly created_at: Date;
   /** The item's own deadline, where it has one. */
   readonly due_at?: Date | null;
+  /**
+   * When the clock for that deadline started, where it restarts (a support
+   * case owes a new reply each time the customer writes); otherwise the
+   * item's creation. Escalation is due at 75% of the way from here.
+   */
+  readonly due_since?: Date | null;
   readonly amount_at_risk_minor: number;
   readonly custody_risk: 'NONE' | 'GOODS_IN_CUSTODY';
 };
 
-export type RankedWorkItem = Omit<RawWorkItem, 'created_at' | 'due_at'> & {
+export type RankedWorkItem = Omit<RawWorkItem, 'created_at' | 'due_at' | 'due_since'> & {
   readonly rank: number;
   readonly created_at: string;
   readonly sla_due_at: string;
@@ -84,8 +90,9 @@ export function rankWork(items: readonly RawWorkItem[], now: Date): readonly Ran
   const shaped = items.map((item) => {
     const window = RESPONSE_WINDOW_MS[item.severity];
     const due = item.due_at ?? new Date(item.created_at.getTime() + window);
-    const span = Math.max(0, due.getTime() - item.created_at.getTime());
-    const escalate = new Date(item.created_at.getTime() + Math.floor(span * 0.75));
+    const since = item.due_at && item.due_since ? item.due_since : item.created_at;
+    const span = Math.max(0, due.getTime() - since.getTime());
+    const escalate = new Date(since.getTime() + Math.floor(span * 0.75));
     return {
       item,
       due,

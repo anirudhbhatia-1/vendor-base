@@ -7,6 +7,7 @@ import {
 import {
   AssignmentCustodyService,
   AdminControlPlaneService,
+  SupportCaseService,
   GroupedCheckoutService,
   InventoryReservationService,
   LocalProtectedObjectStorage,
@@ -69,6 +70,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #pool: Pool;
   readonly #assignments: AssignmentCustodyService;
   readonly #adminControl: AdminControlPlaneService;
+  readonly #supportCases: SupportCaseService;
   readonly #checkout: GroupedCheckoutService;
   readonly #inventory: InventoryReservationService;
   readonly #partnerField: PartnerFieldOpsService;
@@ -107,6 +109,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     });
     this.#inventory = new InventoryReservationService({ connection_string: databaseUrl });
     this.#adminControl = new AdminControlPlaneService({ connection_string: databaseUrl });
+    this.#supportCases = new SupportCaseService({ connection_string: databaseUrl });
     this.#assignments = new AssignmentCustodyService({ connection_string: databaseUrl });
     // One provider for every service that moves money here: the checkout
     // that authorises, the money service that captures, the complete
@@ -219,6 +222,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       this.#assignments.close(),
       this.#partnerLifecycle.close(),
       this.#adminControl.close(),
+      this.#supportCases.close(),
       this.#checkout.close(),
       this.#inventory.close(),
       this.#partnerField.close(),
@@ -274,7 +278,6 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       async (_client, event) => {
         await handleDomainEvent(
           {
-            adminControl: this.#adminControl,
             availability: this.#availability,
             dispatch: this.#dispatch,
             fulfilment: this.#fulfilment,
@@ -282,6 +285,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
             notifications: this.#notifications,
             now: () => new Date(),
             orderMoney: this.#orderMoney,
+            supportCases: this.#supportCases,
           },
           context,
           event,

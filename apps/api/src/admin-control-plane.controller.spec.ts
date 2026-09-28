@@ -19,10 +19,6 @@ test('every admin control-plane route is capability protected and globally scope
     orders: 'admin.control.dashboard_read',
     deadLetters: 'admin.messaging.deadletter_read',
     recoverDeadLetter: 'admin.messaging.deadletter_recover',
-    createSupport: 'admin.support.case_manage',
-    support: 'admin.support.case_manage',
-    evidence: 'admin.support.case_manage',
-    merge: 'admin.support.case_manage',
     trust: 'admin.trust.restriction_propose',
     approveTrust: 'admin.trust.restriction_approve',
     transitionTrust: 'admin.trust.restriction_approve',
@@ -39,5 +35,9 @@ test('every admin control-plane route is capability protected and globally scope
     assert.equal(rule?.capability, capability, method);
     assert.deepEqual(rule?.admin_scope, { kind: 'GLOBAL' }, method);
     assert.equal(rule?.conceal_resource, true, method);
+  }
+  // Support cases moved to their own controller (11.3, support-case.controller.ts).
+  for (const gone of ['createSupport', 'support', 'evidence', 'merge']) {
+    assert.equal(auth(gone), undefined, gone);
   }
 });

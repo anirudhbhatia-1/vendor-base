@@ -43,9 +43,9 @@ function dependencies(input: { readonly method?: string } = {}) {
         return { earning_posted: true };
       },
     },
-    adminControl: {
-      createSupportCase: async () => {
-        calls.push('createSupportCase');
+    supportCases: {
+      open: async () => {
+        calls.push('openSupportCase');
       },
     },
     availability: {
@@ -119,7 +119,7 @@ test('a placed order is offered to partners', async () => {
 test('a returned order pays the trip out and opens a case rather than dividing money', async () => {
   const { calls, deps } = dependencies();
   await handleDomainEvent(deps, context, event('vendor_order.returned'));
-  assert.deepEqual(calls, ['recordReturnEarnings', 'createSupportCase']);
+  assert.deepEqual(calls, ['recordReturnEarnings', 'openSupportCase']);
 });
 
 test('a suspended partner is taken offline', async () => {

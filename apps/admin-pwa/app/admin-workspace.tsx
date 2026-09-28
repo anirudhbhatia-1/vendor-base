@@ -339,21 +339,6 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
       setOutput(error instanceof Error ? error.message : 'Notification inbox failed.');
     }
   }
-  async function supportAction(caseId: string, action: 'RESOLVE' | 'ESCALATE') {
-    try {
-      await request(`admin/control/support/${caseId}/${action}`, {
-        method: 'POST',
-        body: JSON.stringify({
-          reason_code: action === 'RESOLVE' ? 'ADMIN_RESOLVED' : 'ADMIN_ESCALATED',
-        }),
-      });
-      setOutput(`Support case ${caseId.slice(0, 8)}… → ${action}`);
-      await refresh();
-    } catch (error) {
-      setOutput(error instanceof Error ? error.message : 'Support action failed.');
-    }
-  }
-
   async function loadZones() {
     try {
       const result = (await request('admin/zones')) as { zones?: unknown };
@@ -1160,34 +1145,6 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
               <p>Refresh queues to load SLAs and ownership from the server.</p>
             </article>
           </div>
-          <section
-            className="catalogue-oversight"
-            aria-label="Support case drill-in"
-            style={{ marginTop: '1.5rem' }}
-          >
-            <div>
-              <p className="eyebrow">SUPPORT CASES</p>
-              <h2>{work.filter((i) => i.kind.toUpperCase() === 'SUPPORT').length} open case(s)</h2>
-            </div>
-            {work
-              .filter((item) => item.kind.toUpperCase() === 'SUPPORT')
-              .map((item) => (
-                <div className="catalogue-flag" key={item.object_id}>
-                  <strong>{item.title}</strong>
-                  <span>
-                    Case {item.object_id.slice(0, 12)}… · {item.next_action}
-                  </span>
-                  <div className="actions">
-                    <button onClick={() => void supportAction(item.object_id, 'RESOLVE')}>
-                      Resolve
-                    </button>
-                    <button onClick={() => void supportAction(item.object_id, 'ESCALATE')}>
-                      Escalate
-                    </button>
-                  </div>
-                </div>
-              ))}
-          </section>
           <SupportPanel />
           <nav className="actions" aria-label="Related workspaces">
             <Link href="/trust">Trust and safety</Link>

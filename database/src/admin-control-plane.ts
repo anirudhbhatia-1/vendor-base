@@ -13,6 +13,7 @@ import { listDeadLetterEvents, recoverDeadLetterEvent } from './transactional-me
 import { transaction as tx } from './transaction.js';
 import { rankWork, type RawWorkItem, type WorkSeverity } from './work-ranking.js';
 import { globalAdminCapabilities } from './admin-capabilities.js';
+import { supportNextAction } from './support-cases.js';
 
 export class AdminControlInputError extends Error {}
 export class AdminControlNotFoundError extends Error {}
@@ -22,14 +23,6 @@ const REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
 function admin(context: RequestContext) {
   if (context.actor?.actor_kind !== 'admin') throw new AdminControlAuthorizationError();
-  return context.actor.actor_id;
-}
-/** An operator, or the worker acting on a committed domain event. */
-function operationsAutomation(context: RequestContext) {
-  const kind = context.actor?.actor_kind;
-  if (!context.actor || (kind !== 'admin' && kind !== 'system')) {
-    throw new AdminControlAuthorizationError();
-  }
   return context.actor.actor_id;
 }
 function operator(context: RequestContext) {
@@ -353,15 +346,23 @@ export class AdminControlPlaneService {
         owner_user_id: string | null;
         owner_team: string | null;
         response_due_at: Date | null;
+        response_clock_started_at: Date | null;
+        first_responded_at: Date | null;
+        awaiting: string;
         lifecycle_state: string;
+        quality_review_outcome: string | null;
         created_at: Date;
       }>(
         `SELECT support_case_id, category, severity, owner_user_id, owner_team, response_due_at,
-                lifecycle_state, created_at
+                response_clock_started_at, first_responded_at, awaiting, lifecycle_state,
+                quality_review_outcome, created_at
            FROM marketplace.support_cases
-          WHERE lifecycle_state NOT IN ('RESOLVED','WITHDRAWN') AND merged_into_case_id IS NULL
+          WHERE lifecycle_state IN ('OPEN','IN_PROGRESS')
           LIMIT 500`,
       );
+      // The deadline is whoever's turn it is (11.3): the first response, the
+      // next update, or the follow-up of a question the customer has not
+      // answered; escalation runs from when that clock started.
       return rows.rows.map((row) => ({
         kind: 'SUPPORT',
         tier: 'LIVE_ORDER' as const,
@@ -370,9 +371,10 @@ export class AdminControlPlaneService {
         object_id: row.support_case_id,
         title: row.category,
         owner: row.owner_user_id ? `USER-${row.owner_user_id}` : (row.owner_team ?? 'SUPPORT'),
-        next_action: row.lifecycle_state === 'OPEN' ? 'FIRST_RESPONSE' : 'CONTINUE_CASE',
+        next_action: supportNextAction(row, now),
         created_at: row.created_at,
         due_at: row.response_due_at,
+        due_since: row.response_clock_started_at,
         amount_at_risk_minor: 0,
         custody_risk: 'NONE' as const,
       }));
@@ -674,227 +676,6 @@ export class AdminControlPlaneService {
     return { stalled_orders: stalled.rows };
   }
 
-  /**
-   * Opens a support case against one order.
-   *
-   * Accepts the system as an actor as well as an administrator, because some
-   * cases should not wait for a person to notice: an order whose goods came
-   * back has already failed, and leaving it in a state nobody reads is how a
-   * customer ends up chasing their own refund. The route above is still
-   * capability-gated; only the worker reaches this as `system`.
-   */
-  async createSupportCase(input: {
-    readonly context: RequestContext;
-    readonly vendor_order_id: UuidV7;
-    readonly category: string;
-    readonly description: string;
-    readonly severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-    readonly response_due_at: Date;
-  }) {
-    const who = operationsAutomation(input.context);
-    if (input.description.trim().length < 1 || input.description.length > 1000)
-      throw new AdminControlInputError('Support description is invalid');
-    return tx(this.#pool, async (client) => {
-      const existing = await client.query(
-        `SELECT * FROM marketplace.support_cases WHERE vendor_order_id=$1 AND category=$2
-          AND lifecycle_state IN ('OPEN','IN_PROGRESS') ORDER BY created_at LIMIT 1 FOR UPDATE`,
-        [input.vendor_order_id, reason(input.category)],
-      );
-      if (existing.rows[0]) return { ...existing.rows[0], deduplicated: true };
-      const supportCaseId = createUuidV7();
-      const r = await client.query(
-        `INSERT INTO marketplace.support_cases(support_case_id,vendor_order_id,opened_by_user_id,
-          category,description,severity,response_due_at,request_id,correlation_id)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-        [
-          supportCaseId,
-          input.vendor_order_id,
-          who,
-          reason(input.category),
-          input.description.trim(),
-          input.severity,
-          input.response_due_at,
-          parseRequestId(input.context.request_id),
-          parseUuidV7(input.context.correlation_id),
-        ],
-      );
-      await client.query(
-        `INSERT INTO marketplace.support_case_events(support_case_event_id,support_case_id,event_type,
-          actor_id,reason_code,request_id,correlation_id) VALUES($1,$2,'OPENED',$3,$4,$5,$6)`,
-        [
-          createUuidV7(),
-          supportCaseId,
-          who,
-          reason(input.category),
-          parseRequestId(input.context.request_id),
-          parseUuidV7(input.context.correlation_id),
-        ],
-      );
-      await this.#audit(
-        client,
-        input.context,
-        who,
-        'SUPPORT_CASE_OPENED',
-        'SUPPORT_CASE',
-        supportCaseId,
-        reason(input.category),
-        null,
-        { severity: input.severity },
-      );
-      return { ...r.rows[0], deduplicated: false };
-    });
-  }
-  async attachSupportEvidence(input: {
-    readonly context: RequestContext;
-    readonly support_case_id: UuidV7;
-    readonly evidence_reference: string;
-    readonly classification: 'INTERNAL' | 'RESTRICTED';
-    readonly reason_code: string;
-  }) {
-    const who = admin(input.context);
-    return tx(this.#pool, async (client) => {
-      const exists = await client.query(
-        'SELECT 1 FROM marketplace.support_cases WHERE support_case_id=$1',
-        [input.support_case_id],
-      );
-      if (!exists.rows[0]) throw new AdminControlNotFoundError();
-      const evidenceId = createUuidV7();
-      await client.query(
-        `INSERT INTO marketplace.support_case_evidence(support_case_evidence_id,support_case_id,evidence_reference,classification,attached_by_user_id) VALUES($1,$2,$3,$4,$5)`,
-        [
-          evidenceId,
-          input.support_case_id,
-          marked(input.evidence_reference),
-          input.classification,
-          who,
-        ],
-      );
-      await client.query(
-        `INSERT INTO marketplace.support_case_events(support_case_event_id,support_case_id,event_type,actor_id,reason_code,payload,request_id,correlation_id) VALUES($1,$2,'EVIDENCE_ATTACHED',$3,$4,$5,$6,$7)`,
-        [
-          createUuidV7(),
-          input.support_case_id,
-          who,
-          reason(input.reason_code),
-          JSON.stringify({
-            evidence_reference: input.evidence_reference,
-            classification: input.classification,
-          }),
-          parseRequestId(input.context.request_id),
-          parseUuidV7(input.context.correlation_id),
-        ],
-      );
-      return { support_case_evidence_id: evidenceId };
-    });
-  }
-  async mergeSupportCases(input: {
-    readonly context: RequestContext;
-    readonly source_case_id: UuidV7;
-    readonly target_case_id: UuidV7;
-    readonly reason_code: string;
-  }) {
-    const who = admin(input.context);
-    if (input.source_case_id === input.target_case_id) throw new AdminControlInputError();
-    return tx(this.#pool, async (client) => {
-      const r = await client.query(
-        `UPDATE marketplace.support_cases SET lifecycle_state='WITHDRAWN',merged_into_case_id=$2,updated_at=clock_timestamp() WHERE support_case_id=$1 AND lifecycle_state IN ('OPEN','IN_PROGRESS') RETURNING support_case_id`,
-        [input.source_case_id, input.target_case_id],
-      );
-      if (!r.rows[0]) throw new AdminControlStateError();
-      await client.query(
-        `INSERT INTO marketplace.support_case_events(support_case_event_id,support_case_id,event_type,actor_id,reason_code,payload,request_id,correlation_id) VALUES($1,$2,'MERGED',$3,$4,$5,$6,$7)`,
-        [
-          createUuidV7(),
-          input.source_case_id,
-          who,
-          reason(input.reason_code),
-          JSON.stringify({ target_case_id: input.target_case_id }),
-          parseRequestId(input.context.request_id),
-          parseUuidV7(input.context.correlation_id),
-        ],
-      );
-      return { merged: true };
-    });
-  }
-  async supportAction(input: {
-    readonly context: RequestContext;
-    readonly support_case_id: UuidV7;
-    readonly action:
-      'ASSIGN' | 'NOTE' | 'MESSAGE' | 'RESOLVE' | 'REOPEN' | 'ESCALATE' | 'QUALITY_REVIEW';
-    readonly reason_code: string;
-    readonly body?: string;
-    readonly owner_user_id?: UuidV7;
-    readonly owner_team?: string;
-  }) {
-    const who = admin(input.context);
-    return tx(this.#pool, async (client) => {
-      const c = await client.query<{ lifecycle_state: string }>(
-        'SELECT * FROM marketplace.support_cases WHERE support_case_id=$1 FOR UPDATE',
-        [input.support_case_id],
-      );
-      if (!c.rows[0]) throw new AdminControlNotFoundError();
-      const state =
-        input.action === 'RESOLVE'
-          ? 'RESOLVED'
-          : input.action === 'REOPEN'
-            ? 'OPEN'
-            : input.action === 'ASSIGN' || input.action === 'ESCALATE'
-              ? 'IN_PROGRESS'
-              : c.rows[0].lifecycle_state;
-      await client.query(
-        `UPDATE marketplace.support_cases SET lifecycle_state=$2,owner_user_id=COALESCE($3,owner_user_id),owner_team=COALESCE($4,owner_team),updated_at=clock_timestamp() WHERE support_case_id=$1`,
-        [input.support_case_id, state, input.owner_user_id ?? null, input.owner_team ?? null],
-      );
-      if (input.body) {
-        await client.query(
-          `INSERT INTO marketplace.support_case_messages(support_case_message_id,support_case_id,author_user_id,audience,body) VALUES($1,$2,$3,$4,$5)`,
-          [
-            createUuidV7(),
-            input.support_case_id,
-            who,
-            input.action === 'MESSAGE' ? 'PARTICIPANT' : 'INTERNAL',
-            input.body,
-          ],
-        );
-      }
-      await this.#audit(
-        client,
-        input.context,
-        who,
-        `SUPPORT_${input.action}`,
-        'SUPPORT_CASE',
-        input.support_case_id,
-        reason(input.reason_code),
-        null,
-        { lifecycle_state: state },
-      );
-      await client.query(
-        `INSERT INTO marketplace.support_case_events(support_case_event_id,support_case_id,event_type,actor_id,reason_code,request_id,correlation_id) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          createUuidV7(),
-          input.support_case_id,
-          input.action === 'NOTE'
-            ? 'NOTE_ADDED'
-            : input.action === 'MESSAGE'
-              ? 'MESSAGE_SENT'
-              : input.action === 'QUALITY_REVIEW'
-                ? 'QUALITY_REVIEWED'
-                : input.action === 'ASSIGN'
-                  ? 'ASSIGNED'
-                  : input.action === 'RESOLVE'
-                    ? 'RESOLVED'
-                    : input.action === 'REOPEN'
-                      ? 'REOPENED'
-                      : 'ESCALATED',
-          who,
-          reason(input.reason_code),
-          parseRequestId(input.context.request_id),
-          parseUuidV7(input.context.correlation_id),
-        ],
-      );
-      return { support_case_id: input.support_case_id, lifecycle_state: state };
-    });
-  }
   async proposeTrust(input: {
     readonly context: RequestContext;
     readonly subject_kind: string;

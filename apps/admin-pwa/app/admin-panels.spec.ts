@@ -6,6 +6,7 @@ import { correctionAmount, impactSentence } from './corrections-panel.js';
 import { conservationSentence } from './finance-queues-panel.js';
 import { accessDeniedMessage, dueSentence } from './admin-workspace.js';
 import { interventionBody, timeInState } from './order-intervention-panel.js';
+import { supportActionBody, turnSentence, type ActionForm } from './support-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -30,9 +31,10 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
   [
     'support-panel.tsx',
     [
-      'admin/control/support',
-      'admin/control/support/${selected}/evidence',
-      'admin/control/support/${selected}/merge',
+      'admin/support/cases?view=${view}&owner=${owner}',
+      'admin/support/cases/${caseId}',
+      'admin/support/cases',
+      'admin/support/cases/${detail.support_case_id}/actions/${action}',
     ],
   ],
   ['trust-panel.tsx', ['admin/control/trust', 'admin/control/trust/${selected}/${action}']],
@@ -271,4 +273,65 @@ test('an intervention is confirmed with the versions its preview read and a reas
   const source = panel('order-intervention-panel.tsx');
   assert.ok(!source.includes('customer/finance/receipts'), 'the timeline is the admin route');
   assert.ok(!source.includes('const consequences'), 'no preview is written in the browser');
+});
+
+const form: ActionForm = {
+  reason_code: '',
+  body: '  The refund went back to your card.  ',
+  owner_user_id: '',
+  owner_team: 'OPERATIONS_LEAD',
+  severity: '',
+  respond_within_hours: '6',
+  resolution_code: 'REFUNDED',
+  refund_id: ' 01900000-0000-7000-8000-000000000001 ',
+  outcome: 'PASS',
+  evidence_reference: '',
+  classification: 'INTERNAL',
+  target_case_id: '',
+};
+
+test('every support step carries the version on screen and a reason (11.3)', () => {
+  const resolve = supportActionBody('RESOLVE', form, 4);
+  assert.deepEqual(resolve, {
+    expected_version: 4,
+    reason_code: 'SUPPORT_RESOLVE',
+    body: 'The refund went back to your card.',
+    resolution_code: 'REFUNDED',
+    refund_id: '01900000-0000-7000-8000-000000000001',
+  });
+  // A refund id is only sent with a refund resolution.
+  assert.equal(
+    'refund_id' in supportActionBody('RESOLVE', { ...form, resolution_code: 'EXPLAINED' }, 4),
+    false,
+  );
+  assert.deepEqual(supportActionBody('ASSIGN', form, 2), {
+    expected_version: 2,
+    reason_code: 'SUPPORT_ASSIGN',
+    owner_team: 'OPERATIONS_LEAD',
+  });
+  assert.equal(supportActionBody('REQUEST_RESPONSE', form, 1).respond_within_seconds, 21_600);
+  assert.equal(
+    supportActionBody('REOPEN', { ...form, reason_code: 'CUSTOMER_CALLED' }, 7).reason_code,
+    'CUSTOMER_CALLED',
+  );
+});
+
+test('a case says whose turn it is and when (11.3)', () => {
+  const now = new Date('2026-09-28T10:00:00Z');
+  assert.equal(
+    turnSentence({ awaiting: 'OPERATIONS', response_due_at: '2026-09-28T10:15:00Z' }, now),
+    'Support owes a reply, due in 15 min.',
+  );
+  assert.equal(
+    turnSentence({ awaiting: 'OPERATIONS', response_due_at: '2026-09-28T09:50:00Z' }, now),
+    'Support owes a reply, 10 min overdue.',
+  );
+  assert.match(
+    turnSentence({ awaiting: 'PARTICIPANT', response_due_at: '2026-09-28T10:30:00Z' }, now),
+    /^Waiting on the customer; follow up due in 30 min\.$/,
+  );
+  assert.equal(
+    turnSentence({ awaiting: 'NONE', response_due_at: null }, now),
+    'Nobody owes a reply.',
+  );
 });

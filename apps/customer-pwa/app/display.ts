@@ -1,3 +1,4 @@
+import type { SupportCaseMessage } from '@neighbourhood-store/contracts';
 /**
  * Presentation helpers shared by every customer screen.
  */
@@ -20,4 +21,12 @@ export function displayLabel(value: string): string {
 export function shortReference(value: string): string {
   const tail = value.split('-').at(-1) ?? value;
   return tail.slice(-8).toUpperCase();
+}
+
+/** Who wrote a message, and what kind it is -- never who at support. */
+export function messageLabel(message: SupportCaseMessage): string {
+  if (message.from === 'YOU') return 'You';
+  if (message.message_kind === 'RESPONSE_REQUEST') return 'Support asked';
+  if (message.message_kind === 'RESOLUTION') return 'Support resolved this case';
+  return 'Support';
 }

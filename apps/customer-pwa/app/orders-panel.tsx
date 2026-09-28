@@ -472,7 +472,7 @@ function OrderCard({
             disabled={supportDescription.trim().length < 4}
             onClick={() =>
               void run(async (client) => {
-                await client.orders.openSupport(order.vendor_order_id, {
+                const opened = await client.orders.openSupport(order.vendor_order_id, {
                   category: supportCategory,
                   description: supportDescription.trim(),
                   ...(supportLine === '' ? {} : { vendor_order_line_id: supportLine }),
@@ -480,8 +480,17 @@ function OrderCard({
                 setSupportOpen(false);
                 setSupportDescription('');
                 setSupportLine('');
+                // The same trouble reported again goes on the case already open.
                 setMessage(
-                  t('customer.support.opened', 'Your case is open. We will come back to you here.'),
+                  opened.deduplicated
+                    ? t(
+                        'customer.support.added_to_case',
+                        'You already have an open case about this. We added what you wrote to it.',
+                      )
+                    : t(
+                        'customer.support.opened',
+                        'Your case is open. We will come back to you here.',
+                      ),
                 );
               })
             }

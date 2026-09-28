@@ -29,57 +29,8 @@ export async function verifyAdminControlPlane(connectionString: string): Promise
       'INSERT INTO marketplace.users(user_id) VALUES($1),($2) ON CONFLICT DO NOTHING',
       [adminA, adminB],
     );
-    const order = await pool.query<{ vendor_order_id: string }>(
-      'SELECT vendor_order_id FROM marketplace.vendor_orders ORDER BY created_at LIMIT 1',
-    );
-    const orderId = order.rows[0]?.vendor_order_id;
-    check(orderId, 'Admin verifier needs the fulfilment order fixture');
-    const first = await service.createSupportCase({
-      context: context(),
-      vendor_order_id: parseUuidV7(orderId),
-      category: 'DELIVERY_DELAY',
-      description: 'SYNTH Delivery support verification',
-      severity: 'HIGH',
-      response_due_at: new Date(Date.now() + 3_600_000),
-    });
-    const duplicate = await service.createSupportCase({
-      context: context(),
-      vendor_order_id: parseUuidV7(orderId),
-      category: 'DELIVERY_DELAY',
-      description: 'SYNTH Duplicate support verification',
-      severity: 'HIGH',
-      response_due_at: new Date(Date.now() + 3_600_000),
-    });
-    check(duplicate.deduplicated === true, 'Support deduplication failed');
-    await service.supportAction({
-      context: context(),
-      support_case_id: parseUuidV7(String(first.support_case_id)),
-      action: 'ASSIGN',
-      reason_code: 'CASE_ASSIGNED',
-      owner_user_id: adminA,
-      owner_team: 'SYNTH_SUPPORT',
-    });
-    await service.attachSupportEvidence({
-      context: context(),
-      support_case_id: parseUuidV7(String(first.support_case_id)),
-      evidence_reference: 'SYNTH-EVIDENCE-SUPPORT-0001',
-      classification: 'RESTRICTED',
-      reason_code: 'EVIDENCE_ATTACHED',
-    });
-    const second = await service.createSupportCase({
-      context: context(),
-      vendor_order_id: parseUuidV7(orderId),
-      category: 'ORDER_QUALITY',
-      description: 'SYNTH Quality support verification',
-      severity: 'MEDIUM',
-      response_due_at: new Date(Date.now() + 7_200_000),
-    });
-    await service.mergeSupportCases({
-      context: context(),
-      source_case_id: parseUuidV7(String(second.support_case_id)),
-      target_case_id: parseUuidV7(String(first.support_case_id)),
-      reason_code: 'DUPLICATE_CASE',
-    });
+    // Support cases moved to their own service and walk (11.3,
+    // verify-support-cases.ts).
     const proposed = await service.proposeTrust({
       context: context(),
       subject_kind: 'CUSTOMER',
