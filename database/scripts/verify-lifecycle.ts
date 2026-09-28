@@ -45,6 +45,7 @@ import { verifyStatementReconciliation } from './verify-statement-reconciliation
 import { verifyFinancialCorrections } from './verify-financial-corrections.js';
 import { auditMoneyConservation } from '../src/money-conservation.js';
 import { verifyMoneyConservation } from './verify-money-conservation.js';
+import { verifyAdminDashboard } from './verify-admin-dashboard.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -816,6 +817,7 @@ await withDatabaseClient(config, async (client) => {
   );
   await measure('financial_corrections', () => verifyFinancialCorrections(config.connectionString));
   await measure('money_conservation', () => verifyMoneyConservation(config.connectionString));
+  await measure('admin_dashboard', () => verifyAdminDashboard(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);

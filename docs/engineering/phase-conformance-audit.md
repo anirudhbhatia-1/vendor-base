@@ -2541,6 +2541,45 @@ One probe was inconclusive and is not counted: a refund posting at its goods amo
 
 **Phase 10 exit gate.** Every scenario conserves money and balances per currency: the audit holds after every module, over everything each leaves (P72-01). Provider statements reconcile or create an owned, visible exception: run 70, and the audit's routing check. No interface can edit or force-balance history: the append-only guards, the audit's history check and the static control (P72-03), with corrections the only chosen-entry posting, maker-checker above the limit (run 71). **Phase 10 is VERIFIED_LOCAL** on every step (runs 66–72), with the carried findings above; production money remains gated by D-12.
 
+## Run 73 (28 September 2026) — step 11.1, role-scoped admin dashboard
+
+Five requirements. None held. The dashboard was one query over four queues — finance exceptions, support cases, trust proposals, incident controls — ranked by money at risk and then age, so a large finance exception outranked everything, and a partner reporting a threat with goods in hand was not on it at all; nor were stalled orders, dead-lettered events, refunds or corrections awaiting approval, or any compliance review. The screen above it said "Safety and money risks stay ahead of routine pipeline work." Rows carried a kind, a title, an amount and a next action: no severity, owner, deadline, age, object kind or custody. Every operator who could open it saw every row, and six admin roles — delivery operator, catalogue moderator, vendor onboarding operator and reviewer, vendor publication operator and reviewer — could not open it at all. The overview loaded three queues with one `Promise.all`, so any one refused request blanked the page for a role that lacked it. Nothing recorded that anyone had looked. One migration (0115); a new connected walk of 16 assertions; four unit tests for the ranking, one for the screen; eight mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Rank safety/security, ledger, live-order, compliance, and routine work consistently | **Not met:** money then age, over four queues, with no safety, live-order or compliance source — P73-01. |
+| 2 | Show severity, owner, SLA, age, object, custody/amount risk, and next action | **Only amount and next action** — P73-01. |
+| 3 | Filter rows by capability without changing severity meaning | **No filtering; six roles locked out** — P73-02. |
+| 4 | Provide safe access-denied states | **One refused queue blanked the page** — P73-03. |
+| 5 | Trace every view/action through request and audit references | **Views were not recorded** — P73-04. |
+
+**P73-01 — one ranking, thirteen queues.** `rankWork` (`database/src/work-ranking.ts`) orders by tier — safety and security, ledger, live orders, compliance, routine — then severity (the D-09 labels in `docs/governance/support-service-levels.md`), then overdue, then due soonest, then money at risk, then age. A deadline is the item's own where it has one (a support case's response due, a correction's or refund's approval window, an incident's or restriction's review) and otherwise the first response window of its severity (critical 5 minutes, high 15, medium 4 hours read as clock hours, low a day); escalation is due at 75% of it, to the D-09 owner of that severity. The dashboard reads partner safety reports (the latest open threat, accident, medical emergency or unsafe location per attempt, with whether the partner holds the goods), trust proposals, active incident controls, finance exceptions (critical for a conservation break or money paid twice; high for an unknown outcome, a refused payout, a failed posting or ₹1,000 and more), corrections and refunds awaiting approval, stalled orders, dead-lettered events, support cases, partner applications and document renewals, vendor onboarding reviews, catalogue moderation and publication reviews. Each row carries its rank, tier, severity, object, owner, deadline, escalation, age, money and custody at risk, and next action; the legacy fields the trust, support and incident panels read remain.
+
+**P73-02 — rows by capability, meaning unchanged.** Each queue is read only for an operator who holds a capability that acts on it, resolved from their live role assignments, a scoped capability counting only under a global scope; a zone-scoped finance operator is not given the global ledger. What an operator cannot see is not counted or hinted at. Rank, severity and deadline are computed from the row alone, so two operators who both see it see it the same way (asserted on the ranking and on the walk). 0115 grants the dashboard to every admin role.
+
+**P73-03 — refused safely.** The overview loads its queues independently; a queue outside the role says it is "not part of your role" — for a 403 and for the concealing 404 alike — and the rest load. A role with no queue sees "No work queues are part of your role."
+
+**P73-04 — every view on the record.** Each dashboard read writes a `DASHBOARD_VIEWED` operational audit event with the request and correlation ids and the queues shown, and returns those references; the screen shows the audit event and request it was recorded under. The actions reached from it are the panels' own and are audited by them (11.9 reads the trail).
+
+**Mutation results.** Eight probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| Rank by money only (old) | *The ledger was not ranked by severity…* |
+| No capability filter (old) | *A delivery operator saw finance or support work* |
+| A scoped capability counts globally | *A zone-scoped finance operator was shown the global ledger* |
+| Views not audited (old) | *A dashboard view was not recorded under its request* |
+| Finance severity flat | *The ledger was not ranked by severity…* |
+| Custody ignored | *A partner reporting a threat with goods in hand was not critical, owned and overdue* |
+| The six roles not granted (old) | *Admin roles cannot open the dashboard* |
+| No safety source (old) | same assertion as custody |
+
+**Forward findings.** (11.x) Medium's "4 staffed hours" is read as clock hours; the desk calendar is not modelled. (11.2) A row names its object but the screen does not yet open it. (11.5) A zone-scoped operator sees no zone-scoped rows; queues are global-only for now. (ops) Development against the `supabase-production` target needs migrations 0112–0115 applied there; the dashboard answered 500 on a missing 0114 column during this run's manual check.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 116 migration files (0000–0115), full ladder, conservation after every module; `admin_dashboard` 16 assertions (new). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 620 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack; all eight probes on rebuilt databases.
+
+**Step 11.1: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

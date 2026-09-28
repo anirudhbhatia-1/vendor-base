@@ -32,14 +32,58 @@ type Publication = {
   version: number;
   vendor_location_id: string;
 };
-type WorkItem = {
+/** One row of the operator's ranked work (11.1), as the server ranked it. */
+export type WorkItem = {
+  rank: number;
   kind: string;
+  tier: 'SAFETY_SECURITY' | 'LEDGER' | 'LIVE_ORDER' | 'COMPLIANCE' | 'ROUTINE';
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  object_kind: string;
   object_id: string;
   title: string;
-  risk_minor: number;
-  created_at: string;
+  owner: string;
   next_action: string;
+  risk_minor: number;
+  custody_risk: 'NONE' | 'GOODS_IN_CUSTODY';
+  created_at: string;
+  sla_due_at: string;
+  age_seconds: number;
+  overdue: boolean;
+  escalation_due: boolean;
+  escalation_owner: string;
 };
+
+type DashboardTrace = { request_id: string; correlation_id: string; audit_event_id: string };
+
+const TIER_LABEL: Record<WorkItem['tier'], string> = {
+  SAFETY_SECURITY: 'Safety & security',
+  LEDGER: 'Ledger',
+  LIVE_ORDER: 'Live orders',
+  COMPLIANCE: 'Compliance',
+  ROUTINE: 'Routine',
+};
+
+/**
+ * A refused request, said safely (11.1): a queue outside the operator's role
+ * is named as such, and nothing about its contents is implied.
+ */
+export function accessDeniedMessage(error: unknown, label: string): string {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (status === 401) return 'Your session has ended. Sign in again to see your work.';
+  if (status === 403 || status === 404) return `${label} is not part of your role.`;
+  return error instanceof Error ? error.message : `${label} could not be loaded.`;
+}
+
+/** When a row is due, in the operator's terms. */
+export function dueSentence(
+  item: Pick<WorkItem, 'sla_due_at' | 'overdue' | 'escalation_due' | 'escalation_owner'>,
+  now: Date,
+): string {
+  const minutes = Math.round((new Date(item.sla_due_at).getTime() - now.getTime()) / 60_000);
+  if (item.overdue)
+    return `overdue by ${Math.abs(minutes)} min · escalate to ${item.escalation_owner.toLowerCase().replaceAll('_', ' ')}`;
+  return `due in ${minutes} min${item.escalation_due ? ` · escalate to ${item.escalation_owner.toLowerCase().replaceAll('_', ' ')}` : ''}`;
+}
 type Moderation = {
   moderation_case_id: string;
   moderation_state: 'PENDING' | 'CLEARED' | 'CORRECTION_REQUIRED' | 'RESTRICTED';
@@ -90,6 +134,9 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
   const router = useRouter();
   const [publications, setPublications] = useState<Publication[]>([]);
   const [work, setWork] = useState<WorkItem[]>([]);
+  const [workQueues, setWorkQueues] = useState<string[]>([]);
+  const [workTrace, setWorkTrace] = useState<DashboardTrace | null>(null);
+  const [workNotice, setWorkNotice] = useState('');
   const [moderation, setModeration] = useState<Moderation[]>([]);
   const [output, setOutput] = useState('Refresh queues to load current operational work.');
   const [refreshing, setRefreshing] = useState(false);
@@ -146,18 +193,46 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
   }
   async function refresh() {
     setRefreshing(true);
+    // Each queue loads on its own (11.1): one outside the operator's role
+    // used to fail the whole refresh, so a finance operator saw nothing at all.
     try {
-      const [p, d, m] = await Promise.all([
+      const [p, d, m] = await Promise.allSettled([
         request('admin/vendor-publications'),
         request('admin/control/dashboard'),
         request('admin/catalogue/moderation'),
       ]);
-      setPublications((p as { cases: Publication[] }).cases ?? []);
-      setWork((d as { items: WorkItem[] }).items ?? []);
-      setModeration((m as { cases?: Moderation[] }).cases ?? []);
-      setOutput('Server queues refreshed. No local decision state is used.');
-    } catch (error) {
-      setOutput(error instanceof Error ? error.message : 'Refresh failed.');
+      const notices: string[] = [];
+      if (p.status === 'fulfilled')
+        setPublications((p.value as { cases: Publication[] }).cases ?? []);
+      else setPublications([]);
+      if (d.status === 'fulfilled') {
+        const dashboard = d.value as {
+          items?: WorkItem[];
+          queues?: string[];
+          trace?: DashboardTrace;
+        };
+        setWork(dashboard.items ?? []);
+        setWorkQueues(dashboard.queues ?? []);
+        setWorkTrace(dashboard.trace ?? null);
+        setWorkNotice(
+          (dashboard.queues ?? []).length === 0 ? 'No work queues are part of your role.' : '',
+        );
+      } else {
+        setWork([]);
+        setWorkQueues([]);
+        setWorkTrace(null);
+        setWorkNotice(accessDeniedMessage(d.reason, 'The operations dashboard'));
+      }
+      if (m.status === 'fulfilled')
+        setModeration((m.value as { cases?: Moderation[] }).cases ?? []);
+      else setModeration([]);
+      if (d.status === 'rejected')
+        notices.push(accessDeniedMessage(d.reason, 'The operations dashboard'));
+      setOutput(
+        notices.length > 0
+          ? notices.join(' ')
+          : 'Server queues refreshed. No local decision state is used.',
+      );
     } finally {
       setRefreshing(false);
     }
@@ -615,21 +690,36 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
               <strong>Risk-ranked work</strong>
               <span>{work.length}</span>
             </div>
+            {workNotice && <p role="status">{workNotice}</p>}
             {work.map((item) => (
               <div className="queue-row" key={`${item.kind}-${item.object_id}`}>
                 <span>
                   <strong>
-                    {item.kind} · {item.title}
+                    {item.rank}. {TIER_LABEL[item.tier]} · {item.severity.toLowerCase()} ·{' '}
+                    {item.title}
                   </strong>
                   <small>
-                    {item.next_action} ·{' '}
-                    {item.risk_minor
-                      ? `₹${(item.risk_minor / 100).toFixed(2)} at risk`
-                      : 'operational risk'}
+                    {item.next_action.toLowerCase().replaceAll('_', ' ')} · owner {item.owner} ·{' '}
+                    {dueSentence(item, new Date())} · open {Math.round(item.age_seconds / 60)} min
+                  </small>
+                  <small>
+                    {item.object_kind.toLowerCase().replaceAll('_', ' ')}{' '}
+                    {item.object_id.slice(0, 8)}
+                    {item.risk_minor ? ` · ₹${(item.risk_minor / 100).toFixed(2)} at risk` : ''}
+                    {item.custody_risk === 'GOODS_IN_CUSTODY'
+                      ? ' · goods in a partner’s custody'
+                      : ''}
                   </small>
                 </span>
               </div>
             ))}
+            {workTrace && (
+              <small>
+                Queues: {workQueues.join(', ').toLowerCase().replaceAll('_', ' ')}. This view was
+                recorded as audit event {workTrace.audit_event_id.slice(0, 8)} under request{' '}
+                {workTrace.request_id.slice(0, 8)}.
+              </small>
+            )}
           </aside>
           <article className="case-workbench">
             <p className="eyebrow">SHIFT PRIORITY</p>

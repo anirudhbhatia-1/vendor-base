@@ -187,6 +187,7 @@ assert(
       '0112_partner_payout_items',
       '0113_statement_reconciliation',
       '0114_correction_controls',
+      '0115_role_scoped_dashboard',
     ]),
   'Unexpected reviewed migrations',
 );

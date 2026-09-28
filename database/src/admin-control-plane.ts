@@ -11,6 +11,7 @@ import {
 import { Pool, type PoolClient } from 'pg';
 import { listDeadLetterEvents, recoverDeadLetterEvent } from './transactional-messaging.js';
 import { transaction as tx } from './transaction.js';
+import { rankWork, type RawWorkItem, type WorkSeverity } from './work-ranking.js';
 
 export class AdminControlInputError extends Error {}
 export class AdminControlNotFoundError extends Error {}
@@ -43,6 +44,27 @@ function marked(value: string) {
   if (!REFERENCE.test(value)) throw new AdminControlInputError('Reference is invalid');
   return value;
 }
+/**
+ * A finance exception's severity (D-09): a conservation break or money paid
+ * twice is critical; an outcome nobody knows, a refused payout, a posting that
+ * failed, or a large amount is high; the rest is medium.
+ */
+function financeSeverity(kind: string, amountMinor: number): WorkSeverity {
+  if (['LEDGER_UNBALANCED', 'PAYOUT_DUPLICATE_RISK'].includes(kind)) return 'CRITICAL';
+  if (
+    [
+      'PAYMENT_UNKNOWN',
+      'REFUND_UNKNOWN',
+      'PAYOUT_UNKNOWN',
+      'PAYOUT_FAILED',
+      'POSTING_FAILED',
+    ].includes(kind) ||
+    amountMinor >= 100_000
+  )
+    return 'HIGH';
+  return 'MEDIUM';
+}
+
 export class AdminControlPlaneService {
   readonly #pool: Pool;
   constructor(input: { readonly connection_string: string }) {
@@ -55,16 +77,480 @@ export class AdminControlPlaneService {
   async close() {
     await this.#pool.end();
   }
-  async dashboard(input: { readonly context: RequestContext }) {
-    admin(input.context);
-    const r = await this.#pool.query(`SELECT * FROM (
-    SELECT 'FINANCE' kind,finance_exception_id::text object_id,exception_kind title,amount_at_risk_minor risk_minor,created_at, next_action_code next_action FROM marketplace.finance_exceptions WHERE exception_state<>'RESOLVED'
-    UNION ALL SELECT 'SUPPORT',support_case_id::text,category,0,created_at,COALESCE(lifecycle_state,'OPEN') FROM marketplace.support_cases WHERE lifecycle_state NOT IN ('RESOLVED','WITHDRAWN')
-    UNION ALL SELECT 'TRUST',trust_restriction_case_id::text,reason_code,0,created_at,lifecycle_state FROM marketplace.trust_restriction_cases WHERE lifecycle_state='PROPOSED'
-    UNION ALL SELECT 'INCIDENT',incident_control_id::text,control_key,0,created_at,lifecycle_state FROM marketplace.incident_controls WHERE lifecycle_state='ACTIVE'
-  ) q ORDER BY risk_minor DESC,created_at ASC LIMIT 100`);
-    return { items: r.rows };
+  /**
+   * The operator's work, ranked (11.1).
+   *
+   * Every queue that needs a person, each row with its tier, severity, owner,
+   * deadline, age, object, money and custody at risk, and next action, ranked
+   * by `rankWork` the same way for everyone. An operator sees the rows of the
+   * queues their capabilities let them act on and no others; what they cannot
+   * see is not counted or hinted at. Every view is written to the operational
+   * audit, and the response carries the request, correlation and audit
+   * references it was recorded under.
+   *
+   * Until audit run 73 this returned finance, support, trust and incident rows
+   * to anyone who could open it, ranked by money at risk and then age -- so a
+   * large finance exception outranked a partner reporting a threat, which was
+   * not a row at all -- with no severity, owner, deadline or custody, and no
+   * record that anyone had looked.
+   */
+  async dashboard(input: { readonly context: RequestContext; readonly now?: Date }) {
+    const actor = admin(input.context);
+    const now = input.now ?? new Date();
+    const capabilities = await this.#globalCapabilities(actor, now);
+    const may = (...keys: string[]) => keys.some((key) => capabilities.has(key));
+    const queues: string[] = [];
+    const raw: RawWorkItem[] = [];
+    const add = async (
+      queue: string,
+      allowed: boolean,
+      load: () => Promise<readonly RawWorkItem[]>,
+    ) => {
+      if (!allowed) return;
+      queues.push(queue);
+      raw.push(...(await load()));
+    };
+
+    // Safety and security: a partner in danger, a restriction awaiting its
+    // decision, a pause in force.
+    await add(
+      'PARTNER_SAFETY',
+      may('admin.order.intervene', 'admin.delivery.assignment_manage', 'admin.incident.manage'),
+      async () => {
+        const rows = await this.#pool.query<{
+          partner_exception_event_id: string;
+          exception_kind: string;
+          custody_state: string;
+          occurred_at: Date;
+        }>(
+          `SELECT latest.partner_exception_event_id, latest.exception_kind,
+                  assignment.custody_state, latest.occurred_at
+             FROM (SELECT DISTINCT ON (event.delivery_assignment_id, event.exception_kind) event.*
+                     FROM marketplace.partner_exception_events event
+                    ORDER BY event.delivery_assignment_id, event.exception_kind,
+                             event.occurred_at DESC, event.partner_exception_event_id DESC) latest
+             JOIN marketplace.delivery_assignments assignment USING (delivery_assignment_id)
+            WHERE latest.resolution_state = 'OPEN'
+              AND latest.exception_kind IN ('UNSAFE_LOCATION','ACCIDENT','MEDICAL_EMERGENCY','THREAT')
+            LIMIT 200`,
+        );
+        return rows.rows.map((row) => ({
+          kind: 'SAFETY',
+          tier: 'SAFETY_SECURITY' as const,
+          severity:
+            row.exception_kind === 'UNSAFE_LOCATION' ? ('HIGH' as const) : ('CRITICAL' as const),
+          object_kind: 'PARTNER_EXCEPTION',
+          object_id: row.partner_exception_event_id,
+          title: row.exception_kind,
+          owner: 'DELIVERY_OPERATIONS',
+          next_action: 'CONTACT_PARTNER_AND_DIRECT',
+          created_at: row.occurred_at,
+          amount_at_risk_minor: 0,
+          custody_risk:
+            row.custody_state === 'IN_CUSTODY' ? ('GOODS_IN_CUSTODY' as const) : ('NONE' as const),
+        }));
+      },
+    );
+    await add(
+      'TRUST',
+      may('admin.trust.restriction_approve', 'admin.trust.restriction_propose'),
+      async () => {
+        const rows = await this.#pool.query<{
+          trust_restriction_case_id: string;
+          reason_code: string;
+          review_at: Date | null;
+          created_at: Date;
+        }>(
+          `SELECT trust_restriction_case_id, reason_code, review_at, created_at
+             FROM marketplace.trust_restriction_cases WHERE lifecycle_state='PROPOSED' LIMIT 200`,
+        );
+        return rows.rows.map((row) => ({
+          kind: 'TRUST',
+          tier: 'SAFETY_SECURITY' as const,
+          severity: 'HIGH' as const,
+          object_kind: 'TRUST_RESTRICTION_CASE',
+          object_id: row.trust_restriction_case_id,
+          title: row.reason_code,
+          owner: 'TRUST_APPROVERS',
+          next_action: 'DECIDE_RESTRICTION',
+          created_at: row.created_at,
+          due_at: row.review_at,
+          amount_at_risk_minor: 0,
+          custody_risk: 'NONE' as const,
+        }));
+      },
+    );
+    await add('INCIDENT', may('admin.incident.manage'), async () => {
+      const rows = await this.#pool.query<{
+        incident_control_id: string;
+        control_key: string;
+        owner_user_id: string;
+        review_at: Date;
+        created_at: Date;
+      }>(
+        `SELECT incident_control_id, control_key, owner_user_id, review_at, created_at
+           FROM marketplace.incident_controls WHERE lifecycle_state='ACTIVE' LIMIT 200`,
+      );
+      return rows.rows.map((row) => ({
+        kind: 'INCIDENT',
+        tier: 'SAFETY_SECURITY' as const,
+        severity: 'HIGH' as const,
+        object_kind: 'INCIDENT_CONTROL',
+        object_id: row.incident_control_id,
+        title: row.control_key,
+        owner: `USER-${row.owner_user_id}`,
+        next_action: 'REVIEW_OR_REVOKE_CONTROL',
+        created_at: row.created_at,
+        due_at: row.review_at,
+        amount_at_risk_minor: 0,
+        custody_risk: 'NONE' as const,
+      }));
+    });
+
+    // The ledger: finance exceptions, corrections and refunds awaiting a person.
+    await add('FINANCE', may('admin.finance.ledger_manage'), async () => {
+      const exceptions = await this.#pool.query<{
+        finance_exception_id: string;
+        exception_kind: string;
+        amount_at_risk_minor: string;
+        owner_reference: string;
+        next_action_code: string;
+        created_at: Date;
+      }>(
+        `SELECT finance_exception_id, exception_kind, amount_at_risk_minor::text, owner_reference,
+                next_action_code, created_at
+           FROM marketplace.finance_exceptions WHERE exception_state<>'RESOLVED' LIMIT 500`,
+      );
+      const corrections = await this.#pool.query<{
+        financial_correction_id: string;
+        reason_code: string;
+        impact_minor: string;
+        approval_expires_at: Date;
+        created_at: Date;
+      }>(
+        `SELECT financial_correction_id, reason_code, impact_minor::text, approval_expires_at,
+                created_at
+           FROM marketplace.financial_corrections WHERE lifecycle_state='PROPOSED' LIMIT 200`,
+      );
+      return [
+        ...exceptions.rows.map((row) => ({
+          kind: 'FINANCE',
+          tier: 'LEDGER' as const,
+          severity: financeSeverity(row.exception_kind, Number(row.amount_at_risk_minor)),
+          object_kind: 'FINANCE_EXCEPTION',
+          object_id: row.finance_exception_id,
+          title: row.exception_kind,
+          owner: row.owner_reference,
+          next_action: row.next_action_code,
+          created_at: row.created_at,
+          amount_at_risk_minor: Number(row.amount_at_risk_minor),
+          custody_risk: 'NONE' as const,
+        })),
+        ...corrections.rows.map((row) => ({
+          kind: 'FINANCE',
+          tier: 'LEDGER' as const,
+          severity: 'MEDIUM' as const,
+          object_kind: 'FINANCIAL_CORRECTION',
+          object_id: row.financial_correction_id,
+          title: row.reason_code,
+          owner: 'FINANCE_OPERATIONS',
+          next_action: 'APPROVE_OR_REJECT_CORRECTION',
+          created_at: row.created_at,
+          due_at: row.approval_expires_at,
+          amount_at_risk_minor: Number(row.impact_minor),
+          custody_risk: 'NONE' as const,
+        })),
+      ];
+    });
+    await add('REFUND_APPROVAL', may('admin.finance.refund_approve'), async () => {
+      const rows = await this.#pool.query<{
+        refund_id: string;
+        trigger_code: string;
+        refund_total_minor: string;
+        approval_expires_at: Date | null;
+        created_at: Date;
+      }>(
+        `SELECT refund_id, trigger_code, refund_total_minor::text, approval_expires_at, created_at
+           FROM marketplace.refunds
+          WHERE refund_state='PENDING_APPROVAL' AND approval_expires_at > $1 LIMIT 200`,
+        [now],
+      );
+      return rows.rows.map((row) => ({
+        kind: 'REFUND',
+        tier: 'LEDGER' as const,
+        severity: 'HIGH' as const,
+        object_kind: 'REFUND',
+        object_id: row.refund_id,
+        title: row.trigger_code,
+        owner: 'FINANCE_APPROVERS',
+        next_action: 'APPROVE_REFUND',
+        created_at: row.created_at,
+        due_at: row.approval_expires_at,
+        amount_at_risk_minor: Number(row.refund_total_minor),
+        custody_risk: 'NONE' as const,
+      }));
+    });
+
+    // Live orders: a deadline passed with nobody acting, a side effect that
+    // never ran, a customer's case.
+    await add('STALLED_ORDERS', may('admin.order.intervene'), async () => {
+      const { stalled_orders } = await this.#stalledOrders(now);
+      return (
+        stalled_orders as {
+          vendor_order_id: string;
+          order_reference: string;
+          stall_reason: string;
+          stalled_seconds: string;
+        }[]
+      ).map((row) => {
+        const since = new Date(now.getTime() - Number(row.stalled_seconds) * 1_000);
+        return {
+          kind: 'ORDER',
+          tier: 'LIVE_ORDER' as const,
+          severity: 'HIGH' as const,
+          object_kind: 'VENDOR_ORDER',
+          object_id: row.vendor_order_id,
+          title: `${row.stall_reason} ${row.order_reference}`,
+          owner: 'OPERATIONS',
+          next_action: 'INTERVENE_ON_ORDER',
+          created_at: since,
+          // The deadline the order sat past has already gone.
+          due_at: since,
+          amount_at_risk_minor: 0,
+          custody_risk: 'NONE' as const,
+        };
+      });
+    });
+    await add('DEAD_LETTERS', may('admin.messaging.deadletter_read'), async () => {
+      const rows = await this.#pool.query<{
+        event_id: string;
+        event_type: string;
+        occurred_at: Date;
+      }>(
+        `SELECT event_id, event_type, updated_at AS occurred_at FROM marketplace.outbox_events
+          WHERE status = 'DEAD_LETTER' LIMIT 200`,
+      );
+      return rows.rows.map((row) => ({
+        kind: 'DEAD_LETTER',
+        tier: 'LIVE_ORDER' as const,
+        severity: 'HIGH' as const,
+        object_kind: 'OUTBOX_EVENT',
+        object_id: row.event_id,
+        title: row.event_type,
+        owner: 'OPERATIONS',
+        next_action: 'RECOVER_OR_EXPLAIN_EVENT',
+        created_at: row.occurred_at,
+        amount_at_risk_minor: 0,
+        custody_risk: 'NONE' as const,
+      }));
+    });
+    await add('SUPPORT', may('admin.support.case_manage'), async () => {
+      const rows = await this.#pool.query<{
+        support_case_id: string;
+        category: string;
+        severity: 'CRITICAL' | 'HIGH' | 'LOW' | 'MEDIUM';
+        owner_user_id: string | null;
+        owner_team: string | null;
+        response_due_at: Date | null;
+        lifecycle_state: string;
+        created_at: Date;
+      }>(
+        `SELECT support_case_id, category, severity, owner_user_id, owner_team, response_due_at,
+                lifecycle_state, created_at
+           FROM marketplace.support_cases
+          WHERE lifecycle_state NOT IN ('RESOLVED','WITHDRAWN') AND merged_into_case_id IS NULL
+          LIMIT 500`,
+      );
+      return rows.rows.map((row) => ({
+        kind: 'SUPPORT',
+        tier: 'LIVE_ORDER' as const,
+        severity: row.severity,
+        object_kind: 'SUPPORT_CASE',
+        object_id: row.support_case_id,
+        title: row.category,
+        owner: row.owner_user_id ? `USER-${row.owner_user_id}` : (row.owner_team ?? 'SUPPORT'),
+        next_action: row.lifecycle_state === 'OPEN' ? 'FIRST_RESPONSE' : 'CONTINUE_CASE',
+        created_at: row.created_at,
+        due_at: row.response_due_at,
+        amount_at_risk_minor: 0,
+        custody_risk: 'NONE' as const,
+      }));
+    });
+
+    // Compliance: people and shops waiting to be let in, documents to check,
+    // listings held for review.
+    await add('PARTNER_REVIEW', may('admin.partner_application.review'), async () => {
+      const applications = await this.#pool.query<{
+        partner_application_id: string;
+        lifecycle_state: string;
+        submitted_at: Date | null;
+        created_at: Date;
+      }>(
+        `SELECT partner_application_id, lifecycle_state, submitted_at, created_at
+           FROM marketplace.partner_applications
+          WHERE lifecycle_state IN ('SUBMITTED','UNDER_REVIEW') LIMIT 200`,
+      );
+      const renewals = await this.#pool.query<{
+        partner_document_renewal_id: string;
+        document_kind: string;
+        created_at: Date;
+      }>(
+        `SELECT partner_document_renewal_id, document_kind, created_at
+           FROM marketplace.partner_document_renewals WHERE lifecycle_state='SUBMITTED' LIMIT 200`,
+      );
+      return [
+        ...applications.rows.map((row) => ({
+          kind: 'PARTNER_APPLICATION',
+          tier: 'COMPLIANCE' as const,
+          severity: 'MEDIUM' as const,
+          object_kind: 'PARTNER_APPLICATION',
+          object_id: row.partner_application_id,
+          title: row.lifecycle_state,
+          owner: 'PARTNER_REVIEW',
+          next_action: row.lifecycle_state === 'SUBMITTED' ? 'START_REVIEW' : 'DECIDE_APPLICATION',
+          created_at: row.submitted_at ?? row.created_at,
+          amount_at_risk_minor: 0,
+          custody_risk: 'NONE' as const,
+        })),
+        ...renewals.rows.map((row) => ({
+          kind: 'PARTNER_DOCUMENT',
+          tier: 'COMPLIANCE' as const,
+          severity: 'MEDIUM' as const,
+          object_kind: 'PARTNER_DOCUMENT_RENEWAL',
+          object_id: row.partner_document_renewal_id,
+          title: row.document_kind,
+          owner: 'PARTNER_REVIEW',
+          next_action: 'VERIFY_DOCUMENT',
+          created_at: row.created_at,
+          amount_at_risk_minor: 0,
+          custody_risk: 'NONE' as const,
+        })),
+      ];
+    });
+    await add('VENDOR_ONBOARDING', may('admin.vendor_onboarding.review'), async () => {
+      const rows = await this.#pool.query<{
+        onboarding_case_id: string;
+        lifecycle_state: string;
+        submitted_at: Date | null;
+        created_at: Date;
+      }>(
+        `SELECT onboarding_case_id, lifecycle_state, submitted_at, created_at
+           FROM marketplace.vendor_onboarding_cases
+          WHERE lifecycle_state IN ('PENDING','UNDER_REVIEW') LIMIT 200`,
+      );
+      return rows.rows.map((row) => ({
+        kind: 'VENDOR_ONBOARDING',
+        tier: 'COMPLIANCE' as const,
+        severity: 'MEDIUM' as const,
+        object_kind: 'VENDOR_ONBOARDING_CASE',
+        object_id: row.onboarding_case_id,
+        title: row.lifecycle_state,
+        owner: 'VENDOR_ONBOARDING',
+        next_action: row.lifecycle_state === 'PENDING' ? 'START_REVIEW' : 'DECIDE_ONBOARDING',
+        created_at: row.submitted_at ?? row.created_at,
+        amount_at_risk_minor: 0,
+        custody_risk: 'NONE' as const,
+      }));
+    });
+    await add('CATALOGUE_MODERATION', may('admin.catalogue.moderate'), async () => {
+      const rows = await this.#pool.query<{
+        moderation_case_id: string;
+        reason_code: string;
+        created_at: Date;
+      }>(
+        `SELECT moderation_case_id, reason_code, created_at
+           FROM marketplace.catalogue_moderation_cases WHERE moderation_state='PENDING' LIMIT 200`,
+      );
+      return rows.rows.map((row) => ({
+        kind: 'CATALOGUE',
+        tier: 'COMPLIANCE' as const,
+        severity: 'LOW' as const,
+        object_kind: 'CATALOGUE_MODERATION_CASE',
+        object_id: row.moderation_case_id,
+        title: row.reason_code,
+        owner: 'CATALOGUE_MODERATION',
+        next_action: 'MODERATE_LISTING',
+        created_at: row.created_at,
+        amount_at_risk_minor: 0,
+        custody_risk: 'NONE' as const,
+      }));
+    });
+
+    // Routine: a shop ready to go live, waiting for its reviewer.
+    await add('VENDOR_PUBLICATION', may('admin.vendor_publication.review'), async () => {
+      const rows = await this.#pool.query<{
+        publication_case_id: string;
+        created_at: Date;
+        updated_at: Date;
+      }>(
+        `SELECT publication_case_id, created_at, updated_at
+           FROM marketplace.vendor_publication_cases WHERE lifecycle_state='PENDING_APPROVAL'
+          LIMIT 200`,
+      );
+      return rows.rows.map((row) => ({
+        kind: 'VENDOR_PUBLICATION',
+        tier: 'ROUTINE' as const,
+        severity: 'LOW' as const,
+        object_kind: 'VENDOR_PUBLICATION_CASE',
+        object_id: row.publication_case_id,
+        title: 'PENDING_APPROVAL',
+        owner: 'VENDOR_PUBLICATION',
+        next_action: 'APPROVE_PUBLICATION',
+        created_at: row.updated_at,
+        amount_at_risk_minor: 0,
+        custody_risk: 'NONE' as const,
+      }));
+    });
+
+    const items = rankWork(raw, now);
+    const auditEventId = createUuidV7();
+    await this.#pool.query(
+      `INSERT INTO marketplace.operational_audit_events
+        (operational_audit_event_id,action,target_kind,target_reference,actor_id,reason_code,
+         before_value,after_value,request_id,correlation_id)
+       VALUES ($1,'DASHBOARD_VIEWED','ADMIN_DASHBOARD',$6,$2,'OPERATOR_VIEW',NULL,$3,$4,$5)`,
+      [
+        auditEventId,
+        actor,
+        JSON.stringify({ queues, items: items.length }),
+        parseRequestId(input.context.request_id),
+        parseUuidV7(input.context.correlation_id),
+        String(actor),
+      ],
+    );
+    return {
+      items,
+      queues,
+      generated_at: now.toISOString(),
+      trace: {
+        request_id: input.context.request_id,
+        correlation_id: input.context.correlation_id,
+        audit_event_id: auditEventId,
+      },
+    };
   }
+
+  /**
+   * The capabilities an admin holds everywhere: from their live role
+   * assignments, where a scoped capability counts only under a global scope.
+   */
+  async #globalCapabilities(actor: UuidV7, now: Date): Promise<ReadonlySet<string>> {
+    const rows = await this.#pool.query<{ capability_key: string }>(
+      `SELECT DISTINCT capability.capability_key
+         FROM marketplace.users person
+         JOIN marketplace.role_assignments assignment ON assignment.user_id = person.user_id
+         JOIN marketplace.role_capabilities granted USING (role_key)
+         JOIN marketplace.capabilities capability USING (capability_key)
+         LEFT JOIN marketplace.admin_membership_scopes scope USING (role_assignment_id)
+        WHERE person.user_id = $1 AND person.state = 'ACTIVE'
+          AND assignment.state = 'ACTIVE' AND assignment.valid_from <= $2
+          AND (assignment.valid_until IS NULL OR assignment.valid_until > $2)
+          AND (capability.resource_rule <> 'ADMIN_SCOPE' OR scope.scope_kind = 'GLOBAL')`,
+      [actor, now],
+    );
+    return new Set(rows.rows.map((row) => row.capability_key));
+  }
+
   /**
    * Checkout groups and the vendor orders under them.
    *

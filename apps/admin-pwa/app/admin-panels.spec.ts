@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { correctionAmount, impactSentence } from './corrections-panel.js';
 import { conservationSentence } from './finance-queues-panel.js';
+import { accessDeniedMessage, dueSentence } from './admin-workspace.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -205,4 +206,31 @@ test('the finance screen says whether the books agree with the records (10.7)', 
     }),
     /1 disagreement\(s\).*vendor payable for shop-a/,
   );
+});
+
+test('a queue outside the role is refused safely, and a row says when it is due (11.1)', () => {
+  assert.equal(
+    accessDeniedMessage(Object.assign(new Error('Forbidden'), { status: 403 }), 'Finance'),
+    'Finance is not part of your role.',
+  );
+  assert.equal(
+    accessDeniedMessage(Object.assign(new Error('Not found'), { status: 404 }), 'Finance'),
+    'Finance is not part of your role.',
+  );
+  const now = new Date('2027-07-01T10:00:00.000Z');
+  assert.equal(
+    dueSentence(
+      {
+        sla_due_at: '2027-07-01T09:50:00.000Z',
+        overdue: true,
+        escalation_due: true,
+        escalation_owner: 'INCIDENT_COMMANDER',
+      },
+      now,
+    ),
+    'overdue by 10 min · escalate to incident commander',
+  );
+  const source = panel('admin-workspace.tsx');
+  assert.ok(source.includes('Promise.allSettled'), 'one refused queue does not blank the page');
+  assert.ok(source.includes('workTrace.audit_event_id'), 'the view shows its audit reference');
 });

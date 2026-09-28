@@ -4702,7 +4702,7 @@
       "name": "Risk-ranked dashboard",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Dashboard with risk_minor and next_action",
+      "notes": "Thirteen queues ranked the same way for every operator -- safety and security, ledger, live orders, compliance, routine; then severity (D-09), overdue and due soonest, money at risk, age -- each row with owner, deadline, escalation, age, object, money and custody at risk and next action; an operator sees only the queues their capabilities act on, and every view is audited (audit run 73 -- until then money-then-age over four queues, the same rows for everyone, and no partner safety report on it at all)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4715,6 +4715,8 @@
       },
       "phase_steps": ["11.1"],
       "verified_by": [
+        "database/scripts/verify-admin-dashboard.ts",
+        "database/src/work-ranking.spec.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/admin-control-plane.controller.spec.ts"
       ]
@@ -4724,7 +4726,7 @@
       "name": "Queue ownership and SLA",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Partner field reports form an owned queue with age ordering and safety first",
+      "notes": "Partner field reports form an owned queue with age ordering and safety first; on the dashboard every row carries its owner, its D-09 deadline and its escalation at 75% of the window (audit run 73)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4741,6 +4743,8 @@
       ],
       "phase_steps": ["11.1"],
       "verified_by": [
+        "database/scripts/verify-admin-dashboard.ts",
+        "database/src/work-ranking.spec.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/admin-control-plane.controller.spec.ts"
       ]
