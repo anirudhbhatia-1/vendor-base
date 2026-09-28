@@ -577,6 +577,11 @@ export class MoneyLifecycleService {
     readonly now?: Date;
   }) {
     actor(input.context);
+    // A partner is paid once per batch for everything payable (10.4), not per
+    // order: a per-order partner payout here could pay an earning the batch
+    // also pays.
+    if (input.beneficiary_kind !== 'VENDOR')
+      throw new MoneyInputError('Partner payouts are paid by the daily batch');
     const amount = minor(input.amount_minor, 'Payout amount', 1);
     const now = input.now ?? new Date();
     const beneficiary = text(
@@ -689,6 +694,7 @@ export class MoneyLifecycleService {
       const paid = Object.freeze(updated.rows[0]);
       if (paid.payout_state === 'PAID')
         await this.#postPayoutLedger(client, input.context, paid, now);
+      if (paid.payout_state === 'FAILED_REVIEW') await this.#recordRefusedPayout(client, paid, now);
       return paid;
     });
     return payout;
@@ -741,7 +747,22 @@ export class MoneyLifecycleService {
           ],
         );
       if (input.provider_state === 'UNKNOWN') return Object.freeze(current);
+      if (current.payout_state === 'PAID') {
+        if (input.provider_state === 'SUCCEEDED') return Object.freeze(current);
+        throw new MoneyStateError('A paid payout cannot be reconciled as failed');
+      }
       const next = input.provider_state === 'SUCCEEDED' ? 'PAID' : 'FAILED_REVIEW';
+      // Money the provider says went out after what the payout carried was
+      // released and paid again: the partner has been paid twice, and the
+      // books will show them owing it back.
+      const releasedBefore =
+        next === 'PAID' && current.beneficiary_kind === 'PARTNER'
+          ? await client.query(
+              `SELECT 1 FROM marketplace.partner_payout_items
+                WHERE payout_id=$1 AND lifecycle_state='RELEASED' LIMIT 1`,
+              [input.payout_id],
+            )
+          : { rowCount: 0 };
       const updated = await client.query(
         `UPDATE marketplace.payouts
             SET payout_state=$2::text,statement_reference=$3::text,version=version+1,
@@ -759,6 +780,17 @@ export class MoneyLifecycleService {
       const reconciled = Object.freeze(updated.rows[0]);
       if (reconciled.payout_state === 'PAID')
         await this.#postPayoutLedger(client, input.context, reconciled, now);
+      if (reconciled.payout_state === 'FAILED_REVIEW')
+        await this.#recordRefusedPayout(client, reconciled, now);
+      if ((releasedBefore.rowCount ?? 0) > 0)
+        await client.query(
+          `INSERT INTO marketplace.finance_exceptions
+            (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+             owner_reference,next_action_code,created_at,updated_at)
+           VALUES ($1,'PAYOUT_DUPLICATE_RISK',$2,$3,'FINANCE_OPERATIONS',
+             'RECOVER_DUPLICATE_PARTNER_PAYOUT',$4,$4)`,
+          [createUuidV7(), current.provider_operation_reference, current.amount_minor, now],
+        );
       return reconciled;
     });
     return payout;
@@ -1429,6 +1461,37 @@ export class MoneyLifecycleService {
     now: Date,
   ) {
     const amount = Number(payout.amount_minor);
+    if (payout.beneficiary_kind === 'PARTNER' && payout.settlement_id === null) {
+      await this.#insertBalanced(client, {
+        context,
+        entries: [
+          {
+            account: 'SYNTH-ACCOUNT-PARTNER-PAYABLE',
+            component: 'PAYOUT',
+            debit: amount,
+            credit: 0,
+            partner_user_id: parseUuidV7(String(payout.partner_user_id)),
+          },
+          {
+            account: this.#provider.clearingAccountReference(),
+            component: 'PAYOUT',
+            debit: 0,
+            credit: amount,
+          },
+        ],
+        kind: 'PAYOUT',
+        now,
+        provider: String(payout.provider_operation_reference),
+        source: `SYNTH-PAYOUT-${String(payout.payout_id).toUpperCase()}`,
+      });
+      // What the payout carried is paid; a replay finds nothing still paying.
+      await client.query(
+        `UPDATE marketplace.partner_payout_items SET lifecycle_state='PAID', settled_at=$2
+          WHERE payout_id=$1 AND lifecycle_state='PAYING'`,
+        [payout.payout_id, now],
+      );
+      return;
+    }
     const settlement = await client.query<{
       partner_user_id: string | null;
       source_order_reference: string;
@@ -1472,6 +1535,27 @@ export class MoneyLifecycleService {
     await this.#refreshSettlementState(client, String(payout.settlement_id), now);
   }
 
+  /**
+   * A partner payout the provider refused: nothing moved, and what it
+   * carried stays on it until a person has checked the partner's bank
+   * account and releases it (10.4). Sending it again on its own would send
+   * it to the same account that refused it.
+   */
+  async #recordRefusedPayout(client: PoolClient, payout: Record<string, unknown>, now: Date) {
+    if (payout.beneficiary_kind !== 'PARTNER') return;
+    await client.query(
+      `INSERT INTO marketplace.finance_exceptions
+        (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+         owner_reference,next_action_code,created_at,updated_at)
+       SELECT $1,'PAYOUT_FAILED',$2,$3,'FINANCE_OPERATIONS','VERIFY_PARTNER_BANK_ACCOUNT',$4,$4
+        WHERE NOT EXISTS (
+          SELECT 1 FROM marketplace.finance_exceptions
+           WHERE exception_kind='PAYOUT_FAILED' AND operation_reference=$2
+             AND exception_state IN ('OPEN','ASSIGNED'))`,
+      [createUuidV7(), payout.provider_operation_reference, payout.amount_minor, now],
+    );
+  }
+
   async #refreshSettlementState(client: PoolClient, settlementId: string, now: Date) {
     await client.query(
       `UPDATE marketplace.settlements settlement
@@ -1481,10 +1565,13 @@ export class MoneyLifecycleService {
                    WHERE payout.settlement_id=settlement.settlement_id
                      AND payout.payout_state='FAILED_REVIEW'
                 ) THEN 'FAILED_REVIEW'
-                WHEN (SELECT count(*) FROM marketplace.payouts payout
-                       WHERE payout.settlement_id=settlement.settlement_id)
-                     = (CASE WHEN settlement.vendor_payable_minor > 0 THEN 1 ELSE 0 END
-                        + CASE WHEN settlement.partner_payable_minor > 0 THEN 1 ELSE 0 END)
+                -- The partner's share is paid on the partner's own payout
+                -- (10.4), so the settlement is paid when the shop's payout
+                -- and any per-order payout written before 0112 are.
+                WHEN (settlement.vendor_payable_minor = 0 OR EXISTS (
+                        SELECT 1 FROM marketplace.payouts payout
+                         WHERE payout.settlement_id=settlement.settlement_id
+                           AND payout.beneficiary_kind='VENDOR'))
                  AND NOT EXISTS (
                    SELECT 1 FROM marketplace.payouts payout
                     WHERE payout.settlement_id=settlement.settlement_id

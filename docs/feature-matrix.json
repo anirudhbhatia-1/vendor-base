@@ -4473,7 +4473,7 @@
       "name": "Payout history",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/partner-pwa/app/earnings-panel.tsx renders payout state and paid date per line, and paid totals per day and week (audit run 65)",
+      "notes": "apps/partner-pwa/app/earnings-panel.tsx renders payout state and paid date per line and per compensation, and paid totals per day and week (audit run 65); the state is the payout that carries the line, one payout per partner per batch (audit run 69)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4487,7 +4487,8 @@
       "phase_steps": ["10.4"],
       "verified_by": [
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/scripts/verify-money-lifecycle.ts"
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-partner-payouts.ts"
       ]
     },
     {
@@ -7522,7 +7523,7 @@
       "name": "Payout provider",
       "status": "complete_local_synthetic",
       "target_stage": "10",
-      "notes": "Batch creation with provider scenarios. Daily jobs",
+      "notes": "Daily batches created and submitted by the finance worker; a partner is paid once per batch for itemised earnings, dispute answers and compensations; a refused payout is held for a bank check and released by finance; an unknown one is never paid twice (audit run 69)",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -7537,6 +7538,7 @@
       "phase_steps": ["0.4", "10.4"],
       "verified_by": [
         "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-partner-payouts.ts",
         "database/src/provider-ports.spec.ts",
         "database/src/runtime-config.spec.ts",
         "database/src/supabase-protected-object-storage.spec.ts"

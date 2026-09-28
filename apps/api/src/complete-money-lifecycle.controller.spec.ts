@@ -21,6 +21,9 @@ test('maker-checker and reconciliation commands require global finance authority
   for (const method of [
     'voidPayment',
     'createPayoutBatch',
+    // Sending a batch and releasing a refused partner payout (10.4).
+    'submitPayoutBatch',
+    'releaseFailedPartnerPayout',
     'schedulePayoutJob',
     'importStatement',
     'proposeCorrection',

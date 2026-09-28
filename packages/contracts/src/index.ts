@@ -50,6 +50,7 @@ export type {
   DevicePosition,
   PartnerAttemptCompensation,
   PartnerDisputeCase,
+  PartnerCompensationEntry,
   PartnerEarningRollup,
   PartnerEarningEntry,
   PartnerStatement,

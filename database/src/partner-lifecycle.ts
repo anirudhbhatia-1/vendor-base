@@ -1438,6 +1438,8 @@ export class PartnerLifecycleService {
       readonly delta_minor: number;
       readonly reason_code: string;
       readonly posted: boolean;
+      /** Where the payout that carries it stands (10.4); null until one does. */
+      readonly payout_state: string | null;
       readonly created_at: Date;
     }[]
   > {
@@ -1449,12 +1451,19 @@ export class PartnerLifecycleService {
       delta_minor: string;
       reason_code: string;
       ledger_transaction_id: string | null;
+      payout_state: string | null;
       created_at: Date;
     }>(
-      `SELECT partner_earning_adjustment_id, partner_earnings_record_id, partner_dispute_case_id,
-              delta_minor::text, reason_code, ledger_transaction_id, created_at
-         FROM marketplace.partner_earning_adjustments
-        WHERE partner_user_id=$1 ORDER BY created_at DESC LIMIT 100`,
+      `SELECT adjustment.partner_earning_adjustment_id, adjustment.partner_earnings_record_id,
+              adjustment.partner_dispute_case_id, adjustment.delta_minor::text,
+              adjustment.reason_code, adjustment.ledger_transaction_id, adjustment.created_at,
+              (SELECT payout.payout_state
+                 FROM marketplace.partner_payout_items item
+                 JOIN marketplace.payouts payout ON payout.payout_id = item.payout_id
+                WHERE item.partner_earning_adjustment_id = adjustment.partner_earning_adjustment_id
+                  AND item.lifecycle_state <> 'RELEASED') AS payout_state
+         FROM marketplace.partner_earning_adjustments adjustment
+        WHERE adjustment.partner_user_id=$1 ORDER BY adjustment.created_at DESC LIMIT 100`,
       [partnerId],
     );
     return Object.freeze(
@@ -1466,6 +1475,7 @@ export class PartnerLifecycleService {
           delta_minor: Number(row.delta_minor),
           reason_code: row.reason_code,
           posted: row.ledger_transaction_id !== null,
+          payout_state: row.payout_state,
           created_at: row.created_at,
         }),
       ),

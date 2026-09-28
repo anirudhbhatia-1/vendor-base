@@ -14,6 +14,7 @@ import {
   createAuthenticatedActor,
   createRequestContext,
   createUuidV7,
+  parseUuidV7,
   PLATFORM_SYSTEM_USER_ID,
 } from '@neighbourhood-store/domain-types';
 import { Queue, Worker } from 'bullmq';
@@ -137,16 +138,20 @@ export class FinancePayoutWorkerService implements OnApplicationBootstrap, OnApp
   async #handle(job: DurableJob): Promise<void> {
     if (job.job_type !== JOB) throw new Error('Unsupported finance payout job');
     const context = this.#systemContext(job);
-    await this.#money.createPayoutBatch({
-      beneficiary_kind: 'VENDOR',
-      context,
-      provider_scenario: 'SUCCESS',
-    });
-    await this.#money.createPayoutBatch({
-      beneficiary_kind: 'PARTNER',
-      context,
-      provider_scenario: 'SUCCESS',
-    });
+    // Created, then sent (10.4): until audit run 69 the day's batches were
+    // written and nothing ever submitted them. A retried job finds the day's
+    // batch and sends only what is still scheduled.
+    for (const beneficiary_kind of ['VENDOR', 'PARTNER'] as const) {
+      const batch = await this.#money.createPayoutBatch({
+        beneficiary_kind,
+        context,
+        provider_scenario: 'SUCCESS',
+      });
+      await this.#money.submitPayoutBatch({
+        context,
+        payout_batch_id: parseUuidV7(String(batch.payout_batch_id)),
+      });
+    }
     await this.#money.scheduleDailyPayoutJob({ context });
   }
 

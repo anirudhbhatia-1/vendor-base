@@ -789,6 +789,20 @@ export type PartnerEarningEntry = {
   week?: string;
 };
 
+/** What a reassignment paid a partner for a trip taken from them (9.3, 10.4). */
+export type PartnerCompensationEntry = {
+  partner_attempt_compensation_id: string;
+  reference: string;
+  /** OFFERED, ASSIGNED or AT_VENDOR: how far the partner had got. */
+  displaced_from: string;
+  reason_code: string;
+  amount_minor: number;
+  /** EARNED until a payout carries it, then that payout's state. */
+  lifecycle_state: string;
+  paid_at: string | null;
+  posted_at: string;
+};
+
 /** Trips and money by the partner's day or week (9.10, DLP-50). */
 export type PartnerEarningRollup = {
   period: string;
@@ -828,6 +842,7 @@ export type PartnerStatement = {
   paid_minor: number;
   total_earned_minor: number;
   earnings: readonly PartnerEarningEntry[];
+  compensations?: readonly PartnerCompensationEntry[];
   days?: readonly PartnerEarningRollup[];
   weeks?: readonly PartnerEarningRollup[];
 };

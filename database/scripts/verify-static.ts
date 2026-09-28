@@ -184,6 +184,7 @@ assert(
       '0109_refund_lines_and_reconciliation',
       '0110_vendor_settlement_disputes',
       '0111_settlement_division_snapshot',
+      '0112_partner_payout_items',
     ]),
   'Unexpected reviewed migrations',
 );

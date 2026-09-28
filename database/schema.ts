@@ -1728,6 +1728,8 @@ export const partnerAttemptCompensations = marketplaceSchema.table(
     requestId: uuid('request_id').notNull(),
     correlationId: uuid('correlation_id').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    ledgerTransactionId: uuid('ledger_transaction_id'),
+    postedAt: timestamp('posted_at', { withTimezone: true }),
   },
   (table) => [
     check(
@@ -1821,5 +1823,36 @@ export const vendorSettlementAdjustments = marketplaceSchema.table(
   },
   (table) => [
     index('vendor_settlement_adjustments_location').on(table.vendorLocationId, table.createdAt),
+  ],
+);
+
+export const partnerPayoutItems = marketplaceSchema.table(
+  'partner_payout_items',
+  {
+    partnerPayoutItemId: uuid('partner_payout_item_id').primaryKey(),
+    payoutId: uuid('payout_id').notNull(),
+    partnerUserId: uuid('partner_user_id').notNull(),
+    sourceKind: text('source_kind').notNull(),
+    partnerEarningsRecordId: uuid('partner_earnings_record_id'),
+    partnerEarningAdjustmentId: uuid('partner_earning_adjustment_id'),
+    partnerAttemptCompensationId: uuid('partner_attempt_compensation_id'),
+    amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+    lifecycleState: text('lifecycle_state').notNull().default('PAYING'),
+    releasedByUserId: uuid('released_by_user_id'),
+    releaseReasonCode: text('release_reason_code'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    settledAt: timestamp('settled_at', { withTimezone: true }),
+  },
+  (table) => [
+    check(
+      'partner_payout_item_kind',
+      sql`${table.sourceKind} IN ('EARNING', 'ADJUSTMENT', 'COMPENSATION')`,
+    ),
+    check(
+      'partner_payout_item_state',
+      sql`${table.lifecycleState} IN ('PAYING', 'PAID', 'RELEASED')`,
+    ),
+    index('partner_payout_items_payout').on(table.payoutId),
+    index('partner_payout_items_partner').on(table.partnerUserId, table.createdAt),
   ],
 );

@@ -450,4 +450,116 @@ export class OrderMoneyOrchestrator {
     });
     return { earning_posted: earningPosted, settled: true };
   }
+
+  /**
+   * What a delivery that came back earned its partner (10.4).
+   *
+   * The partner accepted an offer at a price and drove the trip; the goods
+   * coming back does not undo it. The earning is the offer's own base and
+   * distance on the road the order was priced on, and the wait at the
+   * counter, as a delivered trip's would be — the number shown before they
+   * accepted. The trip back is not priced: no policy says what it pays
+   * (DLP-49), so `return_minor` stays zero rather than an invented rate, and
+   * a tip for a delivery that did not happen is not the partner's. Nothing
+   * divides a returned order, so the posting takes the trip from the
+   * platform's subsidy. Until audit run 69 a returned delivery earned its
+   * partner nothing at all.
+   *
+   * Replay-safe: the earning is unique per attempt.
+   */
+  async recordReturnEarnings(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly now?: Date;
+  }): Promise<{ readonly earning_posted: boolean }> {
+    const now = input.now ?? new Date();
+    const request = parseRequestId(input.context.request_id);
+    const correlation = parseUuidV7(input.context.correlation_id);
+    const found = await this.#pool.query<{
+      delivery_assignment_id: string;
+      partner_user_id: string;
+      package_count: number | null;
+      route_metres: string | null;
+      wait_minor: string;
+      quoted_at: Date;
+    }>(
+      `SELECT assignment.delivery_assignment_id, assignment.partner_user_id,
+              assignment.package_count,
+              COALESCE((SELECT wait.amount_minor
+                          FROM marketplace.partner_wait_earning_adjustments wait
+                         WHERE wait.delivery_assignment_id = assignment.delivery_assignment_id
+                           AND wait.partner_user_id = assignment.partner_user_id), 0)::text
+                AS wait_minor,
+              COALESCE(quote_group.route_metres::bigint,
+                       ST_Distance(location.coordinates, address.coordinates)::bigint)::text AS route_metres,
+              quote.created_at AS quoted_at
+         FROM marketplace.vendor_orders orders
+         JOIN marketplace.checkout_groups grouping USING(checkout_group_id)
+         JOIN marketplace.vendor_locations location
+           ON location.vendor_location_id = orders.vendor_location_id
+         JOIN marketplace.checkout_quotes quote
+           ON quote.checkout_quote_id = grouping.checkout_quote_id
+         LEFT JOIN marketplace.checkout_quote_groups quote_group
+           ON quote_group.checkout_quote_id = quote.checkout_quote_id
+          AND quote_group.vendor_location_id = orders.vendor_location_id
+         LEFT JOIN marketplace.customer_addresses address
+           ON address.customer_address_id = quote.customer_address_id
+         -- The attempt that carried the goods back: the one that returned.
+         JOIN marketplace.delivery_assignments assignment
+           ON assignment.vendor_order_id = orders.vendor_order_id
+          AND assignment.assignment_state = 'RETURNED'
+        WHERE orders.vendor_order_id=$1 AND assignment.partner_user_id IS NOT NULL`,
+      [input.vendor_order_id],
+    );
+    const row = found.rows[0];
+    if (!row) return { earning_posted: false };
+    const { policy } = await resolveFinancialPolicy(this.#pool, { at: row.quoted_at });
+    const earning = calculatePartnerOfferEarning(
+      {
+        package_count: Math.max(row.package_count ?? 1, 1),
+        route_metres: Math.min(
+          Math.max(Number(row.route_metres ?? '0'), 0),
+          policy.outer_route_metres,
+        ),
+      },
+      policy,
+    );
+    const waitMinor = Math.min(Math.max(Number(row.wait_minor), 0), policy.wait_cap_minor);
+    const inserted = await this.#pool.query<{ partner_earnings_record_id: string }>(
+      `INSERT INTO marketplace.partner_earnings_records
+        (partner_earnings_record_id,delivery_assignment_id,partner_user_id,outcome,
+         base_minor,distance_minor,time_minor,wait_minor,return_minor,incentive_minor,
+         tip_minor,adjustment_minor,net_minor,request_id,correlation_id,created_at,updated_at)
+       VALUES ($1,$2,$3,'RETURNED',$4,$5,0,$6,0,0,0,0,$7,$8,$9,$10,$10)
+       ON CONFLICT (delivery_assignment_id) DO NOTHING
+       RETURNING partner_earnings_record_id`,
+      [
+        createUuidV7(),
+        row.delivery_assignment_id,
+        row.partner_user_id,
+        earning.base_minor,
+        earning.distance_minor,
+        waitMinor,
+        earning.base_minor + earning.distance_minor + waitMinor,
+        request,
+        correlation,
+        now,
+      ],
+    );
+    // A replay after the posting failed finds the earning unposted and posts
+    // it; posting is idempotent, so a replay after success posts nothing.
+    const existing = await this.#pool.query<{ partner_earnings_record_id: string }>(
+      `SELECT partner_earnings_record_id FROM marketplace.partner_earnings_records
+        WHERE delivery_assignment_id=$1`,
+      [row.delivery_assignment_id],
+    );
+    const recordId = existing.rows[0]?.partner_earnings_record_id;
+    if (!recordId) return { earning_posted: false };
+    await this.#complete.postPartnerEarning({
+      context: input.context,
+      now,
+      partner_earnings_record_id: parseUuidV7(recordId),
+    });
+    return { earning_posted: inserted.rows.length > 0 };
+  }
 }

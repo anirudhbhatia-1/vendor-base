@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { onlineTimeSentence } from './profile-panel.js';
-import { earningsToCsv } from './earnings-panel.js';
+import { earningsToCsv, payoutStateLabel } from './earnings-panel.js';
 import { offerDeadlineSentence, waitPolicySentence } from './display.js';
 
 const directory = path.resolve(import.meta.dirname);
@@ -619,5 +619,19 @@ test('the return leg names its destination and closes on a receipt, not a button
   assert.ok(
     fieldOps.includes("['RETURN_REFUSED', 'The store is closed or will not take it back']"),
     'a closed or refusing store is a report of its own',
+  );
+});
+
+test('a line says where its payout stands, and a refused payout is not lost (10.4)', () => {
+  assert.equal(payoutStateLabel('EARNED'), 'awaiting payout');
+  assert.equal(payoutStateLabel('SUBMITTED'), 'payout sent, waiting for the bank');
+  assert.equal(payoutStateLabel('PAID'), 'paid');
+  assert.match(payoutStateLabel('FAILED_REVIEW'), /refused by the bank.*checking your account/);
+  // Compensation is read from the statement, with its payout's state.
+  const source = panel('earnings-panel.tsx');
+  assert.ok(source.includes('statement.compensations'), 'compensation comes from the statement');
+  assert.ok(
+    source.includes('payoutStateLabel(c.lifecycle_state)'),
+    'compensation shows its payout',
   );
 });

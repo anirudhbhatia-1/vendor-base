@@ -12,6 +12,7 @@ import { Pool, type PoolClient } from 'pg';
 import {
   MoneyAuthorizationError,
   MoneyInputError,
+  MoneyLifecycleService,
   MoneyNotFoundError,
   MoneyStateError,
 } from './money-lifecycle.js';
@@ -222,6 +223,14 @@ const DISPUTE_PROJECTION = `
     LEFT JOIN marketplace.vendor_settlement_adjustments adjustment
       ON adjustment.vendor_settlement_dispute_id=dispute.vendor_settlement_dispute_id`;
 
+/** The payee as the provider is told it; the schema requires the SYNTH- prefix. */
+function beneficiaryReference(kind: 'PARTNER' | 'VENDOR', owner: string): string {
+  return `SYNTH-BENEFICIARY-${kind}-${owner.replaceAll('-', '').toUpperCase()}`;
+}
+function payoutOperationReference(payoutId: string): string {
+  return `SYNTH-PAYOUT-${payoutId.replaceAll('-', '').toUpperCase()}`;
+}
+
 function admin(context: RequestContext): UuidV7 {
   if (context.actor?.actor_kind !== 'admin')
     throw new MoneyAuthorizationError('Finance administrator required');
@@ -254,6 +263,8 @@ function marked(value: string, pattern: RegExp, label: string) {
 export class CompleteMoneyLifecycleService {
   readonly #pool: Pool;
   readonly #provider: MoneyProviderAdapter;
+  /** Submits a batch's payouts through the one path that pays and posts them. */
+  readonly #money: MoneyLifecycleService;
   constructor(input: {
     readonly connection_string: string;
     readonly provider?: MoneyProviderAdapter;
@@ -264,9 +275,13 @@ export class CompleteMoneyLifecycleService {
       max: 12,
     });
     this.#provider = input.provider ?? new LocalFakeMoneyProvider();
+    this.#money = new MoneyLifecycleService({
+      connection_string: input.connection_string,
+      provider: this.#provider,
+    });
   }
   async close() {
-    await this.#pool.end();
+    await Promise.all([this.#pool.end(), this.#money.close()]);
   }
 
   async voidAuthorization(input: {
@@ -354,6 +369,16 @@ export class CompleteMoneyLifecycleService {
     });
   }
 
+  /**
+   * The day's payout batch for one kind of beneficiary, created once per day.
+   *
+   * A shop is paid per settlement. A partner is paid once per batch for
+   * everything of theirs that is payable (10.4): each earning, dispute answer
+   * and compensation is an item on that payout. Until audit run 69 the
+   * partner run looked for settlements the shop run had just moved on, and
+   * so found none; and neither run could write a payout at all, because the
+   * references it wrote lacked the SYNTH- prefix the schema requires.
+   */
   async createPayoutBatch(input: {
     readonly beneficiary_kind: 'PARTNER' | 'VENDOR';
     readonly context: RequestContext;
@@ -387,58 +412,304 @@ export class CompleteMoneyLifecycleService {
           contextRefs.correlation,
         ],
       );
-      const settlements = await client.query<any>(
-        `SELECT * FROM marketplace.settlements s
-          WHERE s.settlement_state IN ('PENDING','ELIGIBLE') AND s.eligible_at<=$1
-            AND CASE WHEN $2='VENDOR' THEN s.vendor_payable_minor ELSE s.partner_payable_minor END > 0
-            AND NOT EXISTS (SELECT 1 FROM marketplace.payouts p
-              WHERE p.settlement_id=s.settlement_id AND p.beneficiary_kind=$2)
-          ORDER BY s.eligible_at,s.settlement_id FOR UPDATE SKIP LOCKED`,
-        [now, input.beneficiary_kind],
-      );
-      let total = 0;
-      for (const settlement of settlements.rows) {
-        const payoutId = createUuidV7();
-        const payable = Number(
-          input.beneficiary_kind === 'VENDOR'
-            ? settlement.vendor_payable_minor
-            : settlement.partner_payable_minor,
-        );
-        total += payable;
-        const owner =
-          input.beneficiary_kind === 'VENDOR'
-            ? String(settlement.vendor_location_id)
-            : String(settlement.partner_user_id);
-        await client.query(
-          `INSERT INTO marketplace.payouts
-            (payout_id,settlement_id,beneficiary_kind,beneficiary_reference,
-             provider_operation_reference,payout_state,amount_minor,provider_scenario,
-             payout_batch_id,created_at,updated_at)
-           VALUES ($1,$2,$3,$4,$5,'SCHEDULED',$6,$7,$8,$9,$9)`,
-          [
-            payoutId,
-            settlement.settlement_id,
-            input.beneficiary_kind,
-            `BENEFICIARY-${input.beneficiary_kind}-${owner.replaceAll('-', '').toUpperCase()}`,
-            `PAYOUT-${payoutId.replaceAll('-', '').toUpperCase()}`,
-            payable,
-            input.provider_scenario,
-            batchId,
-            now,
-          ],
-        );
-        await client.query(
-          `UPDATE marketplace.settlements SET settlement_state='SCHEDULED',version=version+1,
-            updated_at=$2 WHERE settlement_id=$1`,
-          [settlement.settlement_id, now],
-        );
-      }
+      const written =
+        input.beneficiary_kind === 'VENDOR'
+          ? await this.#batchVendorPayouts(client, batchId, input.provider_scenario, now)
+          : await this.#batchPartnerPayouts(client, batchId, input.provider_scenario, now);
       await client.query(
         `UPDATE marketplace.payout_batches SET lifecycle_state=$2,total_minor=$3,item_count=$4,
           updated_at=$5 WHERE payout_batch_id=$1`,
-        [batchId, settlements.rowCount ? 'READY' : 'DRAFT', total, settlements.rowCount ?? 0, now],
+        [batchId, written.count ? 'READY' : 'DRAFT', written.total, written.count, now],
       );
       return this.#projectBatch(client, batchId);
+    });
+  }
+
+  async #batchVendorPayouts(
+    client: PoolClient,
+    batchId: string,
+    scenario: string,
+    now: Date,
+  ): Promise<{ readonly count: number; readonly total: number }> {
+    const settlements = await client.query<any>(
+      `SELECT * FROM marketplace.settlements s
+        WHERE s.settlement_state IN ('PENDING','ELIGIBLE') AND s.eligible_at<=$1
+          AND s.vendor_payable_minor > 0
+          AND NOT EXISTS (SELECT 1 FROM marketplace.payouts p
+            WHERE p.settlement_id=s.settlement_id AND p.beneficiary_kind='VENDOR')
+        ORDER BY s.eligible_at,s.settlement_id FOR UPDATE SKIP LOCKED`,
+      [now],
+    );
+    let total = 0;
+    for (const settlement of settlements.rows) {
+      const payoutId = createUuidV7();
+      const payable = Number(settlement.vendor_payable_minor);
+      total += payable;
+      await client.query(
+        `INSERT INTO marketplace.payouts
+          (payout_id,settlement_id,beneficiary_kind,beneficiary_reference,
+           provider_operation_reference,payout_state,amount_minor,provider_scenario,
+           payout_batch_id,created_at,updated_at)
+         VALUES ($1,$2,'VENDOR',$3,$4,'SCHEDULED',$5,$6,$7,$8,$8)`,
+        [
+          payoutId,
+          settlement.settlement_id,
+          beneficiaryReference('VENDOR', String(settlement.vendor_location_id)),
+          payoutOperationReference(payoutId),
+          payable,
+          scenario,
+          batchId,
+          now,
+        ],
+      );
+      await client.query(
+        `UPDATE marketplace.settlements SET settlement_state='SCHEDULED',version=version+1,
+          updated_at=$2 WHERE settlement_id=$1`,
+        [settlement.settlement_id, now],
+      );
+    }
+    return { count: settlements.rowCount ?? 0, total };
+  }
+
+  /**
+   * Every partner's payable sources, one payout per partner (10.4).
+   *
+   * A source is payable once it is in the books and on no live payout: an
+   * earning on a delivered order once its settlement is eligible and not
+   * held; an earning with no settlement to wait for (a return) once posted;
+   * a dispute's answer and a reassignment's compensation once posted. The
+   * earning is paid at the amount it was posted at; a later dispute answer is
+   * its own item. A partner whose sources add up to nothing, or who owes more
+   * than they are owed, is carried to the next batch; a partner whose last
+   * payout the bank refused is held until a person has checked the account.
+   */
+  async #batchPartnerPayouts(
+    client: PoolClient,
+    batchId: string,
+    scenario: string,
+    now: Date,
+  ): Promise<{ readonly count: number; readonly total: number }> {
+    const sources = await client.query<{
+      partner_user_id: string;
+      source_kind: 'ADJUSTMENT' | 'COMPENSATION' | 'EARNING';
+      source_id: string;
+      amount_minor: string;
+    }>(
+      `WITH held AS (
+         SELECT DISTINCT payout.partner_user_id
+           FROM marketplace.finance_exceptions exception
+           JOIN marketplace.payouts payout
+             ON payout.provider_operation_reference = exception.operation_reference
+          WHERE exception.exception_kind = 'PAYOUT_FAILED'
+            AND exception.exception_state IN ('OPEN','ASSIGNED')
+            AND payout.partner_user_id IS NOT NULL
+       ), sources AS (
+         SELECT earning.partner_user_id, 'EARNING' AS source_kind,
+                earning.partner_earnings_record_id AS source_id,
+                earning.net_minor - COALESCE((
+                  SELECT sum(adjustment.delta_minor)
+                    FROM marketplace.partner_earning_adjustments adjustment
+                   WHERE adjustment.partner_earnings_record_id = earning.partner_earnings_record_id
+                ), 0) AS amount_minor,
+                earning.created_at
+           FROM marketplace.partner_earnings_records earning
+           JOIN marketplace.delivery_assignments assignment USING (delivery_assignment_id)
+           LEFT JOIN marketplace.settlements settlement
+             ON settlement.source_order_reference = assignment.source_order_reference
+          WHERE earning.ledger_transaction_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM marketplace.partner_payout_items item
+                             WHERE item.partner_earnings_record_id = earning.partner_earnings_record_id
+                               AND item.lifecycle_state <> 'RELEASED')
+            AND CASE WHEN earning.outcome = 'DELIVERED' THEN
+                  settlement.settlement_id IS NOT NULL
+                  AND settlement.eligible_at <= $1
+                  AND settlement.settlement_state <> 'HELD'
+                  -- Paid per order before 0112: never again.
+                  AND NOT EXISTS (SELECT 1 FROM marketplace.payouts legacy
+                                   WHERE legacy.settlement_id = settlement.settlement_id
+                                     AND legacy.beneficiary_kind = 'PARTNER')
+                ELSE true END
+         UNION ALL
+         SELECT adjustment.partner_user_id, 'ADJUSTMENT', adjustment.partner_earning_adjustment_id,
+                adjustment.delta_minor, adjustment.created_at
+           FROM marketplace.partner_earning_adjustments adjustment
+          WHERE adjustment.ledger_transaction_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM marketplace.partner_payout_items item
+                             WHERE item.partner_earning_adjustment_id = adjustment.partner_earning_adjustment_id
+                               AND item.lifecycle_state <> 'RELEASED')
+         UNION ALL
+         SELECT compensation.partner_user_id, 'COMPENSATION',
+                compensation.partner_attempt_compensation_id, compensation.amount_minor,
+                compensation.created_at
+           FROM marketplace.partner_attempt_compensations compensation
+          WHERE compensation.ledger_transaction_id IS NOT NULL AND compensation.amount_minor > 0
+            AND NOT EXISTS (SELECT 1 FROM marketplace.partner_payout_items item
+                             WHERE item.partner_attempt_compensation_id = compensation.partner_attempt_compensation_id
+                               AND item.lifecycle_state <> 'RELEASED')
+       )
+       SELECT partner_user_id::text, source_kind, source_id::text, amount_minor::text
+         FROM sources
+        WHERE amount_minor <> 0
+          AND partner_user_id NOT IN (SELECT partner_user_id FROM held)
+        ORDER BY partner_user_id, created_at, source_id`,
+      [now],
+    );
+    const byPartner = new Map<string, (typeof sources.rows)[number][]>();
+    for (const row of sources.rows) {
+      const list = byPartner.get(row.partner_user_id) ?? [];
+      list.push(row);
+      byPartner.set(row.partner_user_id, list);
+    }
+    let count = 0;
+    let total = 0;
+    for (const [partnerId, items] of byPartner) {
+      const payable = items.reduce((sum, item) => sum + Number(item.amount_minor), 0);
+      if (payable <= 0) continue;
+      const payoutId = createUuidV7();
+      await client.query(
+        `INSERT INTO marketplace.payouts
+          (payout_id,settlement_id,partner_user_id,beneficiary_kind,beneficiary_reference,
+           provider_operation_reference,payout_state,amount_minor,provider_scenario,
+           payout_batch_id,created_at,updated_at)
+         VALUES ($1,NULL,$2,'PARTNER',$3,$4,'SCHEDULED',$5,$6,$7,$8,$8)`,
+        [
+          payoutId,
+          partnerId,
+          beneficiaryReference('PARTNER', partnerId),
+          payoutOperationReference(payoutId),
+          payable,
+          scenario,
+          batchId,
+          now,
+        ],
+      );
+      // The live-source indexes refuse a source already on another payout,
+      // so two batches racing for the same earning cannot both commit it.
+      for (const item of items)
+        await client.query(
+          `INSERT INTO marketplace.partner_payout_items
+            (partner_payout_item_id,payout_id,partner_user_id,source_kind,
+             partner_earnings_record_id,partner_earning_adjustment_id,
+             partner_attempt_compensation_id,amount_minor,created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            createUuidV7(),
+            payoutId,
+            partnerId,
+            item.source_kind,
+            item.source_kind === 'EARNING' ? item.source_id : null,
+            item.source_kind === 'ADJUSTMENT' ? item.source_id : null,
+            item.source_kind === 'COMPENSATION' ? item.source_id : null,
+            Number(item.amount_minor),
+            now,
+          ],
+        );
+      count += 1;
+      total += payable;
+    }
+    return { count, total };
+  }
+
+  /**
+   * Sends every scheduled payout in a batch to the provider and records where
+   * the batch stands. Each payout is submitted under its own lock and version,
+   * so a replay submits only what has not been sent; an unknown answer stays
+   * SUBMITTED for reconciliation rather than being sent again.
+   */
+  async submitPayoutBatch(input: {
+    readonly context: RequestContext;
+    readonly payout_batch_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    const scheduled = await this.#pool.query<{ payout_id: string; version: number }>(
+      `SELECT payout_id, version FROM marketplace.payouts
+        WHERE payout_batch_id=$1 AND payout_state='SCHEDULED' ORDER BY payout_id`,
+      [input.payout_batch_id],
+    );
+    for (const payout of scheduled.rows)
+      await this.#money.submitPayout({
+        context: input.context,
+        expected_version: payout.version,
+        now,
+        payout_id: parseUuidV7(payout.payout_id),
+      });
+    return transaction(this.#pool, async (client) => {
+      await this.#refreshBatchState(client, input.payout_batch_id, now);
+      return this.#projectBatch(client, input.payout_batch_id);
+    });
+  }
+
+  async #refreshBatchState(client: PoolClient, batchId: string, now: Date) {
+    await client.query(
+      `UPDATE marketplace.payout_batches batch
+          SET lifecycle_state = CASE
+                WHEN tally.items = 0 THEN batch.lifecycle_state
+                WHEN tally.paid = tally.items THEN 'PAID'
+                WHEN tally.paid > 0 THEN 'PARTIALLY_PAID'
+                WHEN tally.failed = tally.items THEN 'FAILED_REVIEW'
+                WHEN tally.scheduled = tally.items THEN 'READY'
+                ELSE 'SUBMITTED'
+              END,
+              updated_at = $2
+         FROM (SELECT count(*) AS items,
+                      count(*) FILTER (WHERE payout_state='PAID') AS paid,
+                      count(*) FILTER (WHERE payout_state='FAILED_REVIEW') AS failed,
+                      count(*) FILTER (WHERE payout_state='SCHEDULED') AS scheduled
+                 FROM marketplace.payouts WHERE payout_batch_id=$1) tally
+        WHERE batch.payout_batch_id=$1`,
+      [batchId, now],
+    );
+  }
+
+  /**
+   * Releases what a refused partner payout carried, after a person has
+   * checked the partner's bank account (10.4). Only a payout the provider
+   * definitively refused can be released: one whose outcome is unknown may
+   * yet have paid, and releasing it would pay the same money twice. The
+   * items become payable again in the next batch, and the case closes.
+   */
+  async releaseFailedPartnerPayout(input: {
+    readonly context: RequestContext;
+    readonly payout_id: UuidV7;
+    readonly reason_code: string;
+    readonly now?: Date;
+  }) {
+    const who = admin(input.context);
+    const now = input.now ?? new Date();
+    const reason = marked(input.reason_code, /^[A-Z][A-Z0-9_]{2,63}$/, 'Reason code');
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<{
+        beneficiary_kind: string;
+        payout_state: string;
+        provider_operation_reference: string;
+      }>(
+        `SELECT beneficiary_kind, payout_state, provider_operation_reference
+           FROM marketplace.payouts WHERE payout_id=$1 FOR UPDATE`,
+        [input.payout_id],
+      );
+      const payout = found.rows[0];
+      if (!payout) throw new MoneyNotFoundError('Payout not found');
+      if (payout.beneficiary_kind !== 'PARTNER')
+        throw new MoneyStateError('Only a partner payout carries items to release');
+      if (payout.payout_state !== 'FAILED_REVIEW')
+        throw new MoneyStateError('Only a payout the provider refused can be released');
+      const released = await client.query(
+        `UPDATE marketplace.partner_payout_items
+            SET lifecycle_state='RELEASED', settled_at=$2, released_by_user_id=$3,
+                release_reason_code=$4
+          WHERE payout_id=$1 AND lifecycle_state='PAYING'`,
+        [input.payout_id, now, who, reason],
+      );
+      await client.query(
+        `UPDATE marketplace.finance_exceptions
+            SET exception_state='RESOLVED', updated_at=$2
+          WHERE exception_kind='PAYOUT_FAILED' AND operation_reference=$1
+            AND exception_state<>'RESOLVED'`,
+        [payout.provider_operation_reference, now],
+      );
+      return { payout_id: input.payout_id, released_items: released.rowCount ?? 0 };
     });
   }
 
@@ -748,13 +1019,25 @@ export class CompleteMoneyLifecycleService {
     const now = input.now ?? new Date();
     return transaction(this.#pool, async (client) => {
       const found = await client.query<any>(
-        `SELECT * FROM marketplace.partner_earnings_records
-          WHERE partner_earnings_record_id=$1 FOR UPDATE`,
+        `SELECT earning.*, assignment.source_order_reference
+           FROM marketplace.partner_earnings_records earning
+           JOIN marketplace.delivery_assignments assignment USING (delivery_assignment_id)
+          WHERE earning.partner_earnings_record_id=$1 FOR UPDATE OF earning`,
         [input.partner_earnings_record_id],
       );
       const earning = found.rows[0];
       if (!earning) throw new MoneyNotFoundError('Partner earning not found');
-      if (earning.ledger_transaction_id) return earning;
+      if (earning.ledger_transaction_id) {
+        // The earning as the table holds it, without the joined order.
+        const record = { ...earning };
+        delete record.source_order_reference;
+        return record;
+      }
+      // A delivered order's settlement already owes the partner this money,
+      // so the posting only names what it is made of. Nothing else divides
+      // an order that came back or was called off after pickup: the trip the
+      // partner made is the platform's cost, taken from its subsidy (10.4).
+      const funded = earning.outcome !== 'DELIVERED';
       const credits = [
         ['PARTNER_BASE', Number(earning.base_minor)],
         ['PARTNER_DISTANCE', Number(earning.distance_minor)],
@@ -769,13 +1052,21 @@ export class CompleteMoneyLifecycleService {
       const ledgerId = await this.#postEntries(client, {
         context: input.context,
         entries: [
-          {
-            account_reference: 'SYNTH-ACCOUNT-PARTNER-PAYABLE',
-            component: 'ADJUSTMENT',
-            debit_minor: Number(earning.net_minor),
-            credit_minor: 0,
-            partner_user_id: earning.partner_user_id,
-          },
+          funded
+            ? {
+                account_reference: 'SYNTH-ACCOUNT-PLATFORM-SUBSIDY',
+                component: 'ADJUSTMENT',
+                debit_minor: Number(earning.net_minor),
+                credit_minor: 0,
+                source_order_reference: earning.source_order_reference,
+              }
+            : {
+                account_reference: 'SYNTH-ACCOUNT-PARTNER-PAYABLE',
+                component: 'ADJUSTMENT',
+                debit_minor: Number(earning.net_minor),
+                credit_minor: 0,
+                partner_user_id: earning.partner_user_id,
+              },
           ...(negativeAdjustment > 0
             ? [
                 {
@@ -884,6 +1175,108 @@ export class CompleteMoneyLifecycleService {
       );
       return { posted: true as const, replayed: false, ledger_transaction_id: ledgerId };
     });
+  }
+
+  /**
+   * Posts a reassignment's compensation (9.3, 10.4): the amount an operator
+   * decided for the partner who was displaced is owed to them, taken from the
+   * platform's subsidy, once. Until audit run 69 the decision was recorded
+   * and reached neither the books nor a payout.
+   */
+  async postAttemptCompensation(input: {
+    readonly context: RequestContext;
+    readonly partner_attempt_compensation_id: UuidV7;
+    readonly now?: Date;
+  }) {
+    financeAutomation(input.context);
+    const now = input.now ?? new Date();
+    return transaction(this.#pool, async (client) => {
+      const found = await client.query<{
+        partner_user_id: string;
+        amount_minor: string;
+        ledger_transaction_id: string | null;
+        source_order_reference: string;
+      }>(
+        `SELECT compensation.partner_user_id, compensation.amount_minor::text,
+                compensation.ledger_transaction_id, assignment.source_order_reference
+           FROM marketplace.partner_attempt_compensations compensation
+           JOIN marketplace.delivery_assignments assignment USING (delivery_assignment_id)
+          WHERE compensation.partner_attempt_compensation_id=$1
+            FOR UPDATE OF compensation`,
+        [input.partner_attempt_compensation_id],
+      );
+      const compensation = found.rows[0];
+      if (!compensation) throw new MoneyNotFoundError('Partner compensation not found');
+      const amountMinor = Number(compensation.amount_minor);
+      if (compensation.ledger_transaction_id || amountMinor === 0)
+        return { posted: false as const, replayed: compensation.ledger_transaction_id !== null };
+      const ledgerId = await this.#postEntries(client, {
+        context: input.context,
+        entries: [
+          {
+            account_reference: 'SYNTH-ACCOUNT-PLATFORM-SUBSIDY',
+            component: 'ADJUSTMENT',
+            debit_minor: amountMinor,
+            credit_minor: 0,
+            source_order_reference: compensation.source_order_reference,
+          },
+          {
+            account_reference: 'SYNTH-ACCOUNT-PARTNER-PAYABLE',
+            component: 'ADJUSTMENT',
+            debit_minor: 0,
+            credit_minor: amountMinor,
+            partner_user_id: parseUuidV7(compensation.partner_user_id),
+            source_order_reference: compensation.source_order_reference,
+          },
+        ],
+        kind: 'ADJUSTMENT',
+        now,
+        source_reference: `SYNTH-ADJUSTMENT-COMPENSATION-${String(input.partner_attempt_compensation_id).replaceAll('-', '').toUpperCase()}`,
+      });
+      await client.query(
+        `UPDATE marketplace.partner_attempt_compensations
+            SET ledger_transaction_id=$2, posted_at=$3
+          WHERE partner_attempt_compensation_id=$1`,
+        [input.partner_attempt_compensation_id, ledgerId, now],
+      );
+      return { posted: true as const, replayed: false, ledger_transaction_id: ledgerId };
+    });
+  }
+
+  /** The worker's pass over compensations not yet in the books. */
+  async postPendingAttemptCompensations(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+    readonly limit?: number;
+  }) {
+    financeAutomation(input.context);
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+    const pending = await this.#pool.query<{ partner_attempt_compensation_id: string }>(
+      `SELECT compensation.partner_attempt_compensation_id
+         FROM marketplace.partner_attempt_compensations compensation
+        WHERE compensation.ledger_transaction_id IS NULL AND compensation.amount_minor > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM marketplace.finance_exceptions exception
+             WHERE exception.exception_kind='POSTING_FAILED'
+               AND exception.operation_reference=compensation.partner_attempt_compensation_id::text
+               AND exception.exception_state IN ('OPEN','ASSIGNED'))
+        ORDER BY compensation.created_at LIMIT $1`,
+      [limit],
+    );
+    let posted = 0;
+    for (const row of pending.rows) {
+      try {
+        const outcome = await this.postAttemptCompensation({
+          context: input.context,
+          partner_attempt_compensation_id: parseUuidV7(row.partner_attempt_compensation_id),
+          ...(input.now ? { now: input.now } : {}),
+        });
+        if (outcome.posted) posted += 1;
+      } catch {
+        await this.#recordPostingFailure(row.partner_attempt_compensation_id, input.now);
+      }
+    }
+    return posted;
   }
 
   /**
@@ -1417,10 +1810,21 @@ export class CompleteMoneyLifecycleService {
          JOIN marketplace.delivery_assignments a USING (delivery_assignment_id)
          LEFT JOIN marketplace.settlements s
            ON s.source_order_reference = a.source_order_reference
+         -- The payout that carries the earning (10.4), or, for an earning paid
+         -- before 0112, the per-order payout of its settlement. An item
+         -- released from a refused payout carries nothing: the line is earned
+         -- again until the next payout takes it.
          LEFT JOIN LATERAL (
-           SELECT p.payout_state, p.paid_at FROM marketplace.payouts p
-            WHERE p.settlement_id = s.settlement_id AND p.beneficiary_kind = 'PARTNER'
-            ORDER BY p.created_at DESC LIMIT 1
+           SELECT paying.payout_state, paying.paid_at FROM (
+             SELECT p.payout_state, p.paid_at, p.created_at
+               FROM marketplace.partner_payout_items item
+               JOIN marketplace.payouts p ON p.payout_id = item.payout_id
+              WHERE item.partner_earnings_record_id = e.partner_earnings_record_id
+                AND item.lifecycle_state <> 'RELEASED'
+             UNION ALL
+             SELECT p.payout_state, p.paid_at, p.created_at FROM marketplace.payouts p
+              WHERE p.settlement_id = s.settlement_id AND p.beneficiary_kind = 'PARTNER'
+           ) paying ORDER BY paying.created_at DESC LIMIT 1
          ) payout ON true
         WHERE e.partner_user_id=$1
         ORDER BY e.created_at DESC`,
@@ -1471,11 +1875,52 @@ export class CompleteMoneyLifecycleService {
           .map(([period, bucket]) => Object.freeze({ period, ...bucket })),
       );
     };
+    // What a reassignment paid the partner for a trip taken from them (9.3),
+    // beside the trips they made, with where its payout stands.
+    const compensationRows = await this.#pool.query<{
+      partner_attempt_compensation_id: string;
+      source_order_reference: string;
+      displaced_from: string;
+      amount_minor: string;
+      reason_code: string;
+      created_at: Date;
+      payout_state: string | null;
+      paid_at: Date | null;
+    }>(
+      `SELECT c.partner_attempt_compensation_id, a.source_order_reference, c.displaced_from,
+              c.amount_minor::text, c.reason_code, c.created_at,
+              payout.payout_state, payout.paid_at
+         FROM marketplace.partner_attempt_compensations c
+         JOIN marketplace.delivery_assignments a USING (delivery_assignment_id)
+         LEFT JOIN LATERAL (
+           SELECT p.payout_state, p.paid_at
+             FROM marketplace.partner_payout_items item
+             JOIN marketplace.payouts p ON p.payout_id = item.payout_id
+            WHERE item.partner_attempt_compensation_id = c.partner_attempt_compensation_id
+              AND item.lifecycle_state <> 'RELEASED'
+         ) payout ON true
+        WHERE c.partner_user_id=$1 AND c.amount_minor > 0
+        ORDER BY c.created_at DESC`,
+      [partnerId],
+    );
+    const compensations = compensationRows.rows.map((row) =>
+      Object.freeze({
+        partner_attempt_compensation_id: row.partner_attempt_compensation_id,
+        reference: row.source_order_reference,
+        displaced_from: row.displaced_from,
+        reason_code: row.reason_code,
+        amount_minor: Number(row.amount_minor),
+        lifecycle_state: row.payout_state ?? 'EARNED',
+        paid_at: row.paid_at?.toISOString() ?? null,
+        posted_at: row.created_at.toISOString(),
+      }),
+    );
     return Object.freeze({
       pending_minor: total - paid,
       paid_minor: paid,
       total_earned_minor: total,
       earnings: Object.freeze(earnings),
+      compensations: Object.freeze(compensations),
       days: rollup('day'),
       weeks: rollup('week'),
     });

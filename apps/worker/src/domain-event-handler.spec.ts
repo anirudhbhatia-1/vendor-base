@@ -38,6 +38,10 @@ function dependencies(input: { readonly method?: string } = {}) {
         calls.push('refundEndedOrder');
         return null;
       },
+      recordReturnEarnings: async () => {
+        calls.push('recordReturnEarnings');
+        return { earning_posted: true };
+      },
     },
     adminControl: {
       createSupportCase: async () => {
@@ -112,10 +116,10 @@ test('a placed order is offered to partners', async () => {
   assert.deepEqual(calls, ['alertStaffOfPlacedOrder', 'dispatchPlacedOrder']);
 });
 
-test('a returned order opens a case rather than dividing money', async () => {
+test('a returned order pays the trip out and opens a case rather than dividing money', async () => {
   const { calls, deps } = dependencies();
   await handleDomainEvent(deps, context, event('vendor_order.returned'));
-  assert.deepEqual(calls, ['createSupportCase']);
+  assert.deepEqual(calls, ['recordReturnEarnings', 'createSupportCase']);
 });
 
 test('a suspended partner is taken offline', async () => {

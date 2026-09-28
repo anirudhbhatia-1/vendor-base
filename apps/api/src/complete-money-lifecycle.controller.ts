@@ -102,6 +102,43 @@ export class CompleteMoneyAdminController {
     }
   }
 
+  /** Sends a batch's scheduled payouts to the provider (10.4). */
+  @Post('payout-batches/:payout_batch_id/submit')
+  @manage
+  @HttpCode(200)
+  async submitPayoutBatch(@Param('payout_batch_id') id: string) {
+    try {
+      return await this.money.submitPayoutBatch({
+        context: currentRequestContext(),
+        payout_batch_id: uuid(id),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
+  /**
+   * Releases what a partner payout the bank refused carried, once a person
+   * has checked the partner's account (10.4); it is paid in the next batch.
+   */
+  @Post('payouts/:payout_id/release')
+  @manage
+  @HttpCode(200)
+  async releaseFailedPartnerPayout(@Param('payout_id') id: string, @Body() raw: unknown) {
+    const body = object(raw);
+    try {
+      return await this.money.releaseFailedPartnerPayout({
+        context: currentRequestContext(),
+        payout_id: uuid(id),
+        reason_code: stringField(body, 'reason_code'),
+      });
+    } catch (error) {
+      if (error instanceof TypeError) throw new BadRequestException();
+      translateDomainError(error);
+    }
+  }
+
   @Post('payout-jobs/daily')
   @manage
   async schedulePayoutJob() {

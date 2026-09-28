@@ -407,6 +407,13 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#completeMoney.postPendingEarningAdjustments({ context, now }),
         0,
       );
+      // A reassignment's compensation reaches the books (10.4), and from
+      // there the partner's next payout.
+      const compensations = await pass(
+        'completeMoney.postPendingAttemptCompensations',
+        () => this.#completeMoney.postPendingAttemptCompensations({ context, now }),
+        0,
+      );
       // A refund that outran its settlement re-divides the order's money
       // (10.3), and a resolved shop dispute reaches the ledger.
       const redivided = await pass(
@@ -511,6 +518,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         documents +
         offlineProofs.length +
         earningAdjustments +
+        compensations +
         redivided +
         settlementAdjustments +
         controls.trust +
@@ -531,6 +539,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           documents,
           offline_proofs: offlineProofs.length,
           earning_adjustments: earningAdjustments,
+          compensations_posted: compensations,
           redivided_settlements: redivided,
           settlement_adjustments: settlementAdjustments,
           trust_controls: controls.trust,

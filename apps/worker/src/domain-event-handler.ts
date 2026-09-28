@@ -45,6 +45,10 @@ export interface DomainEventDependencies {
       readonly context: RequestContext;
       readonly vendor_order_id: UuidV7;
     }): Promise<{ readonly refund_id?: unknown; readonly refund_state?: unknown } | null>;
+    recordReturnEarnings(input: {
+      readonly context: RequestContext;
+      readonly vendor_order_id: UuidV7;
+    }): Promise<{ readonly earning_posted: boolean }>;
   };
   readonly adminControl: {
     createSupportCase(input: {
@@ -202,10 +206,20 @@ export async function handleDomainEvent(
       vendor_order_id: event.aggregate_id,
     });
   } else if (event.event_type === 'vendor_order.returned') {
-    // Goods that came back are not a completed sale. The settlement that
-    // divides the money is deliberately not run here: what the partner is
-    // owed for a return trip is a policy question nobody has answered
-    // yet, and guessing it would move real money on an invented rate.
+    // Goods that came back are not a completed sale, and the settlement
+    // that divides the money is deliberately not run here. The partner who
+    // drove the trip out is still owed what their offer said (10.4); what
+    // the trip back pays is a policy question nobody has answered yet
+    // (DLP-49), so it is recorded at nothing rather than an invented rate.
+    const returned = await deps.orderMoney.recordReturnEarnings({
+      context,
+      vendor_order_id: event.aggregate_id,
+    });
+    deps.log('vendor_order.return.earning_recorded', {
+      earning_posted: returned.earning_posted,
+      event_id: event.event_id,
+      vendor_order_id: event.aggregate_id,
+    });
     //
     // What must happen is that a person sees it. A returned order has
     // already failed and the customer is owed an answer, so it opens a

@@ -5331,6 +5331,74 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         'The settlement split does not add up to what the customer paid',
       );
 
+      // 10.4 -- a delivery that came back still earns its partner the trip out
+      // the offer priced, on the road the order was priced on; the trip back
+      // is unpriced (DLP-49) and a tip for a delivery that did not happen is
+      // not theirs. Nothing divides a returned order, so the platform's
+      // subsidy pays it. The returned attempt is written beside the delivered
+      // one so the real order, quote and route stand behind it.
+      const returnRider = createUuidV7();
+      await pool.query('INSERT INTO marketplace.users (user_id) VALUES ($1)', [returnRider]);
+      await pool.query(
+        `INSERT INTO marketplace.delivery_assignments
+           (delivery_assignment_id, source_order_reference, vendor_location_id, vendor_order_id,
+            partner_user_id, assignment_state, custody_state, package_count,
+            approximate_pickup_area, approximate_drop_area, request_id, correlation_id,
+            created_at, updated_at)
+         SELECT $1, source_order_reference, vendor_location_id, vendor_order_id, $2,
+                'RETURNED', 'RETURNED', package_count, approximate_pickup_area,
+                approximate_drop_area, request_id, correlation_id, created_at, updated_at
+           FROM marketplace.delivery_assignments
+          WHERE vendor_order_id=$3 AND assignment_state='DELIVERED'`,
+        [createUuidV7(), returnRider, orderA.vendor_order_id],
+      );
+      const returnEarning = await orderMoney.recordReturnEarnings({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 80_000),
+        vendor_order_id: orderA.vendor_order_id,
+      });
+      const returnReplay = await orderMoney.recordReturnEarnings({
+        context: systemContext(systemActorId),
+        now: new Date(now.getTime() + 81_000),
+        vendor_order_id: orderA.vendor_order_id,
+      });
+      const returned = await pool.query<{
+        outcome: string;
+        base_minor: string;
+        distance_minor: string;
+        wait_minor: string;
+        tip_minor: string;
+        return_minor: string;
+        net_minor: string;
+        funded_from: string | null;
+        funded_order: string | null;
+      }>(
+        `SELECT e.outcome, e.base_minor::text, e.distance_minor::text, e.wait_minor::text,
+                e.tip_minor::text, e.return_minor::text, e.net_minor::text,
+                entry.account_reference AS funded_from, entry.source_order_reference AS funded_order
+           FROM marketplace.partner_earnings_records e
+           LEFT JOIN marketplace.ledger_entries entry
+             ON entry.ledger_transaction_id = e.ledger_transaction_id AND entry.debit_minor > 0
+          WHERE e.partner_user_id=$1`,
+        [returnRider],
+      );
+      const back = returned.rows[0];
+      check(
+        returnEarning.earning_posted &&
+          !returnReplay.earning_posted &&
+          returned.rows.length === 1 &&
+          back?.outcome === 'RETURNED' &&
+          Number(back.base_minor) === expectedEarning.base_minor &&
+          Number(back.distance_minor) === expectedEarning.distance_minor &&
+          back.wait_minor === '0' &&
+          back.tip_minor === '0' &&
+          back.return_minor === '0' &&
+          Number(back.net_minor) === expectedEarning.base_minor + expectedEarning.distance_minor &&
+          back.funded_from === 'SYNTH-ACCOUNT-PLATFORM-SUBSIDY' &&
+          back.funded_order === orderA.order_reference,
+        `A returned delivery did not earn its partner the trip out (${JSON.stringify({ returnEarning, returnReplay, rows: returned.rows })})`,
+      );
+
       // The one assertion that catches everything else: whatever was posted,
       // it has to balance.
       const balance = await pool.query<{ debits: string; credits: string }>(

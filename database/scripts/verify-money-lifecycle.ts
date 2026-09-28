@@ -12,7 +12,7 @@ import {
 } from '../src/money-policy.js';
 import { MoneyInputError, MoneyLifecycleService, MoneyStateError } from '../src/money-lifecycle.js';
 import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
-import { check } from './verify-support.js';
+import { check, rejects } from './verify-support.js';
 
 const TABLES = `marketplace.financial_correction_events, marketplace.financial_corrections,
   marketplace.finance_exceptions, marketplace.provider_statement_rows,
@@ -208,32 +208,24 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       now: new Date(payoutTime.getTime() + 1_000),
     });
     check(paidVendor.payout_state === 'PAID', 'Vendor payout did not reach PAID');
-    const partnerPayout = await service.schedulePayout({
-      amount_minor: 4_900,
-      beneficiary_kind: 'PARTNER',
-      beneficiary_reference: 'SYNTH-BENEFICIARY-PARTNER-0001',
-      context: context(),
-      provider_operation_reference: 'SYNTH-PAYOUT-PARTNER-0001',
-      provider_scenario: 'UNKNOWN',
-      settlement_id: settlement.settlement_id,
-      now: payoutTime,
-    });
-    const uncertainPayout = await service.submitPayout({
-      context: context(),
-      expected_version: 1,
-      payout_id: partnerPayout.payout_id,
-      now: new Date(payoutTime.getTime() + 2_000),
-    });
-    check(uncertainPayout.payout_state === 'SUBMITTED', 'Unknown payout was not contained');
-    const reconciledPayout = await service.reconcilePayout({
-      amount_minor: 4_900,
-      context: context(approver),
-      payout_id: partnerPayout.payout_id,
-      provider_state: 'SUCCEEDED',
-      statement_reference: 'SYNTH-STMT-PARTNER-0001',
-      now: new Date(payoutTime.getTime() + 3_000),
-    });
-    check(reconciledPayout.payout_state === 'PAID', 'Statement did not resolve unknown payout');
+    // A partner is paid by the daily batch for their earnings (10.4), not per
+    // settlement; the unknown, refused and reconciled partner payout is walked
+    // in verify-partner-payouts.
+    await rejects(
+      () =>
+        service.schedulePayout({
+          amount_minor: 4_900,
+          beneficiary_kind: 'PARTNER',
+          beneficiary_reference: 'SYNTH-BENEFICIARY-PARTNER-0001',
+          context: context(),
+          provider_operation_reference: 'SYNTH-PAYOUT-PARTNER-0001',
+          provider_scenario: 'UNKNOWN',
+          settlement_id: settlement.settlement_id,
+          now: payoutTime,
+        }),
+      MoneyInputError,
+      'A partner was paid per settlement beside the batch',
+    );
 
     const unknown = await service.createPayment({
       allocations: [
@@ -627,12 +619,11 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
               e.vendor_location_id, e.partner_user_id, e.source_order_reference
          FROM marketplace.ledger_transactions t
          JOIN marketplace.ledger_entries e USING (ledger_transaction_id)
-        WHERE t.source_reference IN ($1,$2,$3,$4,'SYNTH-SETTLEMENT-MONEY-0001')`,
+        WHERE t.source_reference IN ($1,$2,$3,'SYNTH-SETTLEMENT-MONEY-0001')`,
       [
         `SYNTH-CAPTURE-${payment.payment_transaction_id.toUpperCase()}`,
         `SYNTH-REFUND-${String(proposedRefund.refund_id).toUpperCase()}`,
         `SYNTH-PAYOUT-${String(vendorPayout.payout_id).toUpperCase()}`,
-        `SYNTH-PAYOUT-${String(partnerPayout.payout_id).toUpperCase()}`,
       ],
     );
     const of = (kind: string) => posted.rows.filter((row) => row.transaction_kind === kind);
@@ -646,12 +637,7 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
         of('SETTLEMENT').every(
           (row) => row.policy_version_reference === 'SYNTH-POLICY-FIN-V1-TEST0001',
         ) &&
-        of('PAYOUT').some(
-          (row) => row.provider_operation_reference === 'SYNTH-PAYOUT-VENDOR-0001',
-        ) &&
-        of('PAYOUT').some(
-          (row) => row.provider_operation_reference === 'SYNTH-PAYOUT-PARTNER-0001',
-        ),
+        of('PAYOUT').some((row) => row.provider_operation_reference === 'SYNTH-PAYOUT-VENDOR-0001'),
       `A posting does not carry the provider operation or policy it was made under (${JSON.stringify(
         posted.rows.map((row) => [
           row.transaction_kind,
@@ -859,8 +845,9 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       'The same capture command did not then succeed whole',
     );
 
-    // The books, shown only balanced: the vendor's and the partner's payables
-    // were credited by the settlement and cleared by their payouts.
+    // The books, shown only balanced: the vendor's payable was credited by the
+    // settlement and cleared by its payout. The partner's stays owed: this
+    // settlement has no earning behind it for a partner batch to pay (10.4).
     const books = await complete.ledgerTrialBalance({ context: context() });
     const account = (reference: string) =>
       books.accounts.find((row) => row.account_reference === reference);
@@ -869,7 +856,7 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
         books.totals.debit_minor === books.totals.credit_minor &&
         books.accounts.length >= 8 &&
         account('SYNTH-ACCOUNT-VENDOR-PAYABLE')?.balance_minor === 0 &&
-        account('SYNTH-ACCOUNT-PARTNER-PAYABLE')?.balance_minor === 0 &&
+        account('SYNTH-ACCOUNT-PARTNER-PAYABLE')?.balance_minor === 4_900 &&
         account('SYNTH-ACCOUNT-VENDOR-PAYABLE')?.entries === 2,
       `The trial balance does not read the books as posted (${JSON.stringify(books)})`,
     );

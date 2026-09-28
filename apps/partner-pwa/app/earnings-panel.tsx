@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import type {
-  PartnerAttemptCompensation,
+  PartnerCompensationEntry,
   PartnerDisputeCase,
   PartnerEarningEntry,
   PartnerStatement,
@@ -90,9 +90,29 @@ export function disputeSentence(dispute: PartnerDisputeCase, now: number): strin
   return `${asked} — with operations, answer due in ${due} day${due === 1 ? '' : 's'}.`;
 }
 
+/**
+ * Where a line's money stands, in the partner's words (10.4). A payout the
+ * bank refused is not lost: operations check the account and pay it again.
+ */
+export function payoutStateLabel(state: string): string {
+  switch (state) {
+    case 'EARNED':
+      return 'awaiting payout';
+    case 'SCHEDULED':
+      return 'in the next payout';
+    case 'SUBMITTED':
+      return 'payout sent, waiting for the bank';
+    case 'PAID':
+      return 'paid';
+    case 'FAILED_REVIEW':
+      return 'payout refused by the bank — operations are checking your account';
+    default:
+      return state.toLowerCase().replaceAll('_', ' ');
+  }
+}
+
 export function EarningsPanel() {
   const [statement, setStatement] = useState<PartnerStatement | null>(null);
-  const [compensations, setCompensations] = useState<readonly PartnerAttemptCompensation[]>([]);
   const [disputes, setDisputes] = useState<readonly PartnerDisputeCase[]>([]);
   const [querying, setQuerying] = useState<string | null>(null);
   const [queryComponent, setQueryComponent] = useState<string>('BASE');
@@ -107,14 +127,6 @@ export function EarningsPanel() {
       const client = await partnerApiClient();
       const data = await client.partner.finance.statement();
       setStatement(data);
-      // Compensation for attempts operations took away (9.3) is the partner's
-      // to see beside their earnings; its absence must not hide the statement.
-      setCompensations(
-        await client.partner.earnings
-          .compensations()
-          .then((result) => result.compensations)
-          .catch(() => []),
-      );
       setDisputes(
         await client.partner.earnings
           .disputes()
@@ -221,7 +233,7 @@ export function EarningsPanel() {
                   <strong>{shortReference(e.reference)}</strong>
                   <span>
                     {(e.outcome ?? '').toLowerCase().replaceAll('_', ' ')} ·{' '}
-                    {e.lifecycle_state.toLowerCase()}
+                    {payoutStateLabel(e.lifecycle_state)}
                     {e.paid_at ? ` on ${new Date(e.paid_at).toLocaleDateString()}` : ''}
                   </span>
                   <em>{fmt(e.total_minor)}</em>
@@ -358,15 +370,19 @@ export function EarningsPanel() {
             </section>
           )}
 
-          {compensations.length > 0 && (
+          {/* Compensation for attempts operations took away (9.3), paid on
+              the partner's payout like any earning (10.4). */}
+          {(statement.compensations ?? []).length > 0 && (
             <section className="earnings-ledger" aria-label="Compensation for reassigned work">
               <h3>Compensation for reassigned work</h3>
-              {compensations.map((c) => (
+              {(statement.compensations ?? []).map((c: PartnerCompensationEntry) => (
                 <div key={c.partner_attempt_compensation_id}>
-                  <strong>{shortReference(c.delivery_assignment_id)}</strong>
+                  <strong>{shortReference(c.reference)}</strong>
                   <span>
                     taken while {c.displaced_from.toLowerCase().replace(/_/g, ' ')} ·{' '}
-                    {c.reason_code.toLowerCase().replace(/_/g, ' ')}
+                    {c.reason_code.toLowerCase().replace(/_/g, ' ')} ·{' '}
+                    {payoutStateLabel(c.lifecycle_state)}
+                    {c.paid_at ? ` on ${new Date(c.paid_at).toLocaleDateString()}` : ''}
                   </span>
                   <em>{fmt(c.amount_minor)}</em>
                 </div>
