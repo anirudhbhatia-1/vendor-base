@@ -41,6 +41,7 @@ import { verifyInventoryReservations } from './verify-inventory-reservations.js'
 import { verifyAssignmentCustody } from './verify-assignment-custody.js';
 import { verifyMoneyLifecycle } from './verify-money-lifecycle.js';
 import { verifyPartnerPayouts } from './verify-partner-payouts.js';
+import { verifyStatementReconciliation } from './verify-statement-reconciliation.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -797,6 +798,9 @@ await withDatabaseClient(config, async (client) => {
   await measure('assignment_custody', () => verifyAssignmentCustody(config.connectionString));
   await measure('money_lifecycle', () => verifyMoneyLifecycle(config.connectionString));
   await measure('partner_payouts', () => verifyPartnerPayouts(config.connectionString));
+  await measure('statement_reconciliation', () =>
+    verifyStatementReconciliation(config.connectionString),
+  );
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);

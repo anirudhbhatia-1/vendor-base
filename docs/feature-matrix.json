@@ -6344,7 +6344,7 @@
       "name": "Reconciliation workers",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Provider statement import + exception creation",
+      "notes": "Provider statement import, idempotent on its content; rows matched against the books, a definitive answer applied to the operation awaiting it, missing operations named from the period's ledger postings, everything else routed to an owned queue with its next action; refused refunds proposed again for approval by the operations worker (audit run 70)",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6357,7 +6357,10 @@
       },
       "client_applicability": "no_client",
       "phase_steps": ["10.5"],
-      "verified_by": ["database/scripts/verify-money-lifecycle.ts"]
+      "verified_by": [
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-statement-reconciliation.ts"
+      ]
     },
     {
       "id": "COM-01",

@@ -16,7 +16,14 @@ import {
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
-import { integerField, object, optionalUuid, stringField, uuid } from './request-fields.js';
+import {
+  integerField,
+  object,
+  optionalDate,
+  optionalUuid,
+  stringField,
+  uuid,
+} from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const manage = RequireAuthorization({
   admin_scope: { kind: 'GLOBAL' },
@@ -55,6 +62,13 @@ const resolveDispute = RequireAuthorization({
   capability: 'admin.vendor_settlement.resolve',
   conceal_resource: true,
 });
+
+function optionalPeriod(body: Record<string, unknown>) {
+  const start = optionalDate(body, 'period_start');
+  const end = optionalDate(body, 'period_end');
+  // Both or neither: the service refuses half a period rather than guessing.
+  return { ...(start ? { period_start: start } : {}), ...(end ? { period_end: end } : {}) };
+}
 
 @Controller('admin/finance/v2')
 export class CompleteMoneyAdminController {
@@ -172,6 +186,9 @@ export class CompleteMoneyAdminController {
           };
         }),
         statement_reference: stringField(body, 'statement_reference'),
+        // The window the statement covers (10.5): what the books settled in
+        // it and the statement leaves out is named missing.
+        ...optionalPeriod(body),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();

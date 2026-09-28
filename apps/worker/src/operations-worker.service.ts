@@ -355,6 +355,13 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#money.reconcileUnknownOperations({ context, now }),
         { payments: 0, refunds: 0 },
       );
+      // A refund the provider refused is proposed again for a person to
+      // approve (10.5); one whose outcome is unknown is not.
+      const refundRetries = await pass(
+        'money.reproposeDeclinedRefunds',
+        () => this.#money.reproposeDeclinedRefunds({ context, now }),
+        0,
+      );
       const accepts = await pass(
         'fulfilment.timeoutOverdueAccepts',
         () => this.#fulfilment.timeoutOverdueAccepts({ context, now }),
@@ -519,6 +526,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         offlineProofs.length +
         earningAdjustments +
         compensations +
+        refundRetries +
         redivided +
         settlementAdjustments +
         controls.trust +
@@ -540,6 +548,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           offline_proofs: offlineProofs.length,
           earning_adjustments: earningAdjustments,
           compensations_posted: compensations,
+          refund_retries_proposed: refundRetries,
           redivided_settlements: redivided,
           settlement_adjustments: settlementAdjustments,
           trust_controls: controls.trust,

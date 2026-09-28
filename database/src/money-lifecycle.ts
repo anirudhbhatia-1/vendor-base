@@ -832,6 +832,8 @@ export class MoneyLifecycleService {
       | 'PARTIAL_ITEM_REFUND'
       | 'PRE_PICKUP_CANCEL'
       | 'PROVIDER_EXCEPTION';
+    /** The refused refund this one tries again (10.5). */
+    readonly retry_of_refund_id?: UuidV7;
     readonly now?: Date;
   }) {
     const proposer = financeAutomation(input.context);
@@ -912,8 +914,8 @@ export class MoneyLifecycleService {
           (refund_id,payment_transaction_id,source_order_reference,provider_operation_reference,
            refund_state,trigger_code,item_minor,tax_minor,delivery_minor,tip_minor,
            discount_reversal_minor,proposed_by_user_id,approval_expires_at,provider_scenario,
-           request_id,correlation_id,created_at,updated_at)
-         VALUES ($1,$2,$3,$4,'PENDING_APPROVAL',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
+           request_id,correlation_id,created_at,updated_at,retry_of_refund_id)
+         VALUES ($1,$2,$3,$4,'PENDING_APPROVAL',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17)
          RETURNING *`,
         [
           refundId,
@@ -932,6 +934,7 @@ export class MoneyLifecycleService {
           ids.request,
           ids.correlation,
           now,
+          input.retry_of_refund_id ?? null,
         ],
       );
       for (const line of lines)
@@ -957,6 +960,90 @@ export class MoneyLifecycleService {
       );
       return Object.freeze({ ...inserted.rows[0], refund_total_minor: total });
     });
+  }
+
+  /**
+   * Tries again every refund the provider refused (10.5). A refusal is
+   * definitive -- the money did not move -- so asking again is safe; but it
+   * is asked as a new refund under a new provider operation, proposed by the
+   * platform for a person to approve, never resubmitted on its own. One retry
+   * at a time: the next is proposed only if this one is refused too. A refund
+   * whose outcome is unknown is never retried here; it waits for the
+   * provider's answer. Until audit run 70 a refused refund stayed
+   * FAILED_RETRYABLE and the customer was never paid back.
+   */
+  async reproposeDeclinedRefunds(input: {
+    readonly context: RequestContext;
+    readonly now?: Date;
+  }): Promise<number> {
+    financeAutomation(input.context);
+    const declined = await this.#pool.query<{
+      refund_id: string;
+      payment_transaction_id: string;
+      source_order_reference: string;
+      trigger_code: string;
+      item_minor: string;
+      tax_minor: string;
+      delivery_minor: string;
+      tip_minor: string;
+      discount_reversal_minor: string;
+      provider_scenario: string;
+    }>(
+      `SELECT refund.refund_id, refund.payment_transaction_id, refund.source_order_reference,
+              refund.trigger_code, refund.item_minor::text, refund.tax_minor::text,
+              refund.delivery_minor::text, refund.tip_minor::text,
+              refund.discount_reversal_minor::text, refund.provider_scenario
+         FROM marketplace.refunds refund
+        WHERE refund.refund_state='FAILED_RETRYABLE'
+          AND NOT EXISTS (SELECT 1 FROM marketplace.refunds retry
+                           WHERE retry.retry_of_refund_id=refund.refund_id)
+        ORDER BY refund.updated_at, refund.refund_id LIMIT 50`,
+    );
+    let proposed = 0;
+    for (const refund of declined.rows) {
+      const lines = await this.#pool.query<{
+        vendor_order_line_id: string;
+        quantity: number;
+        amount_minor: string;
+      }>(
+        `SELECT vendor_order_line_id, quantity, amount_minor::text
+           FROM marketplace.refund_lines WHERE refund_id=$1 ORDER BY vendor_order_line_id`,
+        [refund.refund_id],
+      );
+      const key = refund.refund_id.replaceAll('-', '').toUpperCase();
+      await this.proposeRefund({
+        command_reference: `SYNTH-CMD-REFUND-RETRY-${key}`,
+        context: input.context,
+        delivery_minor: Number(refund.delivery_minor),
+        discount_reversal_minor: Number(refund.discount_reversal_minor),
+        item_minor: Number(refund.item_minor),
+        ...(lines.rows.length > 0
+          ? {
+              lines: lines.rows.map((line) => ({
+                vendor_order_line_id: parseUuidV7(line.vendor_order_line_id),
+                quantity: line.quantity,
+                amount_minor: Number(line.amount_minor),
+              })),
+            }
+          : {}),
+        ...(input.now ? { now: input.now } : {}),
+        payment_transaction_id: parseUuidV7(refund.payment_transaction_id),
+        provider_operation_reference: `SYNTH-REF-RETRY-${key}`,
+        provider_scenario: refund.provider_scenario as FakeProviderScenario,
+        retry_of_refund_id: parseUuidV7(refund.refund_id),
+        source_order_reference: refund.source_order_reference,
+        tax_minor: Number(refund.tax_minor),
+        tip_minor: Number(refund.tip_minor),
+        trigger_code: refund.trigger_code as
+          | 'CONTROLLED_RETURN'
+          | 'FULL_ITEM_REFUND'
+          | 'PARTIAL_ITEM_REFUND'
+          | 'PRE_PICKUP_CANCEL'
+          | 'PROVIDER_EXCEPTION',
+      });
+      proposed += 1;
+    }
+    return proposed;
   }
 
   async approveAndSubmitRefund(input: {

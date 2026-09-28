@@ -2393,6 +2393,50 @@ Five requirements. One held (the statement and the line dispute, run 65) and fou
 
 **Step 10.4: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 70 (28 September 2026) — step 10.5, provider-statement reconciliation
+
+Five requirements. None held whole. The import was idempotent by reference or digest, but a statement that changed under its own reference was silently answered with the old import, and the digest was of the rows in the order sent, so the same statement re-sent sorted differently was a new import whose every row was then filed as a duplicate. Matching counted a voided payment as succeeded, so a provider settling money we had released matched. Any earlier row for an operation made a later one a duplicate — including an answer after an earlier "unknown" — and a definitive answer for an operation we were still waiting on (an unanswered capture, refund or payout) was filed as a status mismatch for a person rather than applied. Statements had no period, so nothing they left out could be named: `MISSING_EXPECTED` was a class the schema allowed and no code wrote. A refund the provider refused sat in FAILED_RETRYABLE with no path back; the customer was never repaid and nothing said so. Statement exceptions all carried one next action (`REVIEW_STATEMENT_ROW`), and six of the eleven places that write an exception gave it no owner. One migration (0113); a new connected walk of 25 assertions, the money walk's replay assertion turned to a refusal; eleven mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Import or retrieve provider statements idempotently | Import idempotent only by accident of order; **a changed statement under its own reference was accepted as a replay** — P70-01. Retrieval: no provider exposes statements (D-12, forward). |
+| 2 | Match expected and actual transactions | **A voided payment matched a settlement; an answer we were waiting for was not applied** — P70-02. |
+| 3 | Classify unmatched, duplicated, amount mismatch, status mismatch, and missing cases | Four of five written; **duplicate over-matched and missing never written** — P70-03. |
+| 4 | Retry only safe operations | **Nothing retried a refused refund**; unknown operations were correctly not retried — P70-04. |
+| 5 | Route the remainder to owned finance queues | **One generic next action; six of eleven exception writers named no owner** — P70-05. |
+
+**P70-01 — the statement is its content.** The digest is of the period and the rows sorted, so order does not make a new statement. The same reference with the same content is the same import; the same reference with different content is refused (`MoneyStateError`); the same content under another reference is the import already on record.
+
+**P70-02 — matched against the books, and applied.** A payment is expected at its capture: captured is succeeded, voided/failed/cancelled moved no money, anything else is unknown. A refund refused is failed, a payout refused is failed. An operation whose outcome we are waiting on — a capture left unanswered, a refund with an open `REFUND_UNKNOWN`, a payout SUBMITTED — is matched by a definitive answer at its amount, and the answer is applied after the import commits through that operation's own reconciliation (`reconcilePayment`, `reconcileRefund`, `reconcilePayout`), so it posts once and its unknown case closes; an answer that cannot be applied opens `STATEMENT_CONFLICT` (`APPLY_STATEMENT_BY_HAND`). The import reports how many it resolved.
+
+**P70-03 — duplicate, contradiction, missing.** A duplicate is an operation twice in one statement, or reported with the same definitive answer by an earlier one; an earlier "unknown" followed by an answer is not. A provider contradicting its own earlier definitive answer is a status mismatch even where nothing of ours stands behind the operation. 0113 gives an import a period; every capture, refund and payout the ledger posted inside it (the posting names the provider operation, 10.1) that no statement has reported is a `MISSING_EXPECTED` row — the amount the books expected, no provider state (0113 allows none only for that class) — and a `STATEMENT_MISSING` case, closed when a later statement reports the operation.
+
+**P70-04 — a refusal is tried again, by a person.** `reproposeDeclinedRefunds` runs on the operations worker: a FAILED_RETRYABLE refund is proposed again as a new refund with the same amounts and lines, under a new provider operation, naming the one it retries (`refunds.retry_of_refund_id`, unique: one retry at a time), for a person to approve under the platform's three-day window and maker-checker. A refused retry is retried again the same way. A refund whose outcome is unknown is never proposed again; the refund cap already counts it.
+
+**P70-05 — every exception has an owner and a next action.** Statement rows route to `FINANCE_RECONCILIATION` with `INVESTIGATE_UNKNOWN_OPERATION`, `CONFIRM_DUPLICATE_SETTLEMENT`, `RESOLVE_AMOUNT_DIFFERENCE`, `RESOLVE_STATUS_CONFLICT` or `CHASE_PROVIDER_FOR_MISSING_OPERATION`, one open case per operation and kind. 0113 backfills every unowned exception to `FINANCE_OPERATIONS`, makes it the default, and holds `owner_reference` to the two queues.
+
+**Mutation results.** Eleven probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| A voided payment counts as succeeded (old) | *A provider settling a payment we voided was matched* — after the probe was rewritten to the old rule: its first form made a void unknown, which still mismatched |
+| An answer we were waiting for is not applied (old) | *The statement was not classified against the books* |
+| Any earlier row makes a duplicate (old) | *An answer after an earlier "unknown" was treated as a duplicate rather than applied* |
+| No missing sweep (old) | *What the books settled and the statement left out was not named missing* |
+| A changed statement under its reference is a replay (old) | *A statement that changed under its own reference was accepted as a replay* |
+| The digest depends on row order (old) | The reversed replay is refused as changed content |
+| Unknown refunds are retried too | *The refused refund was not proposed again* (three proposed, not one) |
+| Nothing is retried (old) | same assertion |
+| Statement cases go to the general queue | *A STATEMENT_DUPLICATE was not routed to an owned queue with its next action* |
+| A missing case stays open once reported | *A missing operation reported later did not close its case* |
+| No self-contradiction rule | *A repeated or contradicted answer was not caught* — after the walk gained an operation only the provider stands behind: every contradiction in its first form also contradicted our own records |
+
+**Forward findings.** (D-12) No provider exposes a statement to retrieve; import is the only path, and statements are synthetic. (10.2, carried) A capture the provider refused leaves the authorisation standing and nothing retries the capture. (10.6) A person's refund proposal that expires unapproved stays PENDING_APPROVAL and keeps its share of the refund cap. (11.5) Exceptions can be read in the queue but not assigned or resolved by a person; the queue's owner is now always set. (carried) A vendor payout the bank refuses still opens no case.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 114 migration files (0000–0113), full ladder; `statement_reconciliation` 25 assertions (new), `money_lifecycle` 43, `partner_payouts` 28, `vendor_fulfilment` 313. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0; `pnpm test:unit` 605 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack; all eleven probes on rebuilt databases.
+
+**Step 10.5: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

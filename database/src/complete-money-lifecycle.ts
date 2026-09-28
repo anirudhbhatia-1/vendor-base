@@ -223,6 +223,17 @@ const DISPUTE_PROJECTION = `
     LEFT JOIN marketplace.vendor_settlement_adjustments adjustment
       ON adjustment.vendor_settlement_dispute_id=dispute.vendor_settlement_dispute_id`;
 
+/**
+ * Where a statement row that did not match goes (10.5): the reconciliation
+ * queue, with the next thing a person does about it.
+ */
+const STATEMENT_EXCEPTIONS = Object.freeze({
+  UNMATCHED: { kind: 'STATEMENT_UNMATCHED', next_action_code: 'INVESTIGATE_UNKNOWN_OPERATION' },
+  DUPLICATE: { kind: 'STATEMENT_DUPLICATE', next_action_code: 'CONFIRM_DUPLICATE_SETTLEMENT' },
+  AMOUNT_MISMATCH: { kind: 'AMOUNT_MISMATCH', next_action_code: 'RESOLVE_AMOUNT_DIFFERENCE' },
+  STATUS_MISMATCH: { kind: 'STATUS_MISMATCH', next_action_code: 'RESOLVE_STATUS_CONFLICT' },
+} as const);
+
 /** The payee as the provider is told it; the schema requires the SYNTH- prefix. */
 function beneficiaryReference(kind: 'PARTNER' | 'VENDOR', owner: string): string {
   return `SYNTH-BENEFICIARY-${kind}-${owner.replaceAll('-', '').toUpperCase()}`;
@@ -768,6 +779,24 @@ export class CompleteMoneyLifecycleService {
     return result.rows[0];
   }
 
+  /**
+   * Imports a provider statement and reconciles it against the books (10.5).
+   *
+   * Idempotent on the statement: the same reference with the same rows (in
+   * any order) is the same import; the same reference with different rows is
+   * refused, because a statement that changed under its own name is a
+   * conflict, not a replay. Each row is classified against what we hold for
+   * its operation: MATCHED; DUPLICATE (twice in the statement, or reported
+   * with that answer by an earlier one); UNMATCHED (no such operation);
+   * AMOUNT_MISMATCH; STATUS_MISMATCH (including a provider contradicting its
+   * own earlier answer). A definitive answer for an operation we were still
+   * waiting on is a match, and it is applied after the import commits -- the
+   * capture, refund or payout settled through its own reconciliation -- so
+   * nothing is retried that may already have happened. With a period, every
+   * capture, refund and payout the books settled inside it and no statement
+   * has reported is MISSING_EXPECTED. Everything but a match opens an
+   * exception with an owner and a next action.
+   */
   async importProviderStatement(input: {
     readonly context: RequestContext;
     readonly rows: readonly {
@@ -777,28 +806,72 @@ export class CompleteMoneyLifecycleService {
       readonly provider_state: ProviderState;
     }[];
     readonly statement_reference: string;
+    readonly period_start?: Date;
+    readonly period_end?: Date;
     readonly now?: Date;
   }) {
     const who = admin(input.context);
     const now = input.now ?? new Date();
     const contextRefs = refs(input.context);
     marked(input.statement_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Statement reference');
-    const canonical = JSON.stringify(input.rows);
+    if ((input.period_start === undefined) !== (input.period_end === undefined))
+      throw new MoneyInputError('A statement period has a start and an end');
+    if (input.period_start && input.period_end && input.period_start >= input.period_end)
+      throw new MoneyInputError('A statement period must end after it starts');
+    for (const row of input.rows) {
+      amount(row.amount_minor, 'Statement amount');
+      marked(row.provider_operation_reference, /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/, 'Operation');
+      if (!['PAYMENT', 'PAYOUT', 'REFUND'].includes(row.operation_kind))
+        throw new MoneyInputError('Statement operation kind is invalid');
+      if (!['FAILED', 'SUCCEEDED', 'UNKNOWN'].includes(row.provider_state))
+        throw new MoneyInputError('Statement provider state is invalid');
+    }
+    // The content, not its order: the same rows sent sorted differently are
+    // the same statement.
+    const canonical = JSON.stringify({
+      period: [input.period_start?.toISOString() ?? null, input.period_end?.toISOString() ?? null],
+      rows: input.rows
+        .map((row) => [
+          row.operation_kind,
+          row.provider_operation_reference,
+          row.provider_state,
+          row.amount_minor,
+        ])
+        .sort((left, right) => (JSON.stringify(left) < JSON.stringify(right) ? -1 : 1)),
+    });
     const digest = createHash('sha256').update(canonical).digest('hex');
-    return transaction(this.#pool, async (client) => {
-      const replay = await client.query(
-        `SELECT * FROM marketplace.provider_statement_imports
-          WHERE statement_reference=$1 OR content_digest=$2`,
+    type Resolution = {
+      readonly kind: StatementKind;
+      readonly id: string;
+      readonly amount_minor: number;
+      readonly provider_state: 'FAILED' | 'SUCCEEDED';
+      readonly provider_operation_reference: string;
+    };
+    const imported = await transaction(this.#pool, async (client) => {
+      const replay = await client.query<{
+        provider_statement_import_id: string;
+        content_digest: string;
+      }>(
+        `SELECT provider_statement_import_id, content_digest
+           FROM marketplace.provider_statement_imports
+          WHERE statement_reference=$1 OR content_digest=$2
+          ORDER BY (statement_reference=$1) DESC LIMIT 1`,
         [input.statement_reference, digest],
       );
-      if (replay.rows[0])
-        return this.#projectImport(client, replay.rows[0].provider_statement_import_id);
+      const prior = replay.rows[0];
+      if (prior) {
+        if (prior.content_digest !== digest)
+          throw new MoneyStateError(
+            'A statement with this reference was already imported with different rows',
+          );
+        return { importId: prior.provider_statement_import_id, resolutions: [] as Resolution[] };
+      }
       const importId = createUuidV7();
       await client.query(
         `INSERT INTO marketplace.provider_statement_imports
           (provider_statement_import_id,statement_reference,content_digest,row_count,
-           imported_by_user_id,request_id,correlation_id,imported_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+           imported_by_user_id,request_id,correlation_id,imported_at,period_start,period_end)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           importId,
           input.statement_reference,
@@ -808,27 +881,45 @@ export class CompleteMoneyLifecycleService {
           contextRefs.request,
           contextRefs.correlation,
           now,
+          input.period_start ?? null,
+          input.period_end ?? null,
         ],
       );
+      const resolutions: Resolution[] = [];
       const seen = new Set<string>();
       for (const row of input.rows) {
-        amount(row.amount_minor, 'Statement amount');
         const expected = await this.#expectedOperation(
           client,
           row.provider_operation_reference,
           row.operation_kind,
         );
-        const prior = await client.query(
-          `SELECT 1 FROM marketplace.provider_statement_rows
-            WHERE provider_operation_reference=$1 LIMIT 1`,
-          [row.provider_operation_reference],
+        // What an earlier statement already said about this operation.
+        const earlier = await client.query<{ provider_state: string }>(
+          `SELECT provider_state FROM marketplace.provider_statement_rows
+            WHERE provider_operation_reference=$1 AND provider_state IN ('SUCCEEDED','FAILED')
+              AND provider_statement_import_id IS DISTINCT FROM $2
+            ORDER BY created_at DESC, statement_row_id DESC LIMIT 1`,
+          [row.provider_operation_reference, importId],
         );
-        let classification = 'MATCHED';
-        if (seen.has(row.provider_operation_reference) || prior.rows[0])
-          classification = 'DUPLICATE';
+        const definitive = row.provider_state !== 'UNKNOWN';
+        const said = earlier.rows[0]?.provider_state;
+        let classification: string;
+        if (seen.has(row.provider_operation_reference)) classification = 'DUPLICATE';
+        else if (said && definitive && said === row.provider_state) classification = 'DUPLICATE';
+        else if (said && definitive) classification = 'STATUS_MISMATCH';
         else if (!expected) classification = 'UNMATCHED';
         else if (expected.amount_minor !== row.amount_minor) classification = 'AMOUNT_MISMATCH';
-        else if (expected.provider_state !== row.provider_state) classification = 'STATUS_MISMATCH';
+        else if (expected.provider_state === row.provider_state) classification = 'MATCHED';
+        else if (expected.awaiting && definitive) {
+          classification = 'MATCHED';
+          resolutions.push({
+            kind: row.operation_kind,
+            id: expected.id,
+            amount_minor: row.amount_minor,
+            provider_state: row.provider_state as 'FAILED' | 'SUCCEEDED',
+            provider_operation_reference: row.provider_operation_reference,
+          });
+        } else classification = 'STATUS_MISMATCH';
         seen.add(row.provider_operation_reference);
         await client.query(
           `INSERT INTO marketplace.provider_statement_rows
@@ -851,32 +942,129 @@ export class CompleteMoneyLifecycleService {
             expected?.provider_state ?? null,
           ],
         );
-        if (classification !== 'MATCHED') {
-          const exceptionKind =
-            classification === 'DUPLICATE'
-              ? 'STATEMENT_DUPLICATE'
-              : classification === 'AMOUNT_MISMATCH'
-                ? 'AMOUNT_MISMATCH'
-                : classification === 'STATUS_MISMATCH'
-                  ? 'STATUS_MISMATCH'
-                  : 'STATEMENT_UNMATCHED';
+        if (classification === 'MATCHED') {
+          // Reported at last: an earlier statement's "missing" is answered.
           await client.query(
-            `INSERT INTO marketplace.finance_exceptions
-              (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
-               owner_reference,next_action_code,created_at,updated_at)
-             VALUES ($1,$2,$3,$4,'FINANCE_RECONCILIATION','REVIEW_STATEMENT_ROW',$5,$5)`,
+            `UPDATE marketplace.finance_exceptions SET exception_state='RESOLVED', updated_at=$2
+              WHERE exception_kind='STATEMENT_MISSING' AND operation_reference=$1
+                AND exception_state<>'RESOLVED'`,
+            [row.provider_operation_reference, now],
+          );
+          continue;
+        }
+        const routed = STATEMENT_EXCEPTIONS[classification as keyof typeof STATEMENT_EXCEPTIONS];
+        await this.#openFinanceException(client, {
+          kind: routed.kind,
+          owner: 'FINANCE_RECONCILIATION',
+          operation_reference: row.provider_operation_reference,
+          amount_at_risk_minor: row.amount_minor,
+          next_action_code: routed.next_action_code,
+          now,
+        });
+      }
+      if (input.period_start && input.period_end) {
+        // What the books say moved inside the period and no statement has
+        // reported: the capture, refund or payout posting names the provider
+        // operation (10.1), and its amount is the posting's.
+        const missing = await client.query<{
+          provider_operation_reference: string;
+          transaction_kind: 'CAPTURE' | 'PAYOUT' | 'REFUND';
+          amount_minor: string;
+        }>(
+          `SELECT t.provider_operation_reference, t.transaction_kind,
+                  sum(e.debit_minor)::text AS amount_minor
+             FROM marketplace.ledger_transactions t
+             JOIN marketplace.ledger_entries e USING (ledger_transaction_id)
+            WHERE t.transaction_kind IN ('CAPTURE','REFUND','PAYOUT')
+              AND t.provider_operation_reference IS NOT NULL
+              AND t.posted_at >= $1 AND t.posted_at < $2
+              AND NOT EXISTS (SELECT 1 FROM marketplace.provider_statement_rows reported
+                               WHERE reported.provider_operation_reference = t.provider_operation_reference
+                                 AND reported.provider_state IS NOT NULL)
+            GROUP BY t.provider_operation_reference, t.transaction_kind
+            ORDER BY t.provider_operation_reference`,
+          [input.period_start, input.period_end],
+        );
+        for (const row of missing.rows) {
+          const kind: StatementKind =
+            row.transaction_kind === 'CAPTURE' ? 'PAYMENT' : row.transaction_kind;
+          await client.query(
+            `INSERT INTO marketplace.provider_statement_rows
+              (statement_row_id,provider_operation_reference,statement_reference,operation_kind,
+               amount_minor,provider_state,created_at,provider_statement_import_id,
+               reconciliation_class,expected_amount_minor,expected_state)
+             VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,'MISSING_EXPECTED',$5,'SUCCEEDED')`,
             [
               createUuidV7(),
-              exceptionKind,
               row.provider_operation_reference,
-              row.amount_minor,
+              input.statement_reference,
+              kind,
+              Number(row.amount_minor),
               now,
+              importId,
             ],
           );
+          await this.#openFinanceException(client, {
+            kind: 'STATEMENT_MISSING',
+            owner: 'FINANCE_RECONCILIATION',
+            operation_reference: row.provider_operation_reference,
+            amount_at_risk_minor: Number(row.amount_minor),
+            next_action_code: 'CHASE_PROVIDER_FOR_MISSING_OPERATION',
+            now,
+          });
         }
       }
-      return this.#projectImport(client, importId);
+      return { importId, resolutions };
     });
+    // The answers the import found for operations still waiting on one, each
+    // applied through its own reconciliation after the statement is on
+    // record. One that cannot be applied is a person's.
+    let resolved = 0;
+    for (const resolution of imported.resolutions) {
+      try {
+        if (resolution.kind === 'PAYMENT')
+          await this.#money.reconcilePayment({
+            context: input.context,
+            evidence_reference: input.statement_reference,
+            now,
+            payment_transaction_id: parseUuidV7(resolution.id),
+            provider_state: resolution.provider_state,
+          });
+        else if (resolution.kind === 'REFUND')
+          await this.#money.reconcileRefund({
+            context: input.context,
+            evidence_reference: input.statement_reference,
+            now,
+            provider_state: resolution.provider_state,
+            refund_id: parseUuidV7(resolution.id),
+          });
+        else
+          await this.#money.reconcilePayout({
+            amount_minor: resolution.amount_minor,
+            context: input.context,
+            now,
+            payout_id: parseUuidV7(resolution.id),
+            provider_state: resolution.provider_state,
+            statement_reference: input.statement_reference,
+          });
+        resolved += 1;
+      } catch {
+        await transaction(this.#pool, (client) =>
+          this.#openFinanceException(client, {
+            kind: 'STATEMENT_CONFLICT',
+            owner: 'FINANCE_RECONCILIATION',
+            operation_reference: resolution.provider_operation_reference,
+            amount_at_risk_minor: resolution.amount_minor,
+            next_action_code: 'APPLY_STATEMENT_BY_HAND',
+            now,
+          }),
+        );
+      }
+    }
+    return transaction(this.#pool, async (client) => ({
+      ...(await this.#projectImport(client, imported.importId)),
+      resolved,
+    }));
   }
 
   async proposeCorrection(input: {
@@ -2376,7 +2564,18 @@ export class CompleteMoneyLifecycleService {
   async #openFinanceException(
     client: PoolClient,
     input: {
-      readonly kind: 'POSTING_FAILED' | 'SETTLEMENT_MISMATCH' | 'CORRECTION_REVIEW';
+      readonly kind:
+        | 'AMOUNT_MISMATCH'
+        | 'CORRECTION_REVIEW'
+        | 'POSTING_FAILED'
+        | 'SETTLEMENT_MISMATCH'
+        | 'STATEMENT_CONFLICT'
+        | 'STATEMENT_DUPLICATE'
+        | 'STATEMENT_MISSING'
+        | 'STATEMENT_UNMATCHED'
+        | 'STATUS_MISMATCH';
+      /** The queue that works it; finance operations unless named. */
+      readonly owner?: 'FINANCE_OPERATIONS' | 'FINANCE_RECONCILIATION';
       readonly operation_reference: string;
       readonly amount_at_risk_minor: number;
       readonly next_action_code: string;
@@ -2387,7 +2586,7 @@ export class CompleteMoneyLifecycleService {
       `INSERT INTO marketplace.finance_exceptions
         (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
          owner_reference,next_action_code,created_at,updated_at)
-       SELECT $1,$2,$3,$4,'FINANCE_OPERATIONS',$5,$6,$6
+       SELECT $1,$2,$3,$4,$7,$5,$6,$6
         WHERE NOT EXISTS (
           SELECT 1 FROM marketplace.finance_exceptions
            WHERE exception_kind=$2 AND operation_reference=$3
@@ -2399,6 +2598,7 @@ export class CompleteMoneyLifecycleService {
         Math.max(0, input.amount_at_risk_minor),
         input.next_action_code,
         input.now,
+        input.owner ?? 'FINANCE_OPERATIONS',
       ],
     );
   }
@@ -2485,28 +2685,97 @@ export class CompleteMoneyLifecycleService {
     return { ...header, entries: entries.rows };
   }
 
+  /**
+   * What the books hold for a provider operation, in the statement's terms
+   * (10.5). A payment's settled amount is its capture: a captured payment is
+   * the captured amount, succeeded; a voided, failed or cancelled one moved
+   * no money; anything else is still unknown. Until audit run 70 a voided
+   * payment counted as succeeded, so a provider settling money we had
+   * released matched. `awaiting` is an operation whose outcome we are
+   * waiting to be told.
+   */
   async #expectedOperation(client: PoolClient, reference: string, kind: StatementKind) {
-    const query =
-      kind === 'PAYMENT'
-        ? `SELECT amount_minor,payment_state state FROM marketplace.payment_transactions WHERE provider_operation_reference=$1`
-        : kind === 'REFUND'
-          ? `SELECT refund_total_minor amount_minor,refund_state state FROM marketplace.refunds WHERE provider_operation_reference=$1`
-          : `SELECT amount_minor,payout_state state FROM marketplace.payouts WHERE provider_operation_reference=$1`;
-    const result = await client.query<any>(query, [reference]);
-    const row = result.rows[0];
-    if (!row) return null;
-    const succeeded = ['AUTHORIZED', 'CAPTURED', 'PAID', 'SUCCEEDED', 'VOIDED'].includes(
-      String(row.state),
+    if (kind === 'PAYMENT') {
+      const found = await client.query<{
+        payment_transaction_id: string;
+        payment_state: string;
+        amount_minor: string;
+        captured_amount_minor: string;
+      }>(
+        `SELECT payment_transaction_id, payment_state, amount_minor::text,
+                captured_amount_minor::text
+           FROM marketplace.payment_transactions WHERE provider_operation_reference=$1`,
+        [reference],
+      );
+      const payment = found.rows[0];
+      if (!payment) return null;
+      const state = payment.payment_state;
+      return {
+        id: payment.payment_transaction_id,
+        amount_minor: Number(
+          state === 'CAPTURED' ? payment.captured_amount_minor : payment.amount_minor,
+        ),
+        provider_state:
+          state === 'CAPTURED'
+            ? 'SUCCEEDED'
+            : ['VOIDED', 'FAILED', 'CANCELLED'].includes(state)
+              ? 'FAILED'
+              : 'UNKNOWN',
+        awaiting: state === 'UNKNOWN_REQUIRES_RECONCILIATION',
+      } as const;
+    }
+    if (kind === 'REFUND') {
+      const found = await client.query<{
+        refund_id: string;
+        refund_state: string;
+        amount_minor: string;
+        unanswered: boolean;
+      }>(
+        `SELECT refund.refund_id, refund.refund_state, refund.refund_total_minor::text AS amount_minor,
+                EXISTS (SELECT 1 FROM marketplace.finance_exceptions exception
+                         WHERE exception.operation_reference=refund.provider_operation_reference
+                           AND exception.exception_kind='REFUND_UNKNOWN'
+                           AND exception.exception_state<>'RESOLVED') AS unanswered
+           FROM marketplace.refunds refund WHERE refund.provider_operation_reference=$1`,
+        [reference],
+      );
+      const refund = found.rows[0];
+      if (!refund) return null;
+      return {
+        id: refund.refund_id,
+        amount_minor: Number(refund.amount_minor),
+        provider_state:
+          refund.refund_state === 'SUCCEEDED'
+            ? 'SUCCEEDED'
+            : refund.refund_state === 'FAILED_RETRYABLE'
+              ? 'FAILED'
+              : 'UNKNOWN',
+        awaiting: refund.refund_state === 'FAILED_REVIEW' && refund.unanswered,
+      } as const;
+    }
+    const found = await client.query<{
+      payout_id: string;
+      payout_state: string;
+      amount_minor: string;
+    }>(
+      `SELECT payout_id, payout_state, amount_minor::text
+         FROM marketplace.payouts WHERE provider_operation_reference=$1`,
+      [reference],
     );
-    const failed = ['FAILED', 'FAILED_RETRYABLE', 'FAILED_REVIEW', 'CANCELLED'].includes(
-      String(row.state),
-    );
+    const payout = found.rows[0];
+    if (!payout) return null;
     return {
-      amount_minor: Number(row.amount_minor),
-      provider_state: succeeded ? 'SUCCEEDED' : failed ? 'FAILED' : 'UNKNOWN',
-    };
+      id: payout.payout_id,
+      amount_minor: Number(payout.amount_minor),
+      provider_state:
+        payout.payout_state === 'PAID'
+          ? 'SUCCEEDED'
+          : payout.payout_state === 'FAILED_REVIEW'
+            ? 'FAILED'
+            : 'UNKNOWN',
+      awaiting: payout.payout_state === 'SUBMITTED',
+    } as const;
   }
-
   async #projectBatch(client: PoolClient, id: string) {
     const batch = await client.query<any>(
       `SELECT * FROM marketplace.payout_batches WHERE payout_batch_id=$1`,

@@ -493,14 +493,17 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       ),
       'Provider statement import did not classify every reconciliation outcome',
     );
-    const importReplay = await complete.importProviderStatement({
-      context: context(),
-      rows: [],
-      statement_reference: 'SYNTH-STMT-IMPORT-0001',
-    });
-    check(
-      importReplay.provider_statement_import_id === imported.provider_statement_import_id,
-      'Statement reference replay was not idempotent',
+    // A statement that changed under its own reference is a conflict, not a
+    // replay (10.5); the same rows again are the same import.
+    await rejects(
+      () =>
+        complete.importProviderStatement({
+          context: context(),
+          rows: [],
+          statement_reference: 'SYNTH-STMT-IMPORT-0001',
+        }),
+      MoneyStateError,
+      'A statement that changed under its own reference was accepted as a replay',
     );
 
     const originalLedger = await pool.query<{ ledger_transaction_id: string }>(
