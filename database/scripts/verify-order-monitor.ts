@@ -67,7 +67,12 @@ export async function verifyOrderMonitor(connectionString: string): Promise<void
     fulfilment,
     money,
   });
-  const now = new Date();
+  // The walk's clock starts two minutes back. Steps stamped at `later(n)`
+  // and steps that read the real clock touch the same orders; with the
+  // walk's time already behind the wall clock (by more than any offset a
+  // write uses), a real-clock step can never land before an earlier one,
+  // however fast the machine runs. CI's did, on 9ed22dc.
+  const now = new Date(Date.now() - 2 * 60_000);
   const later = (seconds: number) => new Date(now.getTime() + seconds * 1_000);
   const people = {
     customer: createUuidV7(),

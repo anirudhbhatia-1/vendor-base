@@ -75,7 +75,12 @@ export async function verifySupportCases(connectionString: string): Promise<void
   });
   const control = new AdminControlPlaneService({ connection_string: connectionString });
   const cases = new SupportCaseService({ connection_string: connectionString });
-  const now = new Date();
+  // The walk's clock starts two minutes back. Steps stamped at `later(n)`
+  // and steps that read the real clock touch the same orders; with the
+  // walk's time already behind the wall clock (by more than any offset a
+  // write uses), a real-clock step can never land before an earlier one,
+  // however fast the machine runs. CI's did, on 9ed22dc.
+  const now = new Date(Date.now() - 2 * 60_000);
   const later = (ms: number) => new Date(now.getTime() + ms);
   const people = {
     customer: createUuidV7(),
