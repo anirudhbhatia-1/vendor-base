@@ -5243,7 +5243,7 @@
       "name": "Checkout-group monitor",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Checkout-group monitor with its child orders",
+      "notes": "Groups filtered by state, shop, fulfilment, exception and time in state; a group shows the child orders that match and counts the rest, never bringing a sibling into view or into an action (audit run 74)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5260,6 +5260,7 @@
       ],
       "phase_steps": ["11.2"],
       "verified_by": [
+        "database/scripts/verify-order-monitor.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "database/scripts/verify-admin-control-plane.ts"
       ]
@@ -5291,7 +5292,7 @@
       "name": "Immutable order timeline",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Immutable order timeline viewer",
+      "notes": "One order's transitions, payment and refunds, ledger postings, delivery attempts, custody, cases and messages in time order from GET admin/orders/:id/timeline, recorded as viewed (audit run 74 -- until then it read the customer's receipt route, which an operator cannot call, and was always empty)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5308,6 +5309,7 @@
       ],
       "phase_steps": ["3.4", "11.2"],
       "verified_by": [
+        "database/scripts/verify-order-monitor.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "database/scripts/verify-admin-control-plane.ts",
         "database/src/aggregate-versioning.spec.ts"
@@ -5341,7 +5343,7 @@
       "name": "Order intervention preview",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Intervention preview states the consequence before any write",
+      "notes": "Cancel, refund, reassign, return and message are previewed by the server from the order as it stands -- allowed or why not, money and custody touched, siblings untouched, who is told, capability and approval -- then confirmed with a reason against the versions read (audit run 74 -- until then the previews were sentences written in the browser and no command stood behind them)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5358,6 +5360,7 @@
       ],
       "phase_steps": ["11.2"],
       "verified_by": [
+        "database/scripts/verify-order-monitor.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "database/scripts/verify-admin-control-plane.ts"
       ]

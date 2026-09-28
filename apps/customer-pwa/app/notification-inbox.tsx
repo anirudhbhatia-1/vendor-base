@@ -118,6 +118,23 @@ function describe(notice: Notice, t: (key: string, fallback: string) => string):
       );
     case 'vendor_order_event.support_case_opened':
       return t('customer.notification.support_opened', 'Your support case is open.');
+    // What operations may tell a customer about an order (11.2): three fixed
+    // messages, never free text.
+    case 'operations_message.under_review':
+      return t(
+        'customer.notification.operations_under_review',
+        'Our operations team is looking into your order and will update you here.',
+      );
+    case 'operations_message.delay_acknowledged':
+      return t(
+        'customer.notification.operations_delay_acknowledged',
+        'We know your order is running late and are working with the store to move it along.',
+      );
+    case 'operations_message.support_will_contact':
+      return t(
+        'customer.notification.operations_will_contact',
+        'Our support team will contact you about your order shortly.',
+      );
     case 'refund.completed':
       return amount
         ? `${t('customer.notification.refunded', 'A refund of')} ${amount} ${t('customer.notification.refunded_tail', 'is on its way back to you.')}`

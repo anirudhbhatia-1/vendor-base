@@ -33,6 +33,7 @@ import {
   PartnerFieldOpsService,
   CompleteMoneyLifecycleService,
   AdminControlPlaneService,
+  OrderMonitorService,
   LocaleRegistryService,
   PartnerAvailabilityService,
   PartnerWaitPolicyService,
@@ -86,8 +87,9 @@ import {
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
 import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
-import { ADMIN_CONTROL_PLANE } from './tokens.js';
+import { ADMIN_CONTROL_PLANE, ORDER_MONITOR } from './tokens.js';
 import { AdminControlPlaneController } from './admin-control-plane.controller.js';
+import { AdminOrderMonitorController } from './admin-order-monitor.controller.js';
 import {
   CompleteMoneyAdminController,
   CustomerFinanceController,
@@ -208,6 +210,7 @@ import {
     AdminVendorSettlementDisputeController,
     VendorFinanceController,
     AdminControlPlaneController,
+    AdminOrderMonitorController,
     LocaleController,
     AdminLocaleController,
     PartnerAvailabilityController,
@@ -489,6 +492,22 @@ import {
       inject: [RUNTIME_CONFIG],
       useFactory: (config: ReturnType<typeof loadRuntimeConfig>) =>
         new AdminControlPlaneService({ connection_string: config.databaseUrl }),
+    },
+    {
+      provide: ORDER_MONITOR,
+      inject: [RUNTIME_CONFIG, VENDOR_FULFILMENT, MONEY_LIFECYCLE, ASSIGNMENT_CUSTODY],
+      useFactory: (
+        config: ReturnType<typeof loadRuntimeConfig>,
+        fulfilment: VendorFulfilmentService,
+        money: MoneyLifecycleService,
+        assignments: AssignmentCustodyService,
+      ) =>
+        new OrderMonitorService({
+          assignments,
+          connection_string: config.databaseUrl,
+          fulfilment,
+          money,
+        }),
     },
     {
       provide: IDENTITY_PASSWORD,

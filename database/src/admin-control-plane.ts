@@ -12,6 +12,7 @@ import { Pool, type PoolClient } from 'pg';
 import { listDeadLetterEvents, recoverDeadLetterEvent } from './transactional-messaging.js';
 import { transaction as tx } from './transaction.js';
 import { rankWork, type RawWorkItem, type WorkSeverity } from './work-ranking.js';
+import { globalAdminCapabilities } from './admin-capabilities.js';
 
 export class AdminControlInputError extends Error {}
 export class AdminControlNotFoundError extends Error {}
@@ -97,7 +98,7 @@ export class AdminControlPlaneService {
   async dashboard(input: { readonly context: RequestContext; readonly now?: Date }) {
     const actor = admin(input.context);
     const now = input.now ?? new Date();
-    const capabilities = await this.#globalCapabilities(actor, now);
+    const capabilities = await globalAdminCapabilities(this.#pool, actor, now);
     const may = (...keys: string[]) => keys.some((key) => capabilities.has(key));
     const queues: string[] = [];
     const raw: RawWorkItem[] = [];
@@ -528,27 +529,6 @@ export class AdminControlPlaneService {
         audit_event_id: auditEventId,
       },
     };
-  }
-
-  /**
-   * The capabilities an admin holds everywhere: from their live role
-   * assignments, where a scoped capability counts only under a global scope.
-   */
-  async #globalCapabilities(actor: UuidV7, now: Date): Promise<ReadonlySet<string>> {
-    const rows = await this.#pool.query<{ capability_key: string }>(
-      `SELECT DISTINCT capability.capability_key
-         FROM marketplace.users person
-         JOIN marketplace.role_assignments assignment ON assignment.user_id = person.user_id
-         JOIN marketplace.role_capabilities granted USING (role_key)
-         JOIN marketplace.capabilities capability USING (capability_key)
-         LEFT JOIN marketplace.admin_membership_scopes scope USING (role_assignment_id)
-        WHERE person.user_id = $1 AND person.state = 'ACTIVE'
-          AND assignment.state = 'ACTIVE' AND assignment.valid_from <= $2
-          AND (assignment.valid_until IS NULL OR assignment.valid_until > $2)
-          AND (capability.resource_rule <> 'ADMIN_SCOPE' OR scope.scope_kind = 'GLOBAL')`,
-      [actor, now],
-    );
-    return new Set(rows.rows.map((row) => row.capability_key));
   }
 
   /**

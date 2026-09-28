@@ -651,7 +651,7 @@ async function appendEvent(
     readonly vendor_order_id: UuidV7;
     readonly event_type: string;
     readonly actor_id: UuidV7;
-    readonly actor_kind: 'customer' | 'delivery_partner' | 'system' | 'vendor_staff';
+    readonly actor_kind: 'admin' | 'customer' | 'delivery_partner' | 'system' | 'vendor_staff';
     readonly previous_state: VendorOrderState | null;
     readonly resulting_state: VendorOrderState | null;
     readonly reason_code: string;
@@ -3658,6 +3658,107 @@ export class VendorFulfilmentService {
         event_type: 'vendor_order.ended',
         now,
         payload: { ended_by: 'customer', reason_code: input.reason_code },
+        reason_code: input.reason_code,
+        source: 'vendor_fulfilment',
+        to_state: 'CANCELLED',
+        vendor_order_id: input.vendor_order_id,
+      });
+      return orderSummary(client, input.vendor_order_id);
+    });
+  }
+
+  /**
+   * Ends an order on operations' decision (11.2), with the customer's own
+   * cancellation rule: only before anyone holds the goods -- after that it is
+   * a return, not a cancellation. Holds are released and the authorisation
+   * shrinks by the order's share, or, once captured, the ending files its
+   * refund for approval (10.2). The history names the operator and the reason.
+   * Siblings in the group are not touched.
+   */
+  async cancelByOperator(input: {
+    readonly context: RequestContext;
+    readonly vendor_order_id: UuidV7;
+    readonly expected_version: number;
+    readonly reason_code: string;
+    readonly now?: Date;
+  }): Promise<VendorOrderSummary> {
+    if (!reasonCode.test(input.reason_code))
+      throw new FulfilmentInputError('Reason must be shouting-snake-case');
+    if (input.context.actor?.actor_kind !== 'admin') throw new FulfilmentAuthorizationError();
+    const operatorId = input.context.actor.actor_id;
+    const now = input.now ?? new Date();
+    return tx(this.#pool, async (client) => {
+      const found = await client.query<{
+        lifecycle_state: string;
+        version: number;
+        assignment_state: string | null;
+      }>(
+        `SELECT o.lifecycle_state, o.version,
+                (SELECT a.assignment_state FROM marketplace.delivery_assignments a
+                  WHERE a.vendor_order_id = o.vendor_order_id
+                  ORDER BY a.created_at DESC LIMIT 1) AS assignment_state
+           FROM marketplace.vendor_orders o
+          WHERE o.vendor_order_id=$1 FOR UPDATE OF o`,
+        [input.vendor_order_id],
+      );
+      const order = found.rows[0];
+      if (!order) throw new FulfilmentNotFoundError();
+      if (order.version !== input.expected_version) {
+        throw new FulfilmentConflictError('The order changed while you were deciding');
+      }
+      const inCustody =
+        order.assignment_state !== null &&
+        !['UNASSIGNED', 'OFFERED', 'DECLINED', 'OFFER_EXPIRED', 'REASSIGNED', 'CANCELLED'].includes(
+          order.assignment_state,
+        );
+      if (
+        !['PLACED', 'ACCEPTED', 'PICKING', 'AWAITING_CUSTOMER_DECISION', 'READY'].includes(
+          order.lifecycle_state,
+        ) ||
+        inCustody
+      ) {
+        throw new FulfilmentConflictError(
+          'This order is too far along to cancel; direct a return instead',
+        );
+      }
+      const version = order.version + 1;
+      await client.query(
+        `UPDATE marketplace.vendor_orders
+            SET lifecycle_state='CANCELLED', version=$2, updated_at=$3
+          WHERE vendor_order_id=$1`,
+        [input.vendor_order_id, version, now],
+      );
+      await this.#releaseHolds(
+        client,
+        input.context,
+        input.vendor_order_id,
+        now,
+        'OPERATIONS_CANCELLED',
+        ['SOFT_HELD', 'PROVISIONAL', 'COMMITTED'],
+      );
+      await releaseAuthorizationForEndedOrder(client, {
+        actor_id: operatorId,
+        actor_kind: 'admin',
+        ids: contextIds(input.context),
+        now,
+        reason_code: 'OPERATIONS_CANCELLED_ORDER',
+        vendor_order_id: input.vendor_order_id,
+      });
+      await appendEvent(client, {
+        vendor_order_id: input.vendor_order_id,
+        event_type: 'CANCELLED',
+        actor_id: operatorId,
+        actor_kind: 'admin',
+        previous_state: order.lifecycle_state as VendorOrderState,
+        resulting_state: 'CANCELLED',
+        reason_code: input.reason_code,
+        ids: contextIds(input.context),
+      });
+      await publishVendorOrderTransition(client, {
+        context: input.context,
+        event_type: 'vendor_order.ended',
+        now,
+        payload: { ended_by: 'operations', reason_code: input.reason_code },
         reason_code: input.reason_code,
         source: 'vendor_fulfilment',
         to_state: 'CANCELLED',

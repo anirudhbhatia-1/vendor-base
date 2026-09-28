@@ -5,6 +5,7 @@ import test from 'node:test';
 import { correctionAmount, impactSentence } from './corrections-panel.js';
 import { conservationSentence } from './finance-queues-panel.js';
 import { accessDeniedMessage, dueSentence } from './admin-workspace.js';
+import { interventionBody, timeInState } from './order-intervention-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -53,7 +54,15 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
       'admin/finance/v2/ledger/conservation',
     ],
   ],
-  ['order-intervention-panel.tsx', ['admin/control/orders']],
+  [
+    'order-intervention-panel.tsx',
+    [
+      'admin/orders/monitor',
+      'admin/orders/${order.vendor_order_id}/timeline',
+      'admin/orders/${selected.vendor_order_id}/interventions/${kind}/preview',
+      'admin/orders/${selected.vendor_order_id}/interventions/${preview.kind}',
+    ],
+  ],
   [
     'corrections-panel.tsx',
     [
@@ -233,4 +242,33 @@ test('a queue outside the role is refused safely, and a row says when it is due 
   const source = panel('admin-workspace.tsx');
   assert.ok(source.includes('Promise.allSettled'), 'one refused queue does not blank the page');
   assert.ok(source.includes('workTrace.audit_event_id'), 'the view shows its audit reference');
+});
+
+test('an intervention is confirmed with the versions its preview read and a reason (11.2)', () => {
+  const body = interventionBody(
+    {
+      kind: 'REASSIGN',
+      allowed: true,
+      blocked_reason: null,
+      effects: [],
+      notifies: [],
+      required_capability: 'admin.delivery.assignment_manage',
+      approval: 'NONE',
+      expected: { order_version: 4, assignment_version: 7 },
+    },
+    'PARTNER_UNREACHABLE',
+    { compensation_minor: 1_500 },
+  );
+  assert.deepEqual(body, {
+    confirm: true,
+    reason_code: 'PARTNER_UNREACHABLE',
+    expected_order_version: 4,
+    expected_assignment_version: 7,
+    compensation_minor: 1_500,
+  });
+  assert.equal(timeInState(45), '45s in state');
+  assert.equal(timeInState(600), '10 min in state');
+  const source = panel('order-intervention-panel.tsx');
+  assert.ok(!source.includes('customer/finance/receipts'), 'the timeline is the admin route');
+  assert.ok(!source.includes('const consequences'), 'no preview is written in the browser');
 });

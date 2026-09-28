@@ -2580,6 +2580,49 @@ Five requirements. None held. The dashboard was one query over four queues — f
 
 **Step 11.1: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 74 (28 September 2026) — step 11.2, live order monitor and intervention
+
+Five requirements. None held. The monitor filtered by checkout group id and "stalled only", and nothing else. The panel's timeline read `customer/finance/receipts/:group` — a customer route an operator cannot call — and looked for an `events` field it never returned, so every timeline was empty; there was no admin read of an order's history at all. Its "previews" were three sentences written in the browser from the order's state string, one of them ("custody context") a list of partners eligible at the shop. And there was no command behind any of it: `admin.order.intervene` was granted to support agents and incident commanders and checked by no route; an operator could not cancel an order, and the order history accepted no admin actor, so an ending by operations could not have been recorded as theirs. One migration (0116); an operator cancellation beside the customer's; a new order monitor service and five routes; a new connected walk of 25 assertions; two unit tests; ten mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Filter checkout groups and child orders by state, vendor, fulfilment, exception, and time-in-state | **Group id and stalled only** — P74-01. |
+| 2 | Expand groups while preserving sibling isolation | Groups listed with every child; nothing kept one order's view or action to itself — P74-01. |
+| 3 | Show transition, payment, ledger, assignment, custody, case, and notification timelines | **Always empty:** a customer route an operator cannot call — P74-02. |
+| 4 | Preview cancel, refund, reassign, return, and communication impact | **Sentences written in the browser**, no return or communication — P74-03. |
+| 5 | Require confirmation, reason, capability, and approval where configured | **No command existed** — P74-04. |
+
+**P74-01 — filters, and one order at a time.** `GET admin/orders/monitor` filters child orders by state, shop, fulfilment method, exception (stalled past a deadline, a partner report open, a support case open, a payment or refund unresolved, or any) and time in state (from the order's last transition), within a group if asked. A group carries the children that match and counts the rest (`sibling_orders_not_shown`); its state is still derived from all of them.
+
+**P74-02 — the history, in time order.** `GET admin/orders/:id/timeline` merges the order's transitions, the group's payment events and this order's refunds, its ledger postings (by the order reference the posting names, 10.1), its delivery attempts and custody, its support cases and their events, and the messages sent about it or its attempts, sorted by time. Each view writes `ORDER_TIMELINE_VIEWED` to the operational audit.
+
+**P74-03 — previews by the server.** `GET admin/orders/:id/interventions/:kind/preview` computes, from the order as it stands, whether the intervention is allowed and why not; the money (charged, refunded or pending, refundable, proposed; captured or not) and custody it touches; the siblings, each marked untouched; who is told; the capability it needs; whether a second person must approve; and the order and attempt versions to confirm against. Cancel is refused once a partner holds the goods (a return, not a cancellation); refund needs a capture and stays within what the order can still refund; reassign needs a partner before custody; return needs an attempt that requires one; a message is one of three fixed texts with copy (0116), never free text.
+
+**P74-04 — confirmed, reasoned, capable, current.** `POST admin/orders/:id/interventions/:kind` is refused unless it is confirmed, carries a reason code, the operator holds the kind's capability (cancel `admin.order.intervene`, refund `admin.finance.refund_propose`, reassign and return `admin.delivery.assignment_manage`, message `admin.support.case_manage`), the preview still allows it, and the order (and attempt) versions are the ones previewed. It runs through the existing command: `cancelByOperator` (new, the customer's cancellation rule and ending path, recorded with an `admin` actor, which 0116 allows), `proposeRefund`, `reassign`, `authorizeReturn`, or a notification to the customer. Money keeps its maker-checker: a refund is a proposal a finance approver must approve, and a cancellation after capture files its refund the same way. Each action writes `ORDER_INTERVENTION_<KIND>` with the state before and the result after, and the refund id as its approval reference.
+
+**The console.** The order-intervention panel filters, lists each group's matching orders with their time in state and exceptions, opens one order's history, previews an intervention from the server, and confirms it with a reason and the versions the preview returned.
+
+**Mutation results.** Ten probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| No confirmation required | *An intervention ran without being confirmed* |
+| No capability check | *An intervention ran for an operator without its capability* |
+| The shop filter ignored (siblings shown) | *Filtering by shop brought the sibling into view* |
+| No payment source in the history | *The order's history was not read in time order across its sources* |
+| Cancel allowed with goods in custody | *Cancelling an order whose goods a partner holds was allowed* |
+| Refund without a second person | *A refund on a captured order was not previewed with its approval* |
+| The operator's cancellation recorded as the system | *The cancellation did not end B alone, as operations…* |
+| Interventions unaudited | the timeline's audit assertion, before the intervention ones |
+| A stale order version accepted | *An intervention ran against a stale order version* — after the walk gained the case |
+| Reassign preview ignores custody | *Reassigning a partner who holds the goods was previewed as allowed* — after the walk gained the case: the reassign command itself would refuse, so only the preview lied, and the first form never asked it |
+
+**Forward findings.** (11.3) A message is a notification, not a case; a conversation with the customer is the support case's. (11.5) A refund proposed here is approved in the finance queue, which does not link back to the order. (10.x) A refund here is filed as goods; its split into goods, delivery and tip is the operator's to choose in a later step. (ops) Store alerts and customer notices from the worker appear on the timeline only once the worker has run.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 117 migration files (0000–0116), full ladder, conservation after every module; `order_monitor` 25 assertions (new). `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls` exit 0 (error contract: 34 controllers); `pnpm test:unit` 624 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack; all ten probes on rebuilt databases.
+
+**Step 11.2: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

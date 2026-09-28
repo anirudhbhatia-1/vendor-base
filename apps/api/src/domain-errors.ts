@@ -15,6 +15,10 @@ import {
   AdminControlInputError,
   AdminControlNotFoundError,
   AdminControlStateError,
+  OrderMonitorAuthorizationError,
+  OrderMonitorInputError,
+  OrderMonitorNotFoundError,
+  OrderMonitorStateError,
   AdminOnboardingActiveObligationsError,
   AdminOnboardingConflictError,
   AdminOnboardingInputError,
@@ -186,6 +190,12 @@ export const DOMAIN_ERROR_TRANSLATIONS: ReadonlyArray<readonly [ErrorClass, Tran
   [AdminControlNotFoundError, { status: 'not_found' }],
   [AdminControlStateError, { status: 'conflict', code: 'ORDER_STATE_CONFLICT' }],
   [AdminControlAuthorizationError, { status: 'bad_request' }],
+  // The order monitor (11.2): a stale preview is a conflict, a missing
+  // capability is forbidden.
+  [OrderMonitorInputError, { status: 'bad_request' }],
+  [OrderMonitorNotFoundError, { status: 'not_found' }],
+  [OrderMonitorStateError, { status: 'conflict', code: 'ORDER_STATE_CONFLICT' }],
+  [OrderMonitorAuthorizationError, { status: 'forbidden' }],
   [AdminOnboardingInputError, { status: 'bad_request' }],
   [AdminOnboardingActiveObligationsError, { status: 'conflict', code: 'ORDER_STATE_CONFLICT' }],
   [AdminOnboardingConflictError, { status: 'conflict', code: 'ORDER_STATE_CONFLICT' }],
