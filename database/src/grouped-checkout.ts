@@ -1199,8 +1199,27 @@ export class GroupedCheckoutService {
           `SELECT payload_digest FROM marketplace.provider_webhook_receipts WHERE provider_event_id=$1`,
           [input.provider_event_id],
         );
-        if (earlier.rows[0]?.payload_digest !== digest)
+        if (earlier.rows[0]?.payload_digest !== digest) {
+          // Refused, and queued for a person (11.5): recorded on its own
+          // connection, since the refusal rolls this transaction back.
+          await this.#pool.query(
+            `INSERT INTO marketplace.finance_exceptions
+               (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+                expected_minor,business_reference,owner_reference,next_action_code,created_at,updated_at)
+             SELECT $1,'WEBHOOK_CONFLICT',$2,$3,$3,$4,'FINANCE_RECONCILIATION','CONFIRM_WITH_PROVIDER',$5,$5
+              WHERE NOT EXISTS (SELECT 1 FROM marketplace.finance_exceptions
+                                 WHERE exception_kind='WEBHOOK_CONFLICT' AND business_reference=$4
+                                   AND exception_state<>'RESOLVED')`,
+            [
+              createUuidV7(),
+              input.provider_operation_reference,
+              row.amount_minor,
+              input.provider_event_id,
+              now,
+            ],
+          );
           throw new CheckoutInputError('Provider event conflicts with its earlier delivery');
+        }
         return { replayed: true };
       }
       const waiting =
@@ -1538,7 +1557,7 @@ export class GroupedCheckoutService {
   async #resolveException(client: PoolClient, operationReference: string, now: Date) {
     await client.query(
       `UPDATE marketplace.finance_exceptions SET exception_state='RESOLVED',updated_at=$2
-        WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+        WHERE operation_reference=$1 AND exception_kind='PAYMENT_UNKNOWN' AND exception_state<>'RESOLVED'`,
       [operationReference, now],
     );
   }

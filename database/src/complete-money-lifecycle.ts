@@ -1778,7 +1778,11 @@ export class CompleteMoneyLifecycleService {
         });
         if (outcome.posted) posted += 1;
       } catch {
-        await this.#recordPostingFailure(row.partner_attempt_compensation_id, input.now);
+        await this.#recordPostingFailure(
+          row.partner_attempt_compensation_id,
+          'COMPENSATION',
+          input.now,
+        );
       }
     }
     return posted;
@@ -2126,7 +2130,7 @@ export class CompleteMoneyLifecycleService {
         });
         if (outcome.posted) posted += 1;
       } catch {
-        await this.#recordPostingFailure(row.partner_earning_adjustment_id, input.now);
+        await this.#recordPostingFailure(row.partner_earning_adjustment_id, 'EARNING', input.now);
       }
     }
     return posted;
@@ -2837,7 +2841,11 @@ export class CompleteMoneyLifecycleService {
         });
         if (outcome.posted) posted += 1;
       } catch {
-        await this.#recordPostingFailure(row.vendor_settlement_adjustment_id, input.now);
+        await this.#recordPostingFailure(
+          row.vendor_settlement_adjustment_id,
+          'SETTLEMENT',
+          input.now,
+        );
       }
     }
     return posted;
@@ -2921,13 +2929,18 @@ export class CompleteMoneyLifecycleService {
   }
 
   /** A pending adjustment the sweep could not post: one open case for a person. */
-  async #recordPostingFailure(adjustmentId: string, now: Date | undefined) {
+  /** Which adjustment failed to post decides its queue (11.5): a partner's or a shop's. */
+  async #recordPostingFailure(
+    adjustmentId: string,
+    source: 'COMPENSATION' | 'EARNING' | 'SETTLEMENT',
+    now: Date | undefined,
+  ) {
     await transaction(this.#pool, (client) =>
       this.#openFinanceException(client, {
         kind: 'POSTING_FAILED',
         operation_reference: adjustmentId,
         amount_at_risk_minor: 0,
-        next_action_code: 'INVESTIGATE_POSTING_FAILURE',
+        next_action_code: `INVESTIGATE_${source}_POSTING`,
         now: now ?? new Date(),
       }),
     );
@@ -2942,15 +2955,6 @@ export class CompleteMoneyLifecycleService {
       [userId, vendorLocationId],
     );
     if (!membership.rows[0]) throw new MoneyNotFoundError('Settlement not found');
-  }
-
-  async financeQueue(input: { readonly context: RequestContext }) {
-    admin(input.context);
-    const rows = await this.#pool.query(
-      `SELECT * FROM marketplace.finance_exceptions WHERE exception_state<>'RESOLVED'
-        ORDER BY amount_at_risk_minor DESC,created_at,finance_exception_id`,
-    );
-    return { exceptions: rows.rows };
   }
 
   /**

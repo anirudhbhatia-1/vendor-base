@@ -164,18 +164,14 @@ const FINANCE_EXCEPTION_COLUMNS: readonly DataTableColumn<Record<string, unknown
     key: 'reference',
     header: 'Payment / order',
     render: (row) =>
-      rowText(row, [
-        'source_checkout_reference',
-        'source_order_reference',
-        'order_reference',
-        'payment_transaction_id',
-      ]),
+      // The queue row's references (11.5); the old reads always showed a dash.
+      rowText(row, ['business_reference', 'provider_reference', 'operation_reference']),
   },
   {
     key: 'amount',
     header: 'Amount',
     numeric: true,
-    render: (row) => rowMoney(row, ['amount_minor', 'disputed_minor', 'item_minor']),
+    render: (row) => rowMoney(row, ['amount_at_risk_minor', 'expected_minor']),
   },
   {
     key: 'opened',
@@ -467,10 +463,8 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
 
   async function loadFinanceExceptions() {
     try {
-      const result = await request('admin/finance/v2/exceptions');
-      const list = Array.isArray(result)
-        ? result
-        : ((result as { exceptions?: unknown[] }).exceptions ?? []);
+      const result = await request('admin/finance/queues');
+      const list = Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? []);
       setFinanceExceptions(list as Record<string, unknown>[]);
       setOutput(`Finance exceptions loaded: ${list.length} items.`);
     } catch (error) {

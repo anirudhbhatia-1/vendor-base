@@ -56,6 +56,7 @@ import {
   ORDER_MONITOR,
   SUPPORT_CASES,
   TRUST_REVIEW,
+  FINANCE_QUEUES,
 } from './tokens.js';
 import { AdminControlPlaneController } from './admin-control-plane.controller.js';
 import { AdminOrderMonitorController } from './admin-order-monitor.controller.js';
@@ -69,6 +70,7 @@ import {
   PartnerRestrictionController,
   VendorRestrictionController,
 } from './trust-review.controller.js';
+import { FinanceQueuesController } from './finance-queues.controller.js';
 import {
   CompleteMoneyAdminController,
   CustomerFinanceController,
@@ -183,6 +185,7 @@ const memberProviders: ReadonlyMap<symbol, (services: DomainServices) => unknown
   [SESSION_IDENTITY, (services) => services.sessions],
   [SUPPORT_CASES, (services) => services.supportCases],
   [TRUST_REVIEW, (services) => services.trust],
+  [FINANCE_QUEUES, (services) => services.financeQueues],
   [VENDOR_FULFILMENT, (services) => services.fulfilment],
   [VENDOR_NETWORK, (services) => services.vendorNetwork],
   [VENDOR_ONBOARDING, (services) => services.onboarding],
@@ -244,6 +247,7 @@ const serviceProviders = [...memberProviders].map(([token, select]) => ({
     AdminOrderMonitorController,
     AdminSupportCaseController,
     AdminTrustReviewController,
+    FinanceQueuesController,
     PartnerRestrictionController,
     CustomerRestrictionController,
     VendorRestrictionController,

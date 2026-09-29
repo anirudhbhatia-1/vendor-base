@@ -5745,7 +5745,7 @@
       "name": "Payment reconciliation queue",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/admin-pwa/app/admin-workspace.tsx loads the finance exception queue",
+      "notes": "Finance queues (audit run 77): eleven owned queues -- authorisation without checkout, payment unknown, capture/allocation mismatch, webhook duplication, refund failure, unbalanced ledger, vendor settlement and partner earning mismatch, payout failure, statement unmatched, disputes -- each row with expected and actual values, provider and business references, risk, age, last retry and next safe action; an unanswered capture, refund or payout is reconciled from its row with the provider's answer and evidence",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5760,7 +5760,13 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/money-lifecycle-reads.spec.ts",
-        "database/scripts/verify-money-lifecycle.ts"
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-finance-queues.ts"
+      ],
+      "files": [
+        "database/src/finance-queues.ts",
+        "apps/api/src/finance-queues.controller.ts",
+        "apps/admin-pwa/app/finance-exceptions-queue.tsx"
       ]
     },
     {
@@ -5768,13 +5774,13 @@
       "name": "Refund reconciliation queue",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "apps/admin-pwa/app/admin-workspace.tsx creates and approves refunds against admin/finance",
+      "notes": "Refund failures (audit run 77): a declined refund is now queued (it was not), an unanswered one is reconciled from the queue, and a retry that succeeds closes the refusal",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
-        "worker": false,
+        "worker": true,
         "pwa": true,
         "android": false,
         "tests": true
@@ -5784,7 +5790,13 @@
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/money-lifecycle-reads.spec.ts",
         "apps/api/src/money-lifecycle.controller.spec.ts",
-        "database/scripts/verify-money-lifecycle.ts"
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-finance-queues.ts"
+      ],
+      "files": [
+        "database/src/finance-queues.ts",
+        "apps/api/src/finance-queues.controller.ts",
+        "apps/admin-pwa/app/finance-exceptions-queue.tsx"
       ]
     },
     {
@@ -5792,13 +5804,13 @@
       "name": "Ledger integrity queue",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "The finance screen shows the trial balance and the conservation report -- the ledger read against captures, refunds, settlements, earnings and payouts per shop and partner -- beside the finance exception queue (audit run 72)",
+      "notes": "Ledger integrity (audit run 77): the conservation audit's breaches are queued by the worker in the queue they belong to and closed when they clear; until run 77 they were reported and forgotten",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
-        "worker": false,
+        "worker": true,
         "pwa": true,
         "android": false,
         "tests": true
@@ -5806,13 +5818,17 @@
       "files": [
         "apps/admin-pwa/app/finance-queues-panel.tsx",
         "apps/admin-pwa/app/admin-workspace.tsx",
-        "e2e/cross-role-journey.spec.ts"
+        "e2e/cross-role-journey.spec.ts",
+        "database/src/finance-queues.ts",
+        "apps/api/src/finance-queues.controller.ts",
+        "apps/admin-pwa/app/finance-exceptions-queue.tsx"
       ],
       "phase_steps": ["10.7", "11.5"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/money-lifecycle-reads.spec.ts",
-        "database/scripts/verify-money-lifecycle.ts"
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-finance-queues.ts"
       ]
     },
     {
@@ -5820,7 +5836,7 @@
       "name": "Vendor settlement queue",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Vendor settlement queue with submit and reconcile steps",
+      "notes": "Vendor settlement (audit run 77): settlement mismatches and settlement posting failures sit in their own queue; a shop's refused payout is now queued, as a partner's was",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5833,13 +5849,17 @@
       },
       "files": [
         "apps/admin-pwa/app/finance-queues-panel.tsx",
-        "apps/admin-pwa/app/admin-panels.spec.ts"
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/finance-queues.ts",
+        "apps/api/src/finance-queues.controller.ts",
+        "apps/admin-pwa/app/finance-exceptions-queue.tsx"
       ],
       "phase_steps": ["10.3", "11.5"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/money-lifecycle-reads.spec.ts",
-        "database/scripts/verify-money-lifecycle.ts"
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-finance-queues.ts"
       ]
     },
     {
@@ -5847,7 +5867,7 @@
       "name": "Partner earning and payout queue",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Partner earning and payout queue with the daily run",
+      "notes": "Partner earnings (audit run 77): earning and compensation posting failures and partner-payable breaches sit in the partner earning queue, apart from the shop's",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5860,13 +5880,17 @@
       },
       "files": [
         "apps/admin-pwa/app/finance-queues-panel.tsx",
-        "apps/admin-pwa/app/admin-panels.spec.ts"
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/finance-queues.ts",
+        "apps/api/src/finance-queues.controller.ts",
+        "apps/admin-pwa/app/finance-exceptions-queue.tsx"
       ],
       "phase_steps": ["10.4", "11.5"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/money-lifecycle-reads.spec.ts",
-        "database/scripts/verify-money-lifecycle.ts"
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-finance-queues.ts"
       ]
     },
     {

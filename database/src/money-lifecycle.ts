@@ -368,6 +368,28 @@ export class MoneyLifecycleService {
       provider: payment.provider_operation_reference,
       source: `SYNTH-CAPTURE-${payment.payment_transaction_id.toUpperCase()}`,
     });
+    // Allocations that do not add up to the capture are posted to the
+    // platform remainder so the books balance, and put in front of a person
+    // (11.5): until audit run 77 nobody was told.
+    if (allocated !== payment.amount_minor)
+      await client.query(
+        `INSERT INTO marketplace.finance_exceptions
+           (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+            expected_minor,actual_minor,business_reference,next_action_code,created_at,updated_at)
+         SELECT $1,'CAPTURE_ALLOCATION_MISMATCH',$2,$3,$4,$5,$6,'REALLOCATE_CAPTURE',$7,$7
+          WHERE NOT EXISTS (SELECT 1 FROM marketplace.finance_exceptions
+                             WHERE exception_kind='CAPTURE_ALLOCATION_MISMATCH'
+                               AND operation_reference=$2 AND exception_state<>'RESOLVED')`,
+        [
+          createUuidV7(),
+          payment.provider_operation_reference,
+          Math.abs(payment.amount_minor - allocated),
+          payment.amount_minor,
+          allocated,
+          String(payment.payment_transaction_id),
+          now,
+        ],
+      );
     return Object.freeze({ ...payment, captured_amount_minor: payment.amount_minor });
   }
 
@@ -774,7 +796,7 @@ export class MoneyLifecycleService {
       await client.query(
         `UPDATE marketplace.finance_exceptions
             SET exception_state='RESOLVED',updated_at=$2
-          WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+          WHERE operation_reference=$1 AND exception_kind='PAYOUT_UNKNOWN' AND exception_state<>'RESOLVED'`,
         [current.provider_operation_reference, now],
       );
       const reconciled = Object.freeze(updated.rows[0]);
@@ -1130,6 +1152,35 @@ export class MoneyLifecycleService {
           [createUuidV7(), refund.provider_operation_reference, refund.refund_total_minor, now],
         );
       }
+      // A refusal is retried as a new refund for a person to approve; until
+      // then it waits in the refund queue (11.5).
+      if (next === 'FAILED_RETRYABLE')
+        await client.query(
+          `INSERT INTO marketplace.finance_exceptions
+             (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
+              expected_minor,actual_minor,business_reference,next_action_code,created_at,updated_at)
+           SELECT $1,'REFUND_FAILED',$2,$3,$3,0,$4,'REPROPOSE_DECLINED_REFUND',$5,$5
+            WHERE NOT EXISTS (SELECT 1 FROM marketplace.finance_exceptions
+                               WHERE exception_kind='REFUND_FAILED' AND operation_reference=$2
+                                 AND exception_state<>'RESOLVED')`,
+          [
+            createUuidV7(),
+            refund.provider_operation_reference,
+            refund.refund_total_minor,
+            refund.source_order_reference,
+            now,
+          ],
+        );
+      // The retry of a refused refund succeeding settles the refusal.
+      if (next === 'SUCCEEDED' && refund.retry_of_refund_id)
+        await client.query(
+          `UPDATE marketplace.finance_exceptions exception
+              SET exception_state='RESOLVED', resolution_code='RETRY_SUCCEEDED', updated_at=$2
+             FROM marketplace.refunds original
+            WHERE original.refund_id=$1 AND exception.operation_reference=original.provider_operation_reference
+              AND exception.exception_kind='REFUND_FAILED' AND exception.exception_state<>'RESOLVED'`,
+          [refund.retry_of_refund_id, now],
+        );
       const settled = Object.freeze(updated.rows[0]);
       // The refund and its posting commit together (10.1), like the capture.
       if (settled.refund_state === 'SUCCEEDED')
@@ -1252,7 +1303,7 @@ export class MoneyLifecycleService {
       await client.query(
         `UPDATE marketplace.finance_exceptions
             SET exception_state='RESOLVED',updated_at=$2
-          WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+          WHERE operation_reference=$1 AND exception_kind='PAYMENT_UNKNOWN' AND exception_state<>'RESOLVED'`,
         [payment.provider_operation_reference, now],
       );
       const settled = record(updated.rows[0]);
@@ -1326,7 +1377,7 @@ export class MoneyLifecycleService {
       await client.query(
         `UPDATE marketplace.finance_exceptions
             SET exception_state='RESOLVED',updated_at=$2
-          WHERE operation_reference=$1 AND exception_state<>'RESOLVED'`,
+          WHERE operation_reference=$1 AND exception_kind='REFUND_UNKNOWN' AND exception_state<>'RESOLVED'`,
         [refund.provider_operation_reference, now],
       );
       const settled = Object.freeze(updated.rows[0]);
@@ -1632,17 +1683,22 @@ export class MoneyLifecycleService {
    * it to the same account that refused it.
    */
   async #recordRefusedPayout(client: PoolClient, payout: Record<string, unknown>, now: Date) {
-    if (payout.beneficiary_kind !== 'PARTNER') return;
+    // A shop's refused payout is queued too (11.5); until audit run 77 only a
+    // partner's was.
+    const check =
+      payout.beneficiary_kind === 'PARTNER'
+        ? 'VERIFY_PARTNER_BANK_ACCOUNT'
+        : 'VERIFY_VENDOR_BANK_ACCOUNT';
     await client.query(
       `INSERT INTO marketplace.finance_exceptions
         (finance_exception_id,exception_kind,operation_reference,amount_at_risk_minor,
-         owner_reference,next_action_code,created_at,updated_at)
-       SELECT $1,'PAYOUT_FAILED',$2,$3,'FINANCE_OPERATIONS','VERIFY_PARTNER_BANK_ACCOUNT',$4,$4
+         owner_reference,next_action_code,expected_minor,actual_minor,created_at,updated_at)
+       SELECT $1,'PAYOUT_FAILED',$2,$3,'FINANCE_OPERATIONS',$5,$3,0,$4,$4
         WHERE NOT EXISTS (
           SELECT 1 FROM marketplace.finance_exceptions
            WHERE exception_kind='PAYOUT_FAILED' AND operation_reference=$2
              AND exception_state IN ('OPEN','ASSIGNED'))`,
-      [createUuidV7(), payout.provider_operation_reference, payout.amount_minor, now],
+      [createUuidV7(), payout.provider_operation_reference, payout.amount_minor, now, check],
     );
   }
 

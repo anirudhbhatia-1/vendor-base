@@ -16,7 +16,6 @@ import {
 import { CatalogueProductService } from '../src/catalogue-products.js';
 import { CompleteMoneyLifecycleService } from '../src/complete-money-lifecycle.js';
 import {
-  MoneyAuthorizationError,
   MoneyInputError,
   MoneyLifecycleService,
   MoneyNotFoundError,
@@ -5280,18 +5279,19 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
 
       // The exception reaches the queue an operator actually reads, naming the
       // operation at risk.
-      const queue = await completeMoney.financeQueue({
-        context: adminContext(financeApproverId),
-      });
-      const exceptions = queue.exceptions as readonly {
-        readonly exception_kind: string;
-        readonly operation_reference: string;
-      }[];
+      // (The finance queues themselves are walked in verify-finance-queues.ts, 11.5.)
+      const exceptions = (
+        await pool.query<{ exception_kind: string; operation_reference: string; queue: string }>(
+          `SELECT exception_kind, operation_reference, queue FROM marketplace.finance_exceptions
+            WHERE exception_state <> 'RESOLVED'`,
+        )
+      ).rows;
       check(
         exceptions.some(
           (row) =>
             row.exception_kind === 'AMOUNT_MISMATCH' &&
-            row.operation_reference === paymentReference,
+            row.operation_reference === paymentReference &&
+            row.queue === 'STATEMENT_UNMATCHED',
         ),
         'The mismatched statement row raised no finance exception for this payment',
       );
@@ -5307,13 +5307,6 @@ export async function verifyVendorFulfilment(connectionString: string): Promise<
         Number(receiptAfterImport.refunded_total_minor) ===
           Number(receiptAfter.refunded_total_minor) + DELIVERY_REFUND_MINOR,
         'Importing a provider statement changed the customer receipt',
-      );
-
-      // The finance queue is an operator surface, not a customer one.
-      await rejects(
-        () => completeMoney.financeQueue({ context: customerContext(customerId) }),
-        MoneyAuthorizationError,
-        'A customer read the finance exception queue',
       );
 
       const settlement = await pool.query<{

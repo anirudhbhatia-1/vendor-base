@@ -33,7 +33,8 @@ test('maker-checker and reconciliation commands require global finance authority
     'corrections',
     'rejectCorrection',
     'postPartnerEarning',
-    'exceptions',
+    // The exception list moved to the finance queues (11.5,
+    // finance-queues.controller.ts).
     // The books themselves (10.1) are read under the same authority that
     // may post to them; nothing else reads the ledger.
     'ledger',

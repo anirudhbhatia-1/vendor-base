@@ -1932,3 +1932,19 @@ export const trustAppeals = marketplaceSchema.table(
     check('trust_appeal_state', sql`${table.lifecycleState} IN ('OPEN', 'UPHELD', 'OVERTURNED')`),
   ],
 );
+
+export const financeExceptionEvents = marketplaceSchema.table(
+  'finance_exception_events',
+  {
+    financeExceptionEventId: uuid('finance_exception_event_id').primaryKey(),
+    financeExceptionId: uuid('finance_exception_id').notNull(),
+    eventType: text('event_type').notNull(),
+    actorId: uuid('actor_id'),
+    reasonCode: text('reason_code').notNull(),
+    payload: jsonb('payload').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('finance_exception_events_exception').on(table.financeExceptionId, table.occurredAt),
+  ],
+);

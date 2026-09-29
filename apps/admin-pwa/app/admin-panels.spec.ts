@@ -8,6 +8,7 @@ import { accessDeniedMessage, dueSentence } from './admin-workspace.js';
 import { interventionBody, timeInState } from './order-intervention-panel.js';
 import { supportActionBody, turnSentence, type ActionForm } from './support-panel.js';
 import { decisionBody, proposalBody, type ProposalForm } from './trust-panel.js';
+import { ageText, exceptionActionBody, valuesText } from './finance-exceptions-queue.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -64,6 +65,14 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
       'admin/finance/v2/payout-jobs/daily',
       'admin/finance/v2/ledger',
       'admin/finance/v2/ledger/conservation',
+    ],
+  ],
+  [
+    'finance-exceptions-queue.tsx',
+    [
+      'admin/finance/queues',
+      'admin/finance/queues/exceptions/${row.finance_exception_id}',
+      'admin/finance/queues/exceptions/${detail.finance_exception_id}/actions/${action}',
     ],
   ],
   [
@@ -383,4 +392,38 @@ test('every trust decision carries the version on screen and its outcome (11.4)'
     'review_at' in decisionBody('REVIEW', 'SCHEDULED_REVIEW', 5, { outcome: 'LIFT' }),
     false,
   );
+});
+
+test('a finance row reads expected against actual, and its age in the largest unit (11.5)', () => {
+  assert.equal(valuesText({ expected_minor: 20_000, actual_minor: 0 }).includes('expected'), true);
+  assert.equal(valuesText({ expected_minor: null, actual_minor: null }), '— expected · — actual');
+  assert.equal(ageText(90), '2 min');
+  assert.equal(ageText(7_200), '2 h');
+  assert.equal(ageText(3 * 86_400), '3 d');
+});
+
+test('each finance step carries the version on screen and only its own fields (11.5)', () => {
+  const fields = {
+    note: '  why  ',
+    evidence_reference: ' SYNTH-EVIDENCE-X ',
+    financial_correction_id: '',
+    resolution_code: 'PROVIDER_CONFIRMED',
+    provider_state: 'FAILED',
+  };
+  assert.deepEqual(exceptionActionBody('RECONCILE', 'PROVIDER_CONTACTED', 3, fields), {
+    expected_version: 3,
+    reason_code: 'PROVIDER_CONTACTED',
+    evidence_reference: 'SYNTH-EVIDENCE-X',
+    provider_state: 'FAILED',
+  });
+  assert.deepEqual(exceptionActionBody('RESOLVE', 'LEDGER_REVIEWED', 4, fields), {
+    expected_version: 4,
+    reason_code: 'LEDGER_REVIEWED',
+    resolution_code: 'PROVIDER_CONFIRMED',
+  });
+  assert.equal(
+    'financial_correction_id' in exceptionActionBody('LINK_CORRECTION', 'X_X_X', 1, fields),
+    false,
+  );
+  assert.equal(exceptionActionBody('NOTE', 'SECOND_LOOK', 2, fields).note, 'why');
 });

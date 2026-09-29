@@ -2737,6 +2737,54 @@ The walk also caught three defects of its own making before any probe ran: the d
 
 **Step 11.4: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 77 (29 September 2026) — step 11.5, finance queues
+
+Two requirements; the first held in part, the second not at all. Finance exceptions existed for ten of the eleven queue types, but an exception could only be read: nothing assigned, retried, annotated or resolved one; six code paths closed them with no record of who or why, and four of those closed *every* open exception on the operation, whatever its kind — the walk found a contradicting webhook's exception closed by reconciling the payment's capture. Nothing linked an exception to a correction. A capture its allocations did not cover was silently posted to the platform remainder; a contradicting webhook delivery was refused but not queued; a declined refund was not queued; a shop's refused payout was not queued (only a partner's); the ledger audit's breaches were reported and forgotten; and disputes lived apart. The admin workspace's finance table read fields the rows do not have, so its amount and reference columns were always a dash. One migration (0119); a finance queue service; three routes replacing a read-only list; detection added in four places; the worker queues conservation breaches; a new console queue; a new connected walk; five unit tests; twenty mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Owned queues for the eleven listed kinds | Ten detected, **four not** (capture/allocation, webhook conflict, declined refund, shop payout refusal) and ledger breaches never persisted; disputes apart; owners two teams with no queue — P77-01. |
+| 2 | Each row: expected/actual, provider and business references, risk, age, last retry, next safe action, correction proposal, approval, evidence, history | **Kind, amount and next action only**; no history, no correction link, no retry record, no approval — P77-02. |
+
+**P77-01 — eleven queues, all detected.** 0119 maps every exception to its queue by kind and the action it asks for (a generated column), so every writer, old or new, lands in the right one: an authorisation the checkout could not use (`VOID_*`) apart from an unanswered payment; a contradicting delivery (new `WEBHOOK_CONFLICT`, recorded on its own connection since the refusal rolls the checkout back) with the provider conflict the checkout already found; a declined refund (new `REFUND_FAILED`, closed when its retry succeeds) with an unanswered one; a capture its allocations do not cover (new `CAPTURE_ALLOCATION_MISMATCH`, with both amounts); a shop's refused payout beside a partner's; posting failures split by source, a partner's earning or compensation from a shop's settlement. The worker queues each conservation breach in its queue (the trial balance, clearings and editable history as an unbalanced ledger; vendor payable as settlement; partner payable as earnings; unrouted statements as unmatched) and closes it when it clears. Disputes — a shop's settlement dispute and a partner's earning dispute — are read into the dispute queue from their own tables. The closers that closed every kind now close only their own.
+
+**P77-02 — the row.** `GET admin/finance/queues` gives each queue's open count, money at risk and oldest age, and each row: what was expected and what happened (from the exception, or the payment, refund or payout its provider reference names), the provider reference and state, the business reference (the order, settlement or checkout), the risk (D-09), its age, attempts and last retry, the next safe action, the linked correction and whether it was approved, a pending write-off, the evidence attached, and how long its history is. `GET …/exceptions/:id` gives the whole history; each look is audited. `POST …/actions/:action` against the version read, with a reason: take or assign it (to someone who works finance); note; attach evidence; reconcile an unanswered capture, refund or payout with the provider's answer and evidence (an unanswered authorisation is the checkout's, answered by a signed webhook, and is refused here); link a correction (not a rejected or expired one); resolve as provider-confirmed (only once the provider has answered), corrected (only on a posted correction), no money moved, or a duplicate of one in the same queue; propose a write-off, approved only by someone else who holds the approver's capability; reopen. The history is kept by triggers, so a state change by any writer — including the money flows that settle an exception, recorded with no operator — appends its event and stamps the resolution; a reopening clears it.
+
+**The console.** The finance screen lists the eleven queues with their counts and oldest age; a queue opens as a table of the row fields; a row opens to its values, references, correction, approval, history and the steps its state allows, each confirmed with a reason. The workspace's finance table reads the queue rows.
+
+**Mutation results.** Twenty probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| The webhook conflict mapped to the wrong queue | *The contradicting delivery was refused but not queued* |
+| The webhook conflict not recorded | the same |
+| A declined refund not queued | *A declined refund was not queued with what it owed* |
+| Reconciling a payment closes every kind on it | the webhook conflict found changed under the operator — the defect the walk first found |
+| An unanswered authorisation reconcilable by hand | the queue row offering reconcile where the checkout owns the answer |
+| Confirmed while the provider has not answered | *A payment the provider has not answered was resolved as confirmed* |
+| Corrected without a posted correction | *An exception was resolved as corrected on a correction not yet posted* |
+| A rejected correction linked | *A rejected correction was linked* |
+| A write-off approved by its proposer | *A write-off was approved by the person who proposed it* — after the walk gained the case |
+| A write-off approved without the approver's capability | *An operator without approval authority approved a write-off* |
+| A stale version accepted | *An exception was changed against a stale version* |
+| Assigned to anyone | *An exception was assigned to someone outside finance* |
+| A breach never cleared | *The conservation breach was not queued and then cleared* |
+| A reopening keeps the resolution | the table's resolution constraint, a second layer beneath the trigger |
+| A duplicate across queues | *An exception was closed as a duplicate of one in another queue* |
+| The actual value not derived | the queue row's expected/actual check |
+| Reconcile without evidence | the money service's own evidence check, a second layer |
+| The attempt not recorded | *Reconciling from the queue did not settle it with the attempt on record* |
+| The history misses a resolution | *An exception closed by the money flow left no record* |
+| A write-off resolved directly | *A write-off was resolved without its approval* |
+
+The walk found four defects of its own before any probe ran: the closers that closed every kind on an operation; an unanswered checkout authorisation offered for reconciling by hand, which the money service refuses (its answer is the checkout's webhook); a history trigger that named the platform user, absent from some databases, now recording no operator when a money flow acts; and steps sharing one timestamp read out of order.
+
+**Forward findings.** (payouts) Releasing a refused payout and recovering a duplicate are still their own commands, not queue steps. (disputes) Disputes are shown in the queue and resolved on their own routes. (webhooks) Only checkout payments have webhooks; refunds and payouts are reconciled by hand or by the sweep. (capture) The capture mismatch is detected and queued; reallocating it is a correction. (11.9) Queue reads and steps are on the operational audit.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 120 migration files (0000–0119), full ladder with rollback rehearsal, conservation after every module (43 checks); `finance_queues` 42 assertions (new); the vendor-fulfilment walk reads the statement exception's queue. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm security:secrets`, `pnpm features:check` exit 0; `pnpm test:unit` 648 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack; all twenty probes on rebuilt databases.
+
+**Step 11.5: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

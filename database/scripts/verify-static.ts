@@ -191,6 +191,7 @@ assert(
       '0116_order_intervention',
       '0117_support_case_lifecycle',
       '0118_trust_review',
+      '0119_finance_queues',
     ]),
   'Unexpected reviewed migrations',
 );

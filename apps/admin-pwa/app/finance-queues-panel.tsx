@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { adminRequest } from './authenticated-api';
+import { FinanceExceptionsQueue } from './finance-exceptions-queue';
 
 /**
  * Vendor settlement and partner earning queues (ADM-48, ADM-49).
@@ -66,7 +67,6 @@ function accountName(reference: string): string {
 export function FinanceQueuesPanel() {
   const [payments, setPayments] = useState<Row[]>([]);
   const [refunds, setRefunds] = useState<Row[]>([]);
-  const [exceptions, setExceptions] = useState<Row[]>([]);
   const [ledger, setLedger] = useState<TrialBalance | null>(null);
   const [ledgerNotice, setLedgerNotice] = useState('Loading the trial balance…');
   const [conservation, setConservation] = useState('Checking the books against the records…');
@@ -75,16 +75,14 @@ export function FinanceQueuesPanel() {
 
   const load = useCallback(async () => {
     try {
-      const [paymentResult, refundResult, exceptionResult] = await Promise.all([
+      const [paymentResult, refundResult] = await Promise.all([
         adminRequest<{ payments?: Row[] }>('admin/finance/payments'),
         adminRequest<{ refunds?: Row[] }>('admin/finance/refunds'),
-        adminRequest<{ exceptions?: Row[] }>('admin/finance/v2/exceptions'),
       ]);
       setPayments(paymentResult.payments ?? []);
       setRefunds(refundResult.refunds ?? []);
-      setExceptions(exceptionResult.exceptions ?? []);
       setMessage(
-        `${paymentResult.payments?.length ?? 0} payments · ${refundResult.refunds?.length ?? 0} refunds · ${exceptionResult.exceptions?.length ?? 0} open exceptions.`,
+        `${paymentResult.payments?.length ?? 0} payments · ${refundResult.refunds?.length ?? 0} refunds.`,
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'The money queues failed to load.');
@@ -222,14 +220,10 @@ export function FinanceQueuesPanel() {
         ) : null}
       </div>
 
+      {/* 11.5: the exceptions are worked in their owned queues. */}
+      <FinanceExceptionsQueue />
+
       <div className="admin-card-grid" style={{ marginTop: '1rem' }}>
-        {exceptions.map((row, index) => (
-          <article key={String(row['finance_exception_id'] ?? index)}>
-            <span>{String(row['exception_kind'] ?? 'EXCEPTION')}</span>
-            <strong>{rupees(row['amount_at_risk_minor'])} at risk</strong>
-            <p>{String(row['next_action_code'] ?? '')}</p>
-          </article>
-        ))}
         {refunds.map((row, index) => (
           <article key={String(row['refund_id'] ?? `refund-${index}`)}>
             <span>REFUND · {String(row['refund_state'] ?? '')}</span>
@@ -244,9 +238,7 @@ export function FinanceQueuesPanel() {
             <p>{String(row['source_checkout_reference'] ?? '')}</p>
           </article>
         ))}
-        {exceptions.length + refunds.length + payments.length === 0 && (
-          <p>No money movements recorded yet.</p>
-        )}
+        {refunds.length + payments.length === 0 && <p>No money movements recorded yet.</p>}
       </div>
     </section>
   );

@@ -49,6 +49,7 @@ import { verifyAdminDashboard } from './verify-admin-dashboard.js';
 import { verifyOrderMonitor } from './verify-order-monitor.js';
 import { verifySupportCases } from './verify-support-cases.js';
 import { verifyTrustReview } from './verify-trust-review.js';
+import { verifyFinanceQueues } from './verify-finance-queues.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -824,6 +825,7 @@ await withDatabaseClient(config, async (client) => {
   await measure('order_monitor', () => verifyOrderMonitor(config.connectionString));
   await measure('support_cases', () => verifySupportCases(config.connectionString));
   await measure('trust_review', () => verifyTrustReview(config.connectionString));
+  await measure('finance_queues', () => verifyFinanceQueues(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);
@@ -867,7 +869,7 @@ await withDatabaseClient(config, async (client) => {
     marketplace.customer_favourite_stores,
     marketplace.customer_address_events, marketplace.customer_addresses,
     marketplace.financial_correction_events, marketplace.financial_corrections,
-    marketplace.finance_exceptions, marketplace.provider_statement_rows,
+    marketplace.finance_exception_events, marketplace.finance_exceptions, marketplace.provider_statement_rows,
     marketplace.payouts, marketplace.settlements, marketplace.ledger_entries,
     marketplace.ledger_transactions, marketplace.refund_events, marketplace.refunds,
     marketplace.payment_events, marketplace.payment_allocations, marketplace.payment_transactions,

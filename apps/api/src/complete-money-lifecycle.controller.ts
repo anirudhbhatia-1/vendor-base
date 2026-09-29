@@ -317,17 +317,6 @@ export class CompleteMoneyAdminController {
     }
   }
 
-  @Get('exceptions')
-  @manage
-  async exceptions() {
-    try {
-      return await this.money.financeQueue({ context: currentRequestContext() });
-    } catch (error) {
-      if (error instanceof TypeError) throw new BadRequestException();
-      translateDomainError(error);
-    }
-  }
-
   /** The trial balance (10.1): the catalogue with its postings, shown only when it balances. */
   @Get('ledger')
   @manage

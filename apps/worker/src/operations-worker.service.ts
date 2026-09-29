@@ -10,6 +10,7 @@ import {
   type DomainServices,
   type SupportCaseService,
   type TrustReviewService,
+  type FinanceQueueService,
   type GroupedCheckoutService,
   type InventoryReservationService,
   type PartnerAvailabilityService,
@@ -73,6 +74,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #adminControl: AdminControlPlaneService;
   readonly #supportCases: SupportCaseService;
   readonly #trust: TrustReviewService;
+  readonly #financeQueues: FinanceQueueService;
   readonly #checkout: GroupedCheckoutService;
   readonly #inventory: InventoryReservationService;
   readonly #partnerField: PartnerFieldOpsService;
@@ -110,6 +112,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#adminControl = services.adminControl;
     this.#supportCases = services.supportCases;
     this.#trust = services.trust;
+    this.#financeQueues = services.financeQueues;
     this.#assignments = services.assignments;
     this.#checkout = services.checkout;
     this.#partnerField = services.partnerField;
@@ -413,6 +416,13 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#trust.collectSignals({ context, now }),
         { collected: 0 },
       );
+      // What the ledger audit finds is queued for finance, and cleared when
+      // it clears (11.5).
+      const breaches = await pass(
+        'financeQueues.recordConservationBreaches',
+        () => this.#financeQueues.recordConservationBreaches({ context, now }),
+        { breaches: 0, opened: 0, cleared: 0 },
+      );
       const waitTimers = await pass(
         'partnerWait.advanceDue',
         () => this.#partnerWait.advanceDue({ context, now }),
@@ -507,6 +517,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         settlementAdjustments +
         trustExpired.expired +
         trustSignals.collected +
+        breaches.opened +
         controls.incidents +
         waitTimers +
         notificationSignals +
@@ -531,6 +542,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           settlement_adjustments: settlementAdjustments,
           trust_controls: trustExpired.expired,
           trust_signals: trustSignals.collected,
+          conservation_breaches: breaches.breaches,
           incident_controls: controls.incidents,
           wait_timers: waitTimers,
           notification_signals: notificationSignals,
