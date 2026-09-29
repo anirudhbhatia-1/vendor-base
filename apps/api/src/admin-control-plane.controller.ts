@@ -1,13 +1,4 @@
-import {
-  BadRequestException,
-  Body,
-  Controller,
-  Get,
-  Inject,
-  Param,
-  Post,
-  Query,
-} from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Post, Query } from '@nestjs/common';
 import { AdminControlPlaneService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
@@ -52,60 +43,6 @@ export class AdminControlPlaneController {
       });
     } catch (error) {
       translateDomainError(error);
-    }
-  }
-  @Post('trust') @global('admin.trust.restriction_propose') async trust(@Body() raw: unknown) {
-    const b = object(raw);
-    try {
-      return await this.control.proposeTrust({
-        context: currentRequestContext(),
-        subject_kind: stringField(b, 'subject_kind'),
-        subject_reference: stringField(b, 'subject_reference'),
-        scope_kind: stringField(b, 'scope_kind'),
-        scope_reference: stringField(b, 'scope_reference'),
-        reason_code: stringField(b, 'reason_code'),
-        evidence_reference: stringField(b, 'evidence_reference'),
-        policy_reference: stringField(b, 'policy_reference'),
-        effective_until: dateField(b, 'effective_until'),
-        review_at: dateField(b, 'review_at'),
-      });
-    } catch (e) {
-      translateDomainError(e);
-    }
-  }
-  @Post('trust/:id/approve') @global('admin.trust.restriction_approve') async approveTrust(
-    @Param('id') id: string,
-    @Body() raw: unknown,
-  ) {
-    const b = object(raw);
-    try {
-      return await this.control.approveTrust({
-        context: currentRequestContext(),
-        trust_restriction_case_id: uuid(id),
-        expected_version: Number(b.expected_version),
-        reason_code: stringField(b, 'reason_code'),
-      });
-    } catch (e) {
-      translateDomainError(e);
-    }
-  }
-  @Post('trust/:id/:action') @global('admin.trust.restriction_approve') async transitionTrust(
-    @Param('id') id: string,
-    @Param('action') action: string,
-    @Body() raw: unknown,
-  ) {
-    if (action !== 'reject' && action !== 'revoke') throw new BadRequestException();
-    const b = object(raw);
-    try {
-      return await this.control.transitionTrust({
-        context: currentRequestContext(),
-        trust_restriction_case_id: uuid(id),
-        expected_version: Number(b.expected_version),
-        action: action === 'reject' ? 'REJECT' : 'REVOKE',
-        reason_code: stringField(b, 'reason_code'),
-      });
-    } catch (e) {
-      translateDomainError(e);
     }
   }
   @Post('incidents') @global('admin.incident.manage') async incident(@Body() raw: unknown) {

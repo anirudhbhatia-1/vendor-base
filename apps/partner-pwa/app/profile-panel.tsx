@@ -67,6 +67,8 @@ type Restriction = {
   readonly effective_until: string;
   readonly review_at: string;
   readonly appealable: boolean;
+  /** The latest appeal against it: OPEN, UPHELD or OVERTURNED (11.4). */
+  readonly appeal_state: string | null;
 };
 
 /**
@@ -159,6 +161,8 @@ export function PartnerProfilePanel() {
   const [loading, setLoading] = useState(true);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [appeals, setAppeals] = useState<Readonly<Record<string, string>>>({});
+  const [appealMessage, setAppealMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -222,6 +226,7 @@ export function PartnerProfilePanel() {
         title="Standing and verification"
       >
         {error ? <Notice tone="danger">{error}</Notice> : null}
+        {appealMessage ? <Notice tone="information">{appealMessage}</Notice> : null}
 
         {/* DLP-47, DLP-56, SEC-14: a restriction is owed a reason, a review
             date and a route to challenge it. It was previously visible only
@@ -238,12 +243,61 @@ export function PartnerProfilePanel() {
               {new Date(entry.effective_until).toLocaleDateString()}. Policy{' '}
               {shortReference(entry.policy_reference)}.
             </p>
-            {entry.appealable ? (
+            {/* An appeal is decided by someone who neither proposed nor
+                approved the restriction (11.4); until then it was a line
+                telling the partner to raise it elsewhere. */}
+            {entry.appeal_state === 'OPEN' ? (
               <Notice tone="information">
-                You can ask for this to be looked at again. Raise it under “Something is wrong” on
-                your job, or through partner support, quoting{' '}
-                {shortReference(entry.trust_restriction_case_id)}.
+                Your appeal is with the trust team. Your current jobs are not affected.
               </Notice>
+            ) : null}
+            {entry.appeal_state === 'UPHELD' ? (
+              <Notice tone="warning">Your appeal was looked at and the restriction stands.</Notice>
+            ) : null}
+            {entry.appealable ? (
+              <form
+                className="ns-stack"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const statement = (appeals[entry.trust_restriction_case_id] ?? '').trim();
+                  if (!statement) return;
+                  void partnerRequest(
+                    `partner/standing/restrictions/${entry.trust_restriction_case_id}/appeals`,
+                    { method: 'POST', body: JSON.stringify({ statement }) },
+                  )
+                    .then(async () => {
+                      setAppealMessage('Your appeal was sent.');
+                      setAppeals({ ...appeals, [entry.trust_restriction_case_id]: '' });
+                      await load();
+                    })
+                    .catch((cause: unknown) =>
+                      setAppealMessage(
+                        cause instanceof Error ? cause.message : 'The appeal could not be sent.',
+                      ),
+                    );
+                }}
+              >
+                <label className="ns-field">
+                  <span className="ns-field__label">
+                    Appeal case {shortReference(entry.trust_restriction_case_id)}
+                  </span>
+                  <textarea
+                    className="ns-field__control"
+                    maxLength={2000}
+                    onChange={(event) =>
+                      setAppeals({
+                        ...appeals,
+                        [entry.trust_restriction_case_id]: event.target.value,
+                      })
+                    }
+                    rows={3}
+                    value={appeals[entry.trust_restriction_case_id] ?? ''}
+                  />
+                </label>
+                <Button type="submit" variant="secondary">
+                  Send appeal
+                </Button>
+              </form>
             ) : null}
           </Card>
         ))}

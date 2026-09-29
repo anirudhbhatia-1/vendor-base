@@ -11,6 +11,7 @@ import type {
   CheckoutGroup,
   CheckoutQuote,
   CustomerSupportCase,
+  OwnRestriction,
   CustomerSettings,
   FulfilmentMethod,
   InAppNotification,
@@ -572,6 +573,15 @@ export function createApiClient(options: ApiClientOptions) {
           approximate_drop_area: string | null;
           in_custody: boolean;
         }>(`/customer/orders/${vendorOrderId}/tracking`),
+
+      /** Restrictions on this account, and the appeal against one (11.4). */
+      restrictions: () => r<{ restrictions: OwnRestriction[] }>('/customer/restrictions'),
+
+      appealRestriction: (restrictionId: string, statement: string) =>
+        r<{ trust_appeal_id: string; lifecycle_state: string }>(
+          `/customer/restrictions/${restrictionId}/appeals`,
+          { method: 'POST', json: { statement } },
+        ),
 
       supportCases: () => r<{ cases: CustomerSupportCase[] }>('/customer/support-cases'),
 

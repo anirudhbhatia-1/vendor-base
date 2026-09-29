@@ -832,7 +832,8 @@ export class PartnerLifecycleService {
       `SELECT scope_kind, scope_reference, reason_code, effective_until
          FROM marketplace.trust_restriction_cases
         WHERE subject_kind='PARTNER' AND subject_reference=$1 AND lifecycle_state='ACTIVE'
-          AND effective_until > $2 AND scope_kind='GLOBAL'`,
+          AND effective_until > $2 AND scope_kind='GLOBAL'
+          AND marketplace.trust_restricts('PARTNER', $1, NULL, NULL, $2)`,
       [String(partnerId), now],
     );
     for (const restriction of restrictions.rows)
@@ -1105,62 +1106,6 @@ export class PartnerLifecycleService {
       }
       return Object.freeze(restricted);
     });
-  }
-
-  async listOwnRestrictions(input: {
-    readonly context: RequestContext;
-    readonly now?: Date;
-  }): Promise<
-    readonly {
-      readonly trust_restriction_case_id: UuidV7;
-      readonly lifecycle_state: string;
-      readonly scope_kind: string;
-      readonly reason_code: string;
-      readonly policy_reference: string;
-      readonly effective_until: string;
-      readonly review_at: string;
-      readonly appealable: boolean;
-    }[]
-  > {
-    const actor = input.context.actor;
-    if (actor?.actor_kind !== 'delivery_partner') {
-      throw new PartnerLifecycleAuthorizationError();
-    }
-    const rows = await this.#pool.query<{
-      trust_restriction_case_id: string;
-      lifecycle_state: string;
-      scope_kind: string;
-      reason_code: string;
-      policy_reference: string;
-      effective_until: Date;
-      review_at: Date;
-    }>(
-      `SELECT trust_restriction_case_id, lifecycle_state, scope_kind, reason_code,
-              policy_reference, effective_until, review_at
-         FROM marketplace.trust_restriction_cases
-        WHERE subject_kind = 'PARTNER' AND subject_reference = $1
-          AND lifecycle_state IN ('PROPOSED', 'ACTIVE', 'EXPIRED', 'REVOKED')
-        ORDER BY created_at DESC
-        LIMIT 25`,
-      [String(actor.actor_id)],
-    );
-    return Object.freeze(
-      rows.rows.map((row) =>
-        Object.freeze({
-          trust_restriction_case_id: parseUuidV7(row.trust_restriction_case_id),
-          lifecycle_state: row.lifecycle_state,
-          scope_kind: row.scope_kind,
-          reason_code: row.reason_code,
-          policy_reference: row.policy_reference,
-          effective_until: row.effective_until.toISOString(),
-          review_at: row.review_at.toISOString(),
-          // Only something currently in force is worth appealing; an expired or
-          // revoked case is history, and offering an appeal against it would be
-          // a dead end dressed up as a route.
-          appealable: row.lifecycle_state === 'ACTIVE' || row.lifecycle_state === 'PROPOSED',
-        }),
-      ),
-    );
   }
 
   async recordEarnings(input: {

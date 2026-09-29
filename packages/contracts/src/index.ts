@@ -1,4 +1,5 @@
 export type {
+  OwnRestriction,
   Address,
   AuthenticatedRole,
   AssignmentTransition,

@@ -48,6 +48,7 @@ import { verifyMoneyConservation } from './verify-money-conservation.js';
 import { verifyAdminDashboard } from './verify-admin-dashboard.js';
 import { verifyOrderMonitor } from './verify-order-monitor.js';
 import { verifySupportCases } from './verify-support-cases.js';
+import { verifyTrustReview } from './verify-trust-review.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -822,6 +823,7 @@ await withDatabaseClient(config, async (client) => {
   await measure('admin_dashboard', () => verifyAdminDashboard(config.connectionString));
   await measure('order_monitor', () => verifyOrderMonitor(config.connectionString));
   await measure('support_cases', () => verifySupportCases(config.connectionString));
+  await measure('trust_review', () => verifyTrustReview(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);
@@ -843,6 +845,9 @@ await withDatabaseClient(config, async (client) => {
   // that synthetic evidence before rehearsing schema rollback/forward cycles so
   // a Phase 4 staff row cannot outlive the Phase 5 location it references.
   await client.query(`TRUNCATE marketplace.support_cases,
+    marketplace.trust_appeals, marketplace.trust_case_events,
+    marketplace.trust_restriction_signals, marketplace.trust_signal_dismissals,
+    marketplace.trust_signals, marketplace.trust_restriction_cases,
     marketplace.payment_authorization_adjustments,
     marketplace.in_app_notifications, marketplace.notification_attempts,
     marketplace.notification_intents,

@@ -2678,6 +2678,65 @@ Five requirements. One held in part. A case opened by operations or by the worke
 
 **Step 11.3: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 76 (29 September 2026) — step 11.4, trust and safety review
+
+Five requirements. None held. Nothing collected a signal. A restriction named its subject by a free `SYNTH-` reference that the service upper-case-checked, so a partner — whose restrictions dispatch did enforce, by user id — could not be restricted through the API at all; a customer, shop or category restriction was stored and enforced nowhere. Nothing showed what a restriction rested on or what it would touch. The review date was never acted on; proposals were unaudited; and there was no appeal, though the feature matrix said appeals were "upheld or overturned" (ADM-15) and the partner's page told them to raise one "under Something is wrong". Separately, the walk found a checkout defect: a quote that placement refuses (a price, a paused store, now a restriction) was replayed unchanged on the next quote, so the customer looped. One migration (0118); a new trust review service replacing the control plane's three trust methods; one rule (`marketplace.trust_restricts`) read wherever new work starts; eleven routes; four screens; a new connected walk; six unit and screen tests; twenty mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Collect signals without automatic irreversible action | **No signals** — P76-01. |
+| 2 | Show linked authorized objects and evidence quality | **Nothing linked**; evidence was one reference string — P76-02. |
+| 3 | Propose scoped, time-bounded restriction | Partners **unreachable** through the API; customer, shop and category restrictions **enforced nowhere**; any duration — P76-03. |
+| 4 | Protect active orders and custody | Held for partners by construction; nothing recorded or shown what a restriction left running — P76-04. |
+| 5 | Record reviewer, reason, policy, review date, outcome, and appeal | Approval audited without the decision on the case; **no review outcome, no appeal** — P76-05. |
+
+**P76-01 — signals that restrict nothing.** `collectSignals` reads what already happened into `trust_signals`, once per source: a low delivery rating (the partner), a low order rating and an item complaint (the shop), a support case on partner conduct (the partner), and what a partner reported at the door — a threat or unsafe location or an unreachable customer (the customer), prohibited goods or a delay (the shop). Each carries its reporter and a weight. The worker runs it each maintenance pass. It writes nothing but signals; the walk proves collection creates no case and stops no one. A reviewer may set a signal aside (`trust_signal_dismissals`); it stays and stops counting.
+
+**P76-02 — the dossier.** A subject's page shows its signals and how good the evidence is — one signal; one person's repeated account; two people (corroborated); three, or two with a serious report (strong) — and the objects behind each signal that this reviewer may open: a support case only with `admin.support.case_manage`, a delivery attempt with the dashboard, a rating never (0060: ratings are never traced to one customer at one door). The rest are counted, not shown. It shows the work the subject has under way. Each look is audited.
+
+**P76-03 — a real subject, an allowed scope, a bounded time.** A proposal names the subject by id — a customer, an eligible partner, a shop, or a catalogue category — within the scopes that subject has (a partner or customer everywhere, in a zone, or at a shop; a shop entirely or for one category; a category everywhere, in a zone or at a shop), for at most 90 days with a review within 30, a reason, a policy, and the signals or attached evidence it rests on; one open case per subject and scope. In force, it is read by one database rule at the start of new work: a partner going online (everywhere only) and being offered a delivery; a customer quoting an order (`CUSTOMER_RESTRICTED`, a new block reason with copy in en and hi); a shop quoting (its store unavailable) and each line of a category it may not sell; and placement, where a restriction since the quote refuses it. The replay defect is fixed on the way: a live quote is replayed only while placement would still accept it.
+
+**P76-04 — work already under way carries on.** No restriction touches an order placed, an order accepted, or goods in custody; enforcement reads only new work. The case and its approval confirmation show what it leaves running, and the approval records it on the case history (`in_flight`). The walk approves a partner restriction while the partner holds goods (the custody stays theirs), restricts a customer at one shop while their order there is placed (untouched), and restricts a shop's category after its order was accepted (it can still be picked).
+
+**P76-05 — the record.** Every step is on `trust_case_events` (append-only, with the version moved from) and the operational audit: proposed; approved — by a second person, only on corroborated signals or attached evidence (EXC-14); rejected; revoked; reviewed — keep with the next review date, shorten, or lift; expired, on its record, by the worker; appeal filed by the person restricted (customer, partner, or a shop's owner or manager) against the case version; appeal upheld or overturned by someone who neither proposed nor approved it — overturning revokes. The case carries who decided, why and when (a constraint requires all three together) and its last review. The dashboard lists proposals, reviews due and open appeals. The customer's help page, the partner's standing page and the shop's insights page show a restriction's reason, policy, dates and appeal, and take one.
+
+**The console.** The trust panel is rebuilt on the operations kit: subjects and cases as tables, a subject's dossier with its signals to choose from and set aside, a proposal form with the subject's own scopes and bounded durations, and every decision — approve, reject, revoke, review, decide an appeal, set a signal aside — through a confirmation with a reason and the version on screen. The partner's page takes an appeal instead of pointing elsewhere.
+
+**Not taken from the gap register.** Gap 21's 0117 down-migration: it deletes the incident commander's support grant that 0117 added; before 0117 no migration granted it, and the reviewed catalogue (which `verify-identity-access` counts) is the authority, so rollback restoring the pre-0117 catalogue is correct. A grant added outside migrations is not the catalogue's to keep.
+
+**Mutation results.** Twenty probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| One account treated as approvable | *One report was treated as enough* |
+| Self-approval allowed | **not reachable**: the role separation rules refuse one person holding both trust roles (*separation-of-duty conflict* when the walk tried), and the table forbids approver = proposer; the service check is a third layer |
+| Customer not blocked at checkout | *The customer restriction did not block shop M alone…* |
+| Category subject not blocked at checkout | *The category restriction did not block its line at that shop alone* — after the walk gained a category-subject case |
+| A stale quote replayed | *The category restriction did not stop new sales…* |
+| Placement ignores a category restriction | *A quote from before a category restriction was placed after it* — after the same case |
+| Appeal decided by the approver | *The approver decided the appeal against their own decision* |
+| Overturning leaves it in force | the next quote is still blocked |
+| Scope not checked | *A partner was restricted in a scope partners do not have* |
+| No longest restriction | *A restriction ran past the longest allowed* |
+| Ratings traceable | *The dossier linked what the reviewer may not open…* |
+| A signal set aside still counts | *A signal set aside still counted* |
+| Stale version accepted | *A restriction was approved against a stale version* |
+| Subject not checked | *A restriction was proposed on a partner that does not exist* |
+| Work under way not recorded at approval | *Approval did not … record the work it leaves running…* |
+| Appeals not on the dashboard | *The open appeal is not on the dashboard* |
+| A kept review unbounded | the table's review-within-end constraint, where the walk expected the service's refusal |
+| The rule ignores a shop scope | every group blocked where only shop M should be |
+| A signal of another subject accepted | *A restriction rested on another subject's signal* |
+| No evidence at all accepted | *A restriction rested on nothing* |
+
+The walk also caught three defects of its own making before any probe ran: the decision, review and appeal shape constraints compared "undecided" with "every field empty", so a decided row with some fields empty passed (now each requires all or none); a parameter typed as text by one cast broke the checkout query's uuid comparison; and the rollback rehearsal did not clear the new tables.
+
+**Forward findings.** (ADM-14) A restriction stops a subject's whole kind of new work; restricting one capability of an actor is still not modelled. (discovery) A restricted shop or category is refused at quote and placement but still listed in discovery. (11.9) Trust reads and decisions are on the operational audit; searching it is 11.9's. (signals) Signals are read from four sources; cancellation and refund patterns are not yet signals. (CUS-65) The appeal is written, not a conversation.
+
+**Verification.** `pnpm db:verify` exit 0 locally — 119 migration files (0000–0118), full ladder with rollback rehearsal, conservation after every module (42 checks); `trust_review` 53 assertions (new); the partner lifecycle walk's restriction rows carry the decision fields. `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm security:secrets` exit 0; `pnpm test:unit` 637 pass / 0 fail; `pnpm test:integration` exit 0 on a migrated test stack; `pnpm features:check` passes; all probes above on rebuilt databases. Built and verified in a separate worktree on `feat/11.4-trust-review` from `6106d8f`, so a concurrent session's uncommitted work is not part of it.
+
+**Step 11.4: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

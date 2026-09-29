@@ -443,3 +443,13 @@ test('a shop is placed on the map when applying, and a delivery area is drawn as
   assert.ok(zones.includes('radiusMetres={'), 'and the map shows it');
   assert.ok(zones.includes('verticesToWkt(vertices)'), 'corners by hand remain as the fallback');
 });
+
+test("a shop's restriction says what it pauses and takes the owner's appeal (11.4)", () => {
+  const source = panel('insights-panel.tsx');
+  assert.ok(source.includes('/restrictions`'), 'the restrictions are read for this shop');
+  assert.ok(source.includes('/appeals`'), 'the appeal is sent to the server');
+  assert.ok(
+    source.includes('Orders you already have are not affected'),
+    'orders under way carry on',
+  );
+});

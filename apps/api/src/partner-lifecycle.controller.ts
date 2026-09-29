@@ -263,20 +263,6 @@ export class PartnerStandingController {
     }
   }
 
-  @Get('restrictions')
-  @partnerStandingRead
-  async restrictions() {
-    try {
-      return {
-        restrictions: await this.lifecycle.listOwnRestrictions({
-          context: currentRequestContext(),
-        }),
-      };
-    } catch (error) {
-      translateDomainError(error);
-    }
-  }
-
   /** Exactly what stops this partner going online, and what is about to (9.1). */
   @Get('eligibility')
   @partnerStandingRead
