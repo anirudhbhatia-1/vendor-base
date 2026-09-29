@@ -1856,3 +1856,79 @@ export const partnerPayoutItems = marketplaceSchema.table(
     index('partner_payout_items_partner').on(table.partnerUserId, table.createdAt),
   ],
 );
+
+export const trustSignals = marketplaceSchema.table(
+  'trust_signals',
+  {
+    trustSignalId: uuid('trust_signal_id').primaryKey(),
+    subjectKind: text('subject_kind').notNull(),
+    subjectReference: text('subject_reference').notNull(),
+    signalKind: text('signal_kind').notNull(),
+    sourceKind: text('source_kind').notNull(),
+    sourceId: uuid('source_id').notNull(),
+    reporterUserId: uuid('reporter_user_id'),
+    weight: smallint('weight').notNull(),
+    observedAt: timestamp('observed_at', { withTimezone: true }).notNull(),
+    collectedAt: timestamp('collected_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    check('trust_signal_weight', sql`${table.weight} BETWEEN 1 AND 3`),
+    index('trust_signals_subject').on(table.subjectKind, table.subjectReference, table.observedAt),
+  ],
+);
+
+export const trustSignalDismissals = marketplaceSchema.table('trust_signal_dismissals', {
+  trustSignalId: uuid('trust_signal_id').primaryKey(),
+  dismissedByUserId: uuid('dismissed_by_user_id').notNull(),
+  reasonCode: text('reason_code').notNull(),
+  requestId: uuid('request_id').notNull(),
+  correlationId: uuid('correlation_id').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const trustRestrictionSignals = marketplaceSchema.table(
+  'trust_restriction_signals',
+  {
+    trustRestrictionCaseId: uuid('trust_restriction_case_id').notNull(),
+    trustSignalId: uuid('trust_signal_id').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.trustRestrictionCaseId, table.trustSignalId] })],
+);
+
+export const trustCaseEvents = marketplaceSchema.table(
+  'trust_case_events',
+  {
+    trustCaseEventId: uuid('trust_case_event_id').primaryKey(),
+    trustRestrictionCaseId: uuid('trust_restriction_case_id').notNull(),
+    eventType: text('event_type').notNull(),
+    actorId: uuid('actor_id').notNull(),
+    reasonCode: text('reason_code').notNull(),
+    caseVersion: integer('case_version').notNull(),
+    payload: jsonb('payload').notNull(),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('trust_case_events_case').on(table.trustRestrictionCaseId, table.occurredAt)],
+);
+
+export const trustAppeals = marketplaceSchema.table(
+  'trust_appeals',
+  {
+    trustAppealId: uuid('trust_appeal_id').primaryKey(),
+    trustRestrictionCaseId: uuid('trust_restriction_case_id').notNull(),
+    caseVersion: integer('case_version').notNull(),
+    appellantUserId: uuid('appellant_user_id').notNull(),
+    statement: text('statement').notNull(),
+    lifecycleState: text('lifecycle_state').notNull().default('OPEN'),
+    decidedByUserId: uuid('decided_by_user_id'),
+    decisionReasonCode: text('decision_reason_code'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    requestId: uuid('request_id').notNull(),
+    correlationId: uuid('correlation_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    check('trust_appeal_state', sql`${table.lifecycleState} IN ('OPEN', 'UPHELD', 'OVERTURNED')`),
+  ],
+);

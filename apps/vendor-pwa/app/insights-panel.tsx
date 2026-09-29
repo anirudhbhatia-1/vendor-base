@@ -55,23 +55,44 @@ function minutes(seconds: number): string {
   return `${whole} min`;
 }
 
+/** A trust restriction on this shop, as its owner or manager sees it (11.4). */
+type ShopRestriction = {
+  readonly trust_restriction_case_id: string;
+  readonly in_force: boolean;
+  readonly scope_kind: string;
+  readonly reason_code: string;
+  readonly policy_reference: string;
+  readonly effective_until: string;
+  readonly review_at: string;
+  readonly appeal_state: string | null;
+  readonly appealable: boolean;
+};
+
 export function InsightsPanel({ vendorLocationId }: { readonly vendorLocationId: string }) {
   const [insights, setInsights] = useState<Insights | null>(null);
   const [cases, setCases] = useState<readonly SupportCase[]>([]);
+  const [restrictions, setRestrictions] = useState<readonly ShopRestriction[]>([]);
+  const [appealDraft, setAppealDraft] = useState('');
+  const [appealMessage, setAppealMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [summary, caseBody] = await Promise.all([
+      const [summary, caseBody, restricted] = await Promise.all([
         vendorRequest<Insights>(`vendor/locations/${vendorLocationId}/insights`),
         vendorRequest<{ cases?: readonly SupportCase[] }>(
           `vendor/locations/${vendorLocationId}/insights/support-cases`,
         ).catch(() => ({ cases: [] as readonly SupportCase[] })),
+        // Only an owner or manager is answered; anyone else sees nothing here.
+        vendorRequest<{ restrictions?: readonly ShopRestriction[] }>(
+          `vendor/locations/${vendorLocationId}/restrictions`,
+        ).catch(() => ({ restrictions: [] as readonly ShopRestriction[] })),
       ]);
       setInsights(summary);
       setCases(caseBody.cases ?? []);
+      setRestrictions((restricted.restrictions ?? []).filter((entry) => entry.in_force));
     } catch (cause) {
       setError(actionErrorText(cause, 'Your numbers could not be loaded.'));
     } finally {
@@ -87,6 +108,67 @@ export function InsightsPanel({ vendorLocationId }: { readonly vendorLocationId:
 
   return (
     <div className="ns-stack">
+      {/* 11.4: what a restriction stops (new orders, or one category), why,
+          until when, and the appeal. Orders already placed carry on. */}
+      {restrictions.map((entry) => (
+        <Panel
+          description="New orders are paused as described below. Orders you already have are not affected."
+          eyebrow="Restriction"
+          id={`restriction-${entry.trust_restriction_case_id}`}
+          key={entry.trust_restriction_case_id}
+          level={2}
+          title={
+            entry.scope_kind === 'CATEGORY'
+              ? 'One category is paused for new orders'
+              : 'New orders are paused'
+          }
+        >
+          <p className="field-help">
+            Reason {entry.reason_code.replaceAll('_', ' ').toLowerCase()} · policy{' '}
+            {shortReference(entry.policy_reference)} · reviewed by{' '}
+            {new Date(entry.review_at).toLocaleDateString()} · ends{' '}
+            {new Date(entry.effective_until).toLocaleDateString()}
+          </p>
+          {appealMessage ? <Notice>{appealMessage}</Notice> : null}
+          {entry.appeal_state === 'OPEN' ? <Notice>Your appeal is being looked at.</Notice> : null}
+          {entry.appealable ? (
+            <form
+              className="ns-stack"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const statement = appealDraft.trim();
+                if (!statement) return;
+                void vendorRequest(
+                  `vendor/locations/${vendorLocationId}/restrictions/${entry.trust_restriction_case_id}/appeals`,
+                  { method: 'POST', body: JSON.stringify({ statement }) },
+                )
+                  .then(async () => {
+                    setAppealDraft('');
+                    setAppealMessage('Your appeal was sent.');
+                    await load();
+                  })
+                  .catch((cause: unknown) =>
+                    setAppealMessage(actionErrorText(cause, 'The appeal could not be sent.')),
+                  );
+              }}
+            >
+              <label className="ns-field">
+                <span className="ns-field__label">Appeal this restriction</span>
+                <textarea
+                  className="ns-field__control"
+                  maxLength={2000}
+                  onChange={(event) => setAppealDraft(event.target.value)}
+                  rows={3}
+                  value={appealDraft}
+                />
+              </label>
+              <Button type="submit" variant="secondary">
+                Send appeal
+              </Button>
+            </form>
+          ) : null}
+        </Panel>
+      ))}
       {/* VEN-43: the instruction stays with the store until the case closes. */}
       {cases.length > 0 ? (
         <Panel

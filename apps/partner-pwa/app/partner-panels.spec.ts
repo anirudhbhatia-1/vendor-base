@@ -659,3 +659,13 @@ test('a line says where its payout stands, and a refused payout is not lost (10.
     'compensation shows its payout',
   );
 });
+
+test('a restriction in force takes an appeal from the partner, not a pointer elsewhere (11.4)', () => {
+  const source = panel('profile-panel.tsx');
+  assert.ok(
+    source.includes('partner/standing/restrictions/${entry.trust_restriction_case_id}/appeals'),
+    'the appeal is sent to the server',
+  );
+  assert.ok(source.includes("entry.appeal_state === 'OPEN'"), 'an open appeal is shown as open');
+  assert.ok(!source.includes('Raise it under'), 'the partner is no longer sent elsewhere');
+});

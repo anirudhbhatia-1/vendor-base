@@ -37,6 +37,7 @@ import {
 import { createRoutingService, type RoutingService } from './routing.js';
 import type { SharedRuntimeConfig } from './runtime-config.js';
 import { SupportCaseService } from './support-cases.js';
+import { TrustReviewService } from './trust-review.js';
 import { ConfigurationAdminService } from './versioned-configuration.js';
 import { VendorFulfilmentService } from './vendor-fulfilment.js';
 import { VendorNetworkService } from './vendor-network.js';
@@ -127,6 +128,7 @@ export interface DomainServices {
   readonly sessions: IdentitySessionService;
   readonly storage: ProtectedObjectStorage;
   readonly supportCases: SupportCaseService;
+  readonly trust: TrustReviewService;
   readonly vendorNetwork: VendorNetworkService;
   readonly vendorSettings: VendorSettingsService;
   readonly vendorStaff: VendorStaffService;
@@ -227,6 +229,7 @@ export function createDomainServices(options: DomainCompositionOptions): DomainS
     sessions,
     storage,
     supportCases: new SupportCaseService(shared),
+    trust: new TrustReviewService(shared),
     vendorNetwork: new VendorNetworkService(shared),
     vendorSettings: new VendorSettingsService(shared),
     vendorStaff: new VendorStaffService({ ...shared, access, hash_key: otp_hash_key }),

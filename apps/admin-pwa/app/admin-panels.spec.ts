@@ -7,6 +7,7 @@ import { conservationSentence } from './finance-queues-panel.js';
 import { accessDeniedMessage, dueSentence } from './admin-workspace.js';
 import { interventionBody, timeInState } from './order-intervention-panel.js';
 import { supportActionBody, turnSentence, type ActionForm } from './support-panel.js';
+import { decisionBody, proposalBody, type ProposalForm } from './trust-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -37,7 +38,16 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
       'admin/support/cases/${detail.support_case_id}/actions/${action}',
     ],
   ],
-  ['trust-panel.tsx', ['admin/control/trust', 'admin/control/trust/${selected}/${action}']],
+  [
+    'trust-panel.tsx',
+    [
+      'admin/trust/signals',
+      'admin/trust/signals/collect',
+      'admin/trust/cases?view=WORK',
+      'admin/trust/cases',
+      'admin/trust/cases/${detail.trust_restriction_case_id}/actions/${action}',
+    ],
+  ],
   [
     'reporting-panel.tsx',
     ['admin/control/exports', 'admin/control/exports/redeem', 'admin/control/audit'],
@@ -99,16 +109,15 @@ test('the verification panel can answer an appeal', () => {
   assert.ok(panel('verification-panel.tsx').includes('/appeals/${appealId}/review'));
 });
 
-test('trust proposals use the subject and scope kinds the schema allows', () => {
+test('trust proposals take the subject and its scopes from the server (11.4)', () => {
   const source = panel('trust-panel.tsx');
-  for (const kind of ['CUSTOMER', 'VENDOR_LOCATION', 'PARTNER', 'CATEGORY']) {
-    assert.ok(source.includes(`'${kind}'`), `subject kind ${kind}`);
-  }
-  // The database rejects anything outside its CHECK constraint, so a plausible
-  // looking value such as DELIVERY_PARTNER would fail only at runtime.
+  // The subject comes from the signal queue and its scopes from the dossier,
+  // so a value the schema rejects cannot be typed in.
+  assert.ok(source.includes('dossier.allowed_scopes.map'), "scopes are the subject's own");
   assert.ok(!source.includes("'DELIVERY_PARTNER'"));
   assert.ok(source.includes('SYNTH-EVIDENCE-'), 'evidence reference shape');
   assert.ok(source.includes('SYNTH-POLICY-'), 'policy reference shape');
+  assert.ok(source.includes('<ConfirmDialog'), 'decisions go through a confirmation');
 });
 
 test('incident controls use the keys the schema allows', () => {
@@ -333,5 +342,45 @@ test('a case says whose turn it is and when (11.3)', () => {
   assert.equal(
     turnSentence({ awaiting: 'NONE', response_due_at: null }, now),
     'Nobody owes a reply.',
+  );
+});
+
+test('a proposal carries its scope, dates and chosen evidence (11.4)', () => {
+  const now = new Date('2026-09-29T10:00:00Z');
+  const form: ProposalForm = {
+    scope_kind: 'GLOBAL',
+    scope_reference: 'ignored',
+    reason_code: 'THREAT_AT_DOOR',
+    policy_reference: ' SYNTH-POLICY-SAFETY-1 ',
+    evidence_reference: '',
+    proposal_note: '',
+    days: 7,
+    review_days: 14,
+    signal_ids: ['a', 'b'],
+  };
+  const body = proposalBody({ subject_kind: 'CUSTOMER', subject_reference: 'c' }, form, now);
+  assert.equal(body.scope_reference, 'GLOBAL');
+  assert.equal(body.policy_reference, 'SYNTH-POLICY-SAFETY-1');
+  assert.equal('evidence_reference' in body, false);
+  assert.equal(body.effective_until, '2026-10-06T10:00:00.000Z');
+  // A review never falls after the end.
+  assert.equal(body.review_at, '2026-10-06T10:00:00.000Z');
+});
+
+test('every trust decision carries the version on screen and its outcome (11.4)', () => {
+  assert.deepEqual(decisionBody('APPROVE', 'EVIDENCE_CORROBORATED', 3, {}), {
+    expected_version: 3,
+    reason_code: 'EVIDENCE_CORROBORATED',
+  });
+  assert.equal(decisionBody('DECIDE_APPEAL', 'APPEAL_CONSIDERED', 4, {}).outcome, 'UPHOLD');
+  const shorten = decisionBody('REVIEW', 'SCHEDULED_REVIEW', 5, {
+    outcome: 'SHORTEN',
+    date: '2026-10-01T10:00:00Z',
+  });
+  assert.equal(shorten.effective_until, '2026-10-01T10:00:00.000Z');
+  assert.equal('review_at' in shorten, false);
+  assert.equal(
+    'review_at' in decisionBody('REVIEW', 'SCHEDULED_REVIEW', 5, { outcome: 'LIFT' }),
+    false,
   );
 });

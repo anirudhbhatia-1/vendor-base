@@ -190,6 +190,7 @@ assert(
       '0115_role_scoped_dashboard',
       '0116_order_intervention',
       '0117_support_case_lifecycle',
+      '0118_trust_review',
     ]),
   'Unexpected reviewed migrations',
 );

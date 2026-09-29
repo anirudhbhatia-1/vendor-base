@@ -279,6 +279,13 @@ test("a case's thread names the customer or support, never who at support (11.3)
   assert.ok(source.includes('merged_into_case_id'), 'a merged case points at where it went');
 });
 
+test('a restriction on the account is explained and can be appealed from help (11.4)', () => {
+  const source = panel('restrictions-panel.tsx');
+  assert.ok(source.includes('appealRestriction('), 'the appeal is sent through the typed client');
+  assert.ok(source.includes('Orders you have already placed are not affected'), 'orders carry on');
+  assert.ok(panel('support-panel.tsx').includes('<RestrictionsPanel />'), 'help shows it');
+});
+
 test('notifications are rendered as sentences, never as serialised payloads', () => {
   const source = code('notification-inbox.tsx');
   assert.ok(!source.includes('JSON.stringify'), 'no payload is dumped at the customer');

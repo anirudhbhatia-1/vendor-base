@@ -148,14 +148,29 @@ export class AdminControlPlaneService {
       'TRUST',
       may('admin.trust.restriction_approve', 'admin.trust.restriction_propose'),
       async () => {
+        // A proposal to decide, a review that has come due, or an appeal to
+        // answer (11.4): each is a person's decision the case is waiting on.
         const rows = await this.#pool.query<{
           trust_restriction_case_id: string;
           reason_code: string;
-          review_at: Date | null;
+          review_at: Date;
           created_at: Date;
+          next_action: 'DECIDE_APPEAL' | 'DECIDE_RESTRICTION' | 'REVIEW_RESTRICTION';
+          waiting_since: Date;
         }>(
-          `SELECT trust_restriction_case_id, reason_code, review_at, created_at
-             FROM marketplace.trust_restriction_cases WHERE lifecycle_state='PROPOSED' LIMIT 200`,
+          `SELECT c.trust_restriction_case_id, c.reason_code, c.review_at, c.created_at,
+                  CASE WHEN appeal.created_at IS NOT NULL THEN 'DECIDE_APPEAL'
+                       WHEN c.lifecycle_state = 'PROPOSED' THEN 'DECIDE_RESTRICTION'
+                       ELSE 'REVIEW_RESTRICTION' END AS next_action,
+                  COALESCE(appeal.created_at, c.created_at) AS waiting_since
+             FROM marketplace.trust_restriction_cases c
+             LEFT JOIN marketplace.trust_appeals appeal
+               ON appeal.trust_restriction_case_id = c.trust_restriction_case_id
+              AND appeal.lifecycle_state = 'OPEN'
+            WHERE c.lifecycle_state = 'PROPOSED'
+               OR (c.lifecycle_state = 'ACTIVE' AND (c.review_at <= $1 OR appeal.created_at IS NOT NULL))
+            LIMIT 200`,
+          [now],
         );
         return rows.rows.map((row) => ({
           kind: 'TRUST',
@@ -165,9 +180,9 @@ export class AdminControlPlaneService {
           object_id: row.trust_restriction_case_id,
           title: row.reason_code,
           owner: 'TRUST_APPROVERS',
-          next_action: 'DECIDE_RESTRICTION',
-          created_at: row.created_at,
-          due_at: row.review_at,
+          next_action: row.next_action,
+          created_at: row.waiting_since,
+          due_at: row.next_action === 'DECIDE_APPEAL' ? null : row.review_at,
           amount_at_risk_minor: 0,
           custody_risk: 'NONE' as const,
         }));
@@ -675,94 +690,6 @@ export class AdminControlPlaneService {
     return { stalled_orders: stalled.rows };
   }
 
-  async proposeTrust(input: {
-    readonly context: RequestContext;
-    readonly subject_kind: string;
-    readonly subject_reference: string;
-    readonly scope_kind: string;
-    readonly scope_reference: string;
-    readonly reason_code: string;
-    readonly evidence_reference: string;
-    readonly policy_reference: string;
-    readonly effective_until: Date;
-    readonly review_at: Date;
-  }) {
-    const who = admin(input.context);
-    if (input.review_at > input.effective_until) throw new AdminControlInputError();
-    const r = await this.#pool.query(
-      `INSERT INTO marketplace.trust_restriction_cases(trust_restriction_case_id,subject_kind,subject_reference,scope_kind,scope_reference,reason_code,evidence_reference,policy_reference,proposed_by_user_id,effective_until,review_at,request_id,correlation_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-      [
-        createUuidV7(),
-        input.subject_kind,
-        marked(input.subject_reference),
-        input.scope_kind,
-        marked(input.scope_reference),
-        reason(input.reason_code),
-        marked(input.evidence_reference),
-        marked(input.policy_reference),
-        who,
-        input.effective_until,
-        input.review_at,
-        parseRequestId(input.context.request_id),
-        parseUuidV7(input.context.correlation_id),
-      ],
-    );
-    return r.rows[0];
-  }
-  async approveTrust(input: {
-    readonly context: RequestContext;
-    readonly trust_restriction_case_id: UuidV7;
-    readonly expected_version: number;
-    readonly reason_code: string;
-  }) {
-    const who = admin(input.context);
-    const r = await this.#pool.query(
-      `UPDATE marketplace.trust_restriction_cases SET lifecycle_state='ACTIVE',approved_by_user_id=$2::uuid,version=version+1,updated_at=clock_timestamp() WHERE trust_restriction_case_id=$1 AND lifecycle_state='PROPOSED' AND version=$3 AND proposed_by_user_id<>$2::uuid RETURNING *`,
-      [input.trust_restriction_case_id, who, input.expected_version],
-    );
-    if (!r.rows[0]) throw new AdminControlStateError();
-    await this.#pool.query(
-      `INSERT INTO marketplace.operational_audit_events(operational_audit_event_id,action,target_kind,target_reference,actor_id,reason_code,request_id,correlation_id,approval_reference)VALUES($1,'TRUST_RESTRICTION_APPROVED','TRUST_RESTRICTION',$2::text,$3,$4,$5,$6,$2::uuid)`,
-      [
-        createUuidV7(),
-        input.trust_restriction_case_id,
-        who,
-        reason(input.reason_code),
-        parseRequestId(input.context.request_id),
-        parseUuidV7(input.context.correlation_id),
-      ],
-    );
-    return r.rows[0];
-  }
-  async transitionTrust(input: {
-    readonly context: RequestContext;
-    readonly trust_restriction_case_id: UuidV7;
-    readonly expected_version: number;
-    readonly action: 'REJECT' | 'REVOKE';
-    readonly reason_code: string;
-  }) {
-    const who = admin(input.context);
-    const from = input.action === 'REJECT' ? 'PROPOSED' : 'ACTIVE';
-    const to = input.action === 'REJECT' ? 'REJECTED' : 'REVOKED';
-    const r = await this.#pool.query(
-      `UPDATE marketplace.trust_restriction_cases SET lifecycle_state=$4,version=version+1,updated_at=clock_timestamp() WHERE trust_restriction_case_id=$1 AND lifecycle_state=$2 AND version=$3 RETURNING *`,
-      [input.trust_restriction_case_id, from, input.expected_version, to],
-    );
-    if (!r.rows[0]) throw new AdminControlStateError();
-    await this.#pool.query(
-      `INSERT INTO marketplace.operational_audit_events(operational_audit_event_id,action,target_kind,target_reference,actor_id,reason_code,request_id,correlation_id)VALUES($1,$2,'TRUST_RESTRICTION',$3,$4,$5,$6,$7)`,
-      [
-        createUuidV7(),
-        `TRUST_RESTRICTION_${to}`,
-        input.trust_restriction_case_id,
-        who,
-        reason(input.reason_code),
-        parseRequestId(input.context.request_id),
-        parseUuidV7(input.context.correlation_id),
-      ],
-    );
-    return r.rows[0];
-  }
   async setIncident(input: {
     readonly context: RequestContext;
     readonly control_key: string;
@@ -823,15 +750,13 @@ export class AdminControlPlaneService {
   }) {
     operator(input.context);
     const now = input.now ?? new Date();
-    const trust = await this.#pool.query(
-      `UPDATE marketplace.trust_restriction_cases SET lifecycle_state='EXPIRED',version=version+1,updated_at=$1 WHERE lifecycle_state='ACTIVE' AND effective_until<=$1`,
-      [now],
-    );
+    // Lapsed trust restrictions expire through TrustReviewService.expireLapsed
+    // (11.4), which writes the decision and the case history.
     const incidents = await this.#pool.query(
       `UPDATE marketplace.incident_controls SET lifecycle_state='EXPIRED',updated_at=$1 WHERE lifecycle_state='ACTIVE' AND expires_at<=$1`,
       [now],
     );
-    return { trust: trust.rowCount ?? 0, incidents: incidents.rowCount ?? 0 };
+    return { incidents: incidents.rowCount ?? 0 };
   }
   async audit(input: { readonly context: RequestContext; readonly query?: string }) {
     admin(input.context);

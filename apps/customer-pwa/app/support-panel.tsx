@@ -15,6 +15,7 @@ import {
 } from '@neighbourhood-store/ui';
 import { customerApiClient } from './customer-session';
 import { messageLabel, shortReference } from './display';
+import { RestrictionsPanel } from './restrictions-panel';
 import { StatePill } from './state-pill';
 
 export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: string }) {
@@ -137,6 +138,7 @@ export function SupportPanel({ supportCaseId }: { readonly supportCaseId?: strin
         eyebrow="Help"
         title="Support cases"
       />
+      <RestrictionsPanel />
       {error ? <Notice tone="danger">{error}</Notice> : null}
       {cases.length === 0 ? (
         <EmptyState

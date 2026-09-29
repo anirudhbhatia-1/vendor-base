@@ -103,13 +103,13 @@ export class PartnerAvailabilityService {
             'A document has expired',
             'PARTNER_NOT_ELIGIBLE',
           );
-        const restricted = await client.query(
-          `SELECT 1 FROM marketplace.trust_restriction_cases
-            WHERE subject_kind='PARTNER' AND subject_reference=$1 AND lifecycle_state='ACTIVE'
-              AND scope_kind='GLOBAL' AND effective_until > $2`,
+        // Only a restriction everywhere keeps a partner offline; a shop or
+        // zone restriction only keeps those offers from them (11.4).
+        const restricted = await client.query<{ restricted: boolean }>(
+          `SELECT marketplace.trust_restricts('PARTNER', $1, NULL, NULL, $2) AS restricted`,
           [String(id), now],
         );
-        if (restricted.rows[0])
+        if (restricted.rows[0]?.restricted)
           throw new PartnerAvailabilityConflictError(
             'Partner is restricted',
             'PARTNER_NOT_ELIGIBLE',
@@ -433,7 +433,7 @@ export class PartnerAvailabilityService {
       // serving that zone by name. An expired document keeps them off until
       // the sweep or a renewal has spoken. Until audit run 56 none of these
       // touched who was offered work.
-      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 JOIN marketplace.users u ON u.user_id=a.partner_user_id AND u.state='ACTIVE' WHERE a.availability_state='ONLINE' AND a.last_seen_at>$4::timestamptz AND EXISTS(SELECT 1 FROM marketplace.partner_eligibilities e WHERE e.user_id=a.partner_user_id AND e.state='ELIGIBLE' AND (e.eligible_until IS NULL OR e.eligible_until>$5::timestamptz)) AND NOT ($6::boolean AND EXISTS(SELECT 1 FROM marketplace.partner_applications bike WHERE bike.applicant_user_id=a.partner_user_id AND bike.vehicle_kind='BICYCLE')) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_applications app WHERE app.applicant_user_id=a.partner_user_id AND app.lifecycle_state='APPROVED' AND (app.identity_expires_at<=$5::timestamptz OR app.vehicle_expires_at<=$5::timestamptz OR app.insurance_expires_at<=$5::timestamptz)) AND NOT EXISTS(SELECT 1 FROM marketplace.trust_restriction_cases r WHERE r.subject_kind='PARTNER' AND r.subject_reference=a.partner_user_id::text AND r.lifecycle_state='ACTIVE' AND r.effective_until>$5::timestamptz AND (r.scope_kind='GLOBAL' OR (r.scope_kind='VENDOR_LOCATION' AND r.scope_reference=l.vendor_location_id::text) OR (r.scope_kind='ZONE' AND EXISTS(SELECT 1 FROM marketplace.vendor_service_zones z WHERE z.vendor_location_id=l.vendor_location_id AND z.lifecycle_state='ACTIVE' AND z.zone_name=r.scope_reference)))) AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') AND NOT EXISTS(SELECT 1 FROM marketplace.delivery_assignments oa WHERE oa.partner_user_id=a.partner_user_id AND oa.assignment_state='OFFERED' AND oa.offer_expires_at>$5::timestamptz) AND NOT (a.partner_user_id = ANY($3::uuid[])) ORDER BY distance_meters LIMIT 50`,
+      `SELECT a.partner_user_id,ST_Distance(a.current_coordinates,l.coordinates)::integer distance_meters,a.warning_codes FROM marketplace.partner_availability a JOIN marketplace.vendor_locations l ON l.vendor_location_id=$1 JOIN marketplace.users u ON u.user_id=a.partner_user_id AND u.state='ACTIVE' WHERE a.availability_state='ONLINE' AND a.last_seen_at>$4::timestamptz AND EXISTS(SELECT 1 FROM marketplace.partner_eligibilities e WHERE e.user_id=a.partner_user_id AND e.state='ELIGIBLE' AND (e.eligible_until IS NULL OR e.eligible_until>$5::timestamptz)) AND NOT ($6::boolean AND EXISTS(SELECT 1 FROM marketplace.partner_applications bike WHERE bike.applicant_user_id=a.partner_user_id AND bike.vehicle_kind='BICYCLE')) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_applications app WHERE app.applicant_user_id=a.partner_user_id AND app.lifecycle_state='APPROVED' AND (app.identity_expires_at<=$5::timestamptz OR app.vehicle_expires_at<=$5::timestamptz OR app.insurance_expires_at<=$5::timestamptz)) AND NOT marketplace.trust_restricts('PARTNER',a.partner_user_id::text,l.vendor_location_id,NULL,$5::timestamptz) AND ST_DWithin(a.current_coordinates,l.coordinates,$2) AND NOT EXISTS(SELECT 1 FROM marketplace.partner_assignment_memberships m WHERE m.user_id=a.partner_user_id AND m.state='ACTIVE') AND NOT EXISTS(SELECT 1 FROM marketplace.delivery_assignments oa WHERE oa.partner_user_id=a.partner_user_id AND oa.assignment_state='OFFERED' AND oa.offer_expires_at>$5::timestamptz) AND NOT (a.partner_user_id = ANY($3::uuid[])) ORDER BY distance_meters LIMIT 50`,
       [input.vendor_location_id, radius, excluded, seenSince, now, needsMotor],
     );
     return r.rows.map((x) => ({ ...x, partner_user_id: parseUuidV7(x.partner_user_id) }));

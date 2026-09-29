@@ -9,6 +9,7 @@ import {
   type AdminControlPlaneService,
   type DomainServices,
   type SupportCaseService,
+  type TrustReviewService,
   type GroupedCheckoutService,
   type InventoryReservationService,
   type PartnerAvailabilityService,
@@ -71,6 +72,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #assignments: AssignmentCustodyService;
   readonly #adminControl: AdminControlPlaneService;
   readonly #supportCases: SupportCaseService;
+  readonly #trust: TrustReviewService;
   readonly #checkout: GroupedCheckoutService;
   readonly #inventory: InventoryReservationService;
   readonly #partnerField: PartnerFieldOpsService;
@@ -107,6 +109,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#inventory = services.inventory;
     this.#adminControl = services.adminControl;
     this.#supportCases = services.supportCases;
+    this.#trust = services.trust;
     this.#assignments = services.assignments;
     this.#checkout = services.checkout;
     this.#partnerField = services.partnerField;
@@ -396,7 +399,19 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
       const controls = await pass(
         'adminControl.expireOperationalControls',
         () => this.#adminControl.expireOperationalControls({ context, now }),
-        { incidents: 0, trust: 0 },
+        { incidents: 0 },
+      );
+      // Lapsed restrictions end on their case history; new signals are read
+      // for review and restrict nothing (11.4).
+      const trustExpired = await pass(
+        'trust.expireLapsed',
+        () => this.#trust.expireLapsed({ context, now }),
+        { expired: 0 },
+      );
+      const trustSignals = await pass(
+        'trust.collectSignals',
+        () => this.#trust.collectSignals({ context, now }),
+        { collected: 0 },
       );
       const waitTimers = await pass(
         'partnerWait.advanceDue',
@@ -490,7 +505,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         correctionsExpired +
         redivided +
         settlementAdjustments +
-        controls.trust +
+        trustExpired.expired +
+        trustSignals.collected +
         controls.incidents +
         waitTimers +
         notificationSignals +
@@ -513,7 +529,8 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           corrections_expired: correctionsExpired,
           redivided_settlements: redivided,
           settlement_adjustments: settlementAdjustments,
-          trust_controls: controls.trust,
+          trust_controls: trustExpired.expired,
+          trust_signals: trustSignals.collected,
           incident_controls: controls.incidents,
           wait_timers: waitTimers,
           notification_signals: notificationSignals,

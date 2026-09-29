@@ -5,11 +5,7 @@ import {
   parseUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
-import {
-  AdminControlNotFoundError,
-  AdminControlPlaneService,
-  AdminControlStateError,
-} from '../src/admin-control-plane.js';
+import { AdminControlNotFoundError, AdminControlPlaneService } from '../src/admin-control-plane.js';
 import { check } from './verify-support.js';
 export async function verifyAdminControlPlane(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, application_name: 'admin-control-verifier' });
@@ -31,45 +27,8 @@ export async function verifyAdminControlPlane(connectionString: string): Promise
     );
     // Support cases moved to their own service and walk (11.3,
     // verify-support-cases.ts).
-    const proposed = await service.proposeTrust({
-      context: context(),
-      subject_kind: 'CUSTOMER',
-      subject_reference: 'SYNTH-CUSTOMER-RISK-0001',
-      scope_kind: 'GLOBAL',
-      scope_reference: 'SYNTH-GLOBAL-SCOPE-0001',
-      reason_code: 'RISK_REVIEW',
-      evidence_reference: 'SYNTH-EVIDENCE-RISK-0001',
-      policy_reference: 'SYNTH-POLICY-TRUST-0001',
-      effective_until: new Date(Date.now() + 86_400_000),
-      review_at: new Date(Date.now() + 3_600_000),
-    });
-    // Maker-checker: the admin who proposed the restriction cannot approve it.
-    // adminA proposed it (context() default); a self-approval must be refused.
-    let selfApprovalBlocked = false;
-    try {
-      await service.approveTrust({
-        context: context(adminA),
-        trust_restriction_case_id: parseUuidV7(String(proposed.trust_restriction_case_id)),
-        expected_version: 1,
-        reason_code: 'RISK_SELF_APPROVED',
-      });
-    } catch (error) {
-      selfApprovalBlocked = error instanceof AdminControlStateError;
-    }
-    check(selfApprovalBlocked, 'Trust restriction maker-checker allowed self-approval');
-    const active = await service.approveTrust({
-      context: context(adminB),
-      trust_restriction_case_id: parseUuidV7(String(proposed.trust_restriction_case_id)),
-      expected_version: 1,
-      reason_code: 'RISK_APPROVED',
-    });
-    await service.transitionTrust({
-      context: context(adminB),
-      trust_restriction_case_id: parseUuidV7(String(active.trust_restriction_case_id)),
-      expected_version: 2,
-      action: 'REVOKE',
-      reason_code: 'RISK_CLEARED',
-    });
+    // Trust restrictions moved to their own service and walk (11.4,
+    // verify-trust-review.ts).
     const incident = await service.setIncident({
       context: context(),
       control_key: 'DELIVERY_PAUSE',

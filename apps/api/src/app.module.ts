@@ -50,13 +50,25 @@ import {
 import { MoneyLifecycleController } from './money-lifecycle.controller.js';
 import { MONEY_LIFECYCLE } from './tokens.js';
 import { COMPLETE_MONEY_LIFECYCLE } from './tokens.js';
-import { ADMIN_CONTROL_PLANE, DOMAIN_SERVICES, ORDER_MONITOR, SUPPORT_CASES } from './tokens.js';
+import {
+  ADMIN_CONTROL_PLANE,
+  DOMAIN_SERVICES,
+  ORDER_MONITOR,
+  SUPPORT_CASES,
+  TRUST_REVIEW,
+} from './tokens.js';
 import { AdminControlPlaneController } from './admin-control-plane.controller.js';
 import { AdminOrderMonitorController } from './admin-order-monitor.controller.js';
 import {
   AdminSupportCaseController,
   CustomerSupportCaseController,
 } from './support-case.controller.js';
+import {
+  AdminTrustReviewController,
+  CustomerRestrictionController,
+  PartnerRestrictionController,
+  VendorRestrictionController,
+} from './trust-review.controller.js';
 import {
   CompleteMoneyAdminController,
   CustomerFinanceController,
@@ -170,6 +182,7 @@ const memberProviders: ReadonlyMap<symbol, (services: DomainServices) => unknown
   [ROUTING, (services) => services.routing],
   [SESSION_IDENTITY, (services) => services.sessions],
   [SUPPORT_CASES, (services) => services.supportCases],
+  [TRUST_REVIEW, (services) => services.trust],
   [VENDOR_FULFILMENT, (services) => services.fulfilment],
   [VENDOR_NETWORK, (services) => services.vendorNetwork],
   [VENDOR_ONBOARDING, (services) => services.onboarding],
@@ -230,6 +243,10 @@ const serviceProviders = [...memberProviders].map(([token, select]) => ({
     AdminControlPlaneController,
     AdminOrderMonitorController,
     AdminSupportCaseController,
+    AdminTrustReviewController,
+    PartnerRestrictionController,
+    CustomerRestrictionController,
+    VendorRestrictionController,
     LocaleController,
     AdminLocaleController,
     PartnerAvailabilityController,

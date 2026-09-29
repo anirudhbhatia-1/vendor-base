@@ -582,9 +582,10 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       `INSERT INTO marketplace.trust_restriction_cases
          (trust_restriction_case_id, subject_kind, subject_reference, scope_kind, scope_reference,
           lifecycle_state, reason_code, evidence_reference, policy_reference, proposed_by_user_id,
-          approved_by_user_id, effective_until, review_at, request_id, correlation_id)
-       VALUES ($1,'PARTNER',$2,'GLOBAL','global','ACTIVE','SAFETY_REVIEW','SYNTH-EVIDENCE-P9-1',
-               'SYNTH-POLICY-P9-1',$3,$4,$5,$5,$6,$6)`,
+          approved_by_user_id, effective_until, review_at, request_id, correlation_id,
+          decided_by_user_id, decision_reason_code, decided_at)
+       VALUES ($1,'PARTNER',$2,'GLOBAL','GLOBAL','ACTIVE','SAFETY_REVIEW','SYNTH-EVIDENCE-P9-1',
+               'SYNTH-POLICY-P9-1',$3,$4,$5,$5,$6,$6,$4,'SYNTH_APPROVED',$7)`,
       [
         globalRestrictionId,
         String(applicantId),
@@ -592,6 +593,7 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
         systemActorId,
         new Date(restrictionAt.getTime() + 7 * DAY),
         createUuidV7(),
+        restrictionAt,
       ],
     );
     const globallyRestricted = await lifecycle.onlineEligibility({
@@ -646,9 +648,10 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
       `INSERT INTO marketplace.trust_restriction_cases
          (trust_restriction_case_id, subject_kind, subject_reference, scope_kind, scope_reference,
           lifecycle_state, reason_code, evidence_reference, policy_reference, proposed_by_user_id,
-          approved_by_user_id, effective_until, review_at, request_id, correlation_id)
+          approved_by_user_id, effective_until, review_at, request_id, correlation_id,
+          decided_by_user_id, decision_reason_code, decided_at)
        VALUES ($1,'PARTNER',$2,'VENDOR_LOCATION',$3,'ACTIVE','STORE_COMPLAINT','SYNTH-EVIDENCE-P9-2',
-               'SYNTH-POLICY-P9-2',$4,$5,$6,$6,$7,$7)`,
+               'SYNTH-POLICY-P9-2',$4,$5,$6,$6,$7,$7,$5,'SYNTH_APPROVED',$8)`,
       [
         createUuidV7(),
         String(applicantId),
@@ -657,6 +660,7 @@ export async function verifyPartnerLifecycle(connectionString: string): Promise<
         systemActorId,
         new Date(restrictionAt.getTime() + 7 * DAY),
         createUuidV7(),
+        restrictionAt,
       ],
     );
     const scopedAt = new Date(restrictionAt.getTime() + 1_000);

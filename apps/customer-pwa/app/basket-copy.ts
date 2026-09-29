@@ -67,6 +67,13 @@ export function lineStaleSentence(reason: string | null, t: Translate): string |
  */
 export function quoteBlockedSentence(reason: string, t: Translate): string {
   switch (reason) {
+    // 11.4: the one reason the basket cannot repair; the account page says why
+    // and how to appeal.
+    case 'CUSTOMER_RESTRICTED':
+      return t(
+        'customer.checkout.blocked.customer_restricted',
+        'Your account cannot place new orders here for now. Your existing orders are not affected.',
+      );
     case 'STORE_UNAVAILABLE':
       return t(
         'customer.quote.blocked.store_unavailable',

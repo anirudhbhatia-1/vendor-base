@@ -41,6 +41,10 @@ test('a blocked quote group is explained by its reason, and a new reason is stil
   );
   assert.match(quoteBlockedSentence('LINE_UNAVAILABLE', fallback), /no longer supply an item/);
   assert.match(quoteBlockedSentence('MINIMUM_NOT_MET', fallback), /under the store’s minimum/);
+  assert.match(
+    quoteBlockedSentence('CUSTOMER_RESTRICTED', fallback),
+    /existing orders are not affected/,
+  );
   assert.match(quoteBlockedSentence('INVENTORY_UNAVAILABLE', fallback), /not have enough/);
   assert.match(quoteBlockedSentence('SOMETHING_NEW', fallback), /cannot take this order/);
 });

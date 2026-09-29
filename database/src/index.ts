@@ -58,3 +58,4 @@ export * from './order-monitor.js';
 export * from './admin-capabilities.js';
 export * from './support-cases.js';
 export * from './composition.js';
+export * from './trust-review.js';

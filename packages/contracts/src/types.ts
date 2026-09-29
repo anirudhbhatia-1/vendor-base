@@ -568,6 +568,20 @@ export type CustomerSupportCase = {
   messages?: SupportCaseMessage[];
 };
 
+/** A restriction on the person asking, with its reason, dates and appeal (11.4). */
+export type OwnRestriction = {
+  trust_restriction_case_id: string;
+  lifecycle_state: string;
+  in_force: boolean;
+  scope_kind: string;
+  reason_code: string;
+  policy_reference: string;
+  effective_until: string;
+  review_at: string;
+  appeal_state: string | null;
+  appealable: boolean;
+};
+
 // ─── Vendor Finance ───────────────────────────────────────────────────────────
 
 export type VendorSettlementEntry = {

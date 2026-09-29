@@ -4378,7 +4378,7 @@
       "name": "Integrity-review state",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "A partner sees their own restrictions with reason, scope, review date and policy reference",
+      "notes": "A partner sees the restrictions that affected them (in force, expired, revoked) with reason, scope, review date, policy and appeal state (audit run 76; proposals and rejected proposals are no longer shown)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4392,12 +4392,14 @@
       "files": [
         "apps/partner-pwa/app/profile-panel.tsx",
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/src/partner-lifecycle.ts"
+        "database/src/partner-lifecycle.ts",
+        "database/src/trust-review.ts",
+        "apps/api/src/trust-review.controller.ts"
       ],
       "phase_steps": ["11.4"],
       "verified_by": [
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-trust-review.ts"
       ]
     },
     {
@@ -4605,7 +4607,7 @@
       "name": "Restriction appeal",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "An in-force restriction shows its review date and the route to challenge it, quoting the case reference",
+      "notes": "An in-force restriction takes an appeal from the partner's standing page (audit run 76; until then the page told the partner to raise it elsewhere)",
       "owner": "partner-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4619,12 +4621,14 @@
       "files": [
         "apps/partner-pwa/app/profile-panel.tsx",
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/src/partner-lifecycle.ts"
+        "database/src/partner-lifecycle.ts",
+        "database/src/trust-review.ts",
+        "apps/api/src/trust-review.controller.ts"
       ],
       "phase_steps": ["11.4"],
       "verified_by": [
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-trust-review.ts"
       ]
     },
     {
@@ -4983,7 +4987,7 @@
       "name": "Appeals and manual exceptions",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Appeals are upheld or overturned against the original case version",
+      "notes": "Appeals (audit run 76): until run 76 no appeal existed despite this row; the customer, partner and shop owner or manager file one against a restriction in force, one open at a time, upheld or overturned by an independent approver; overturning revokes it",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -4996,12 +5000,14 @@
       },
       "files": [
         "apps/admin-pwa/app/verification-panel.tsx",
-        "apps/admin-pwa/app/admin-panels.spec.ts"
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/trust-review.ts",
+        "apps/api/src/trust-review.controller.ts"
       ],
       "phase_steps": ["11.4"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-trust-review.ts"
       ]
     },
     {
@@ -5655,7 +5661,7 @@
       "name": "Trust and safety review",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Trust restrictions are proposed, then approved by a second reviewer",
+      "notes": "Trust and safety review (audit run 76): signals from ratings, partner reports and support cases are collected and restrict nothing; a restriction names a real subject in a scope that subject allows, runs at most 90 days with a review within 30, and is approved by a second person only on corroborated signals or attached evidence (EXC-14)",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5666,11 +5672,16 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/trust-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/trust-panel.tsx",
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/trust-review.ts",
+        "apps/api/src/trust-review.controller.ts"
+      ],
       "phase_steps": ["11.4"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-trust-review.ts"
       ]
     },
     {
@@ -5678,7 +5689,7 @@
       "name": "Linked-risk investigation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Restrictions carry the linked evidence they rest on",
+      "notes": "Linked-risk investigation (audit run 76): a subject's dossier lists its signals and the evidence quality; the objects behind them are linked only for a reviewer allowed to open them (support cases need case_manage; ratings are never traced to a customer); the work under way is shown and left running",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5689,11 +5700,16 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/trust-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/trust-panel.tsx",
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/trust-review.ts",
+        "apps/api/src/trust-review.controller.ts"
+      ],
       "phase_steps": ["11.4"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-trust-review.ts"
       ]
     },
     {
@@ -5701,7 +5717,7 @@
       "name": "Restriction review and appeal",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Rejection and revocation close the appeal path",
+      "notes": "Restriction review and appeal (audit run 76): a review keeps (with the next review date), shortens or lifts; a lapsed restriction expires on its case history; an appeal by the person restricted is decided by someone who neither proposed nor approved it, against the case version it was filed on",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5712,11 +5728,16 @@
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/trust-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": [
+        "apps/admin-pwa/app/trust-panel.tsx",
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "database/src/trust-review.ts",
+        "apps/api/src/trust-review.controller.ts"
+      ],
       "phase_steps": ["11.4"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-trust-review.ts"
       ]
     },
     {
@@ -6893,21 +6914,27 @@
     {
       "id": "SEC-14",
       "name": "Appeal and human-review paths",
-      "status": "backend_only",
-      "target_stage": "7",
-      "notes": "Restrictions with review_at/appeal. No client UI",
+      "status": "complete_local_synthetic",
+      "target_stage": null,
+      "notes": "Appeal and human-review paths (audit run 76): the customer help page, the partner's standing page and the shop's insights page show a restriction's reason, policy, review date and end, and take an appeal",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
         "worker": false,
-        "pwa": false,
+        "pwa": true,
         "android": false,
         "tests": true
       },
       "phase_steps": ["11.4"],
-      "verified_by": ["database/scripts/verify-admin-control-plane.ts"]
+      "verified_by": [
+        "database/scripts/verify-trust-review.ts",
+        "apps/customer-pwa/app/customer-panels.spec.ts",
+        "apps/partner-pwa/app/partner-panels.spec.ts",
+        "apps/vendor-pwa/app/vendor-panels.spec.ts"
+      ],
+      "files": ["database/src/trust-review.ts", "apps/api/src/trust-review.controller.ts"]
     },
     {
       "id": "SEC-15",
@@ -8370,8 +8397,8 @@
     "total_features": 354,
     "launch_features": 309,
     "by_status": {
-      "backend_only": 13,
-      "complete_local_synthetic": 267,
+      "backend_only": 12,
+      "complete_local_synthetic": 268,
       "excluded": 15,
       "gated": 7,
       "later": 23,
@@ -8386,8 +8413,8 @@
       "Launch": 309
     },
     "launch_by_status": {
-      "backend_only": 13,
-      "complete_local_synthetic": 267,
+      "backend_only": 12,
+      "complete_local_synthetic": 268,
       "not_started": 10,
       "partial_workflow": 17,
       "ui_only": 2
