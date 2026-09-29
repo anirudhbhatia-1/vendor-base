@@ -35,4 +35,5 @@ export const ORDER_MONITOR = Symbol('ORDER_MONITOR');
 export const SUPPORT_CASES = Symbol('SUPPORT_CASES');
 export const TRUST_REVIEW = Symbol('TRUST_REVIEW');
 export const FINANCE_QUEUES = Symbol('FINANCE_QUEUES');
+export const CONFIGURATION_PUBLICATION = Symbol('CONFIGURATION_PUBLICATION');
 export const DOMAIN_SERVICES = Symbol('DOMAIN_SERVICES');

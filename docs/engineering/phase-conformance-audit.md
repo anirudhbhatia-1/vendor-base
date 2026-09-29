@@ -2785,6 +2785,89 @@ The walk found four defects of its own before any probe ran: the closers that cl
 
 **Step 11.5: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 78 (29 September 2026) — step 11.6, configuration approval and publication
+
+Five requirements. The lifecycle underneath them (draft, validate, approve, schedule, activate, supersede, roll back) was sound; what sat on top was not. Any key could be drafted with any value, including keys nothing reads. Validating checked nothing and recorded nothing. There was no preview and no idea of a protected change. A schedule could start in the past, which rewrote what had been in force. A wrong draft could not be turned down and a wrong schedule could not be called off. The shop accept deadline, the most operational of the timers, was fixed in code at three minutes. The console had three defects of its own. It offered templates for keys the server never reads (`pricing.delivery_fee`, `pricing.vendor_commission`, `finance.payout_policy`, `catalogue.taxonomy`). It sent the global scope as `GLOBAL` where the server stores `global`. It showed `record.version`, which the register has never returned. The workspace also kept a feature-flag toggle for `delivery.wait.enabled`, a flag nothing reads.
+
+What changed:
+- one migration (0120);
+- a configuration publication service with a catalogue of thirteen settings;
+- five new routes, with the others moved onto that service;
+- the accept deadline now read from configuration;
+- the console screen rebuilt and the dead toggle removed;
+- a new connected walk;
+- three unit tests;
+- twelve mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Edit zones, fees, commissions, earnings, timers, limits and operational rules as drafts | Drafts of **any key with any value**; the console's keys were not read by anything; the accept deadline was not configurable — P78-01. Zone boundaries stay vendor-managed (forward). |
+| 2 | Validate examples and affected-scope preview | **Validation checked nothing**; no examples, no preview, no report — P78-02. |
+| 3 | A protected change needs a different proposer and approver | Proposer ≠ approver held by role separation; **"protected" not modelled** — P78-03. |
+| 4 | Schedule activation | **A schedule in the past was accepted and rewrote history**; a schedule could not be cancelled — P78-04. |
+| 5 | Roll back through a new version | Held; rolling back to the version already in force was allowed, and a draft could not be rejected — P78-05. |
+
+**P78-01 — the catalogue.** Every setting an operator may change is catalogued with the category, the scopes it takes, the rule its value must meet, its default and whether it is protected. The rule is the one its consumer applies. The categories:
+- **Fees, commissions and earnings:** the financial policy, checked by the parser pricing uses.
+- **Timers:** shop accept deadline, offer, customer decision, wait to leave, offline-proof grace, support acknowledgement, order-alert escalation.
+- **Limits:** store groups per cart, saved addresses, the correction second-approval threshold.
+- **Operational rules:** offer radius, arrival radius.
+
+Offer, wait-to-leave and both radii can also be set for one zone; a zone draft names a zone that exists and is active. A key outside the catalogue, a scope the setting does not take and a value its consumer would ignore are each refused at the draft. Order creation now reads `vendor.accept_deadline_seconds`, still three minutes by default: the walk shows an order placed while a five-minute version is in force gets five minutes. The low-level lifecycle functions stay generic, since the verifiers seed arbitrary keys at fixed dates; the catalogue is enforced where operators work.
+
+**P78-02 — the preview.** `GET admin/configuration/:id/preview` (and the detail) shows:
+- the value in force for that scope, or the default;
+- the proposed value and the fields it changes;
+- worked examples before and after (fares, commission and partner offers for the financial policy; minutes for timers; what one person may post for the correction threshold);
+- the shops, online partners and open orders in scope, with the note that open orders keep the values they were given;
+- any issues.
+
+Validating refuses a version with issues, including a change to the value already in force. It stores the report on the version (0120 `validation_report`, written once, at validation, by the trigger's rule).
+
+**P78-03 — protected changes.** The financial policy, the correction threshold and the arrival radius are protected. Their approver must be independent of both the proposer and the validator. They take force at least an hour after they are scheduled. The proposer never approves any change. Role separation already stops one person holding both roles at once; the walk shows it also holds for someone who proposes as an operator, moves to an approver role, and then tries to approve their own proposal. That case is refused both here and by the lifecycle's own conflict check.
+
+**P78-04 — scheduling.** A schedule starts now or later, never in the past. A scheduled version can be cancelled (0120 `CANCELLED`, with who, when and why) and then never takes force.
+
+**P78-05 — rejection and rollback.** An approver rejects a draft, validated or approved version (0120 `REJECTED`). A proposer cannot, and a scheduled version is cancelled, not rejected. Rolling back to the version already in force is refused. Rolling back to an earlier one creates a new draft that goes through approval. The trigger allows only these two new exits and keeps a closed version closed.
+
+**The console.** The policy screen is built from the catalogue, grouped by category. It shows each setting's rule, the value in force and whether it is protected. It offers only the scopes the setting takes and takes a value in its type. A draft opens to its preview: in force against proposed, examples, scope and issues. It shows the recorded report, the schedule, the closing reason and the history, and offers only the steps its state allows. The default schedule clears the protected notice. The register reads `version_number` and the scope.
+
+**Mutation results.** Twelve probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| The scope check removed | *A setting was drafted in a scope it does not take* |
+| The value check removed | *A value its consumer would ignore was drafted* |
+| The zone existence check removed | *A setting was drafted for a zone that does not exist* |
+| Validation ignores issues | *A change to the value already in force was validated* |
+| An unchanged value not flagged | the same |
+| The proposer may approve | survived at first, because an operator lacks the approve capability; *Someone approved a change they had proposed before becoming an approver* after the walk gained the case |
+| A schedule in the past accepted | *A change was scheduled to start in the past* |
+| No protected notice | *A protected change was scheduled without an hour of notice* |
+| Rollback to the version in force | *The version in force was rolled back to itself* |
+| The order ignores the configured deadline | *An order placed while the change was in force did not get its deadline* |
+| The trigger allows reopening | *A closed version reopened, or a validation report was rewritten* |
+| The trigger allows the report to be rewritten | the same |
+
+The full ladder found one defect of mine before any probe ran. The first cut of 0120 gave `closed_by` a foreign key to `users`, unlike the other actor columns. An earlier walk's `TRUNCATE … users CASCADE` then emptied the whole configuration register, so checkout found no financial policy. `closed_by` is now a plain actor id like `proposed_by`. The rollback rehearsal now clears the walk's rejections, cancellations and reports, which 0120's down migration refuses to lose, before it reverts.
+
+**Forward findings.**
+- (zones) Zone boundaries are edited by the shop; an admin zone editor needs its own endpoint and capability (ADM-18).
+- (taxonomy) Categories are a fixed set; an editable taxonomy was never real and its template is gone (ADM-17 now partial).
+- (flags) No feature flag has a consumer; flags return when one does.
+- (notice) The hour's notice is shown in the console, not yet sent to the people a change touches.
+- (11.9) Configuration steps are on the operational audit.
+
+**Verification.**
+- `pnpm db:verify` exit 0 locally: 121 migration files (0000–0120), the full ladder with rollback rehearsal, and conservation after every module (44 checks).
+- `configuration_publication` makes 25 assertions (new); the versioned-configuration, checkout and cart walks pass unchanged.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm security:secrets` and `pnpm features:check` exit 0.
+- `pnpm test:unit`: 651 pass, 0 fail.
+- `pnpm test:integration` exit 0 on a migrated test stack.
+- All twelve probes killed on rebuilt databases.
+
+**Step 11.6: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

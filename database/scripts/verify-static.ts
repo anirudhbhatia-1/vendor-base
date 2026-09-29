@@ -192,6 +192,7 @@ assert(
       '0117_support_case_lifecycle',
       '0118_trust_review',
       '0119_finance_queues',
+      '0120_configuration_publication',
     ]),
   'Unexpected reviewed migrations',
 );

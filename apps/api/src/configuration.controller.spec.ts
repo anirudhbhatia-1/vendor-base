@@ -25,3 +25,18 @@ test('configuration lifecycle preserves maker/checker capabilities', () => {
   ) as AuthorizationRequirement;
   assert.equal(approval.capability, 'admin.configuration.approve');
 });
+
+test('rejecting is the approver side; cancelling a schedule and reading are not (11.6)', () => {
+  const capability = (method: keyof ConfigurationController) =>
+    (
+      Reflect.getMetadata(
+        AUTHORIZATION_REQUIREMENT,
+        ConfigurationController.prototype[method],
+      ) as AuthorizationRequirement
+    ).capability;
+  assert.equal(capability('reject'), 'admin.configuration.approve');
+  assert.equal(capability('cancel'), 'admin.configuration.propose');
+  for (const method of ['catalogue', 'detail', 'preview'] as const) {
+    assert.equal(capability(method), 'admin.configuration.read', method);
+  }
+});

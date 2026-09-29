@@ -4,110 +4,201 @@ import { useCallback, useEffect, useState } from 'react';
 import { adminRequest } from './authenticated-api';
 
 /**
- * Versioned operating policies (ADM-17, ADM-19, ADM-20, ADM-21).
+ * Configuration approval and publication (11.6; ADM-17, ADM-19, ADM-20,
+ * ADM-21).
  *
- * Every fee, commission, payout rule and taxonomy is a versioned configuration
- * document under maker-checker control, and every order keeps the exact version
- * it was priced against (MKT-10). The API for this existed from the start; the
- * console offered only a hard-coded feature-flag toggle, so none of these
- * policies could actually be set by an operator.
+ * Every setting an operator may change comes from the server's catalogue --
+ * fees, commissions and earnings, timers, limits and operational rules --
+ * with the rule its value must meet and whether it is protected. A draft
+ * shows the value in force, the one proposed, worked examples and the scope
+ * it touches; validating records that report; someone other than the
+ * proposer approves; it is scheduled for now or later (a protected change an
+ * hour ahead) and can be cancelled before it takes force; and it is undone by
+ * rolling back to an earlier version, which is itself a new version.
+ *
+ * Until audit run 78 this screen offered free-text keys the server did not
+ * read (`pricing.delivery_fee`, `finance.payout_policy`), sent the scope as
+ * 'GLOBAL' where the server stores 'global', and showed `record.version`,
+ * which the register has never returned.
  */
-type ConfigurationRecord = {
+export type CatalogueSetting = {
+  readonly key: string;
+  readonly category: 'FEES_COMMISSIONS_EARNINGS' | 'TIMERS' | 'LIMITS' | 'OPERATIONAL_RULES';
+  readonly title: string;
+  readonly protected: boolean;
+  readonly value_type: 'INTEGER' | 'JSON';
+  readonly scopes: readonly ('GLOBAL' | 'ZONE')[];
+  readonly rule: string;
+  readonly default_value: unknown;
+  readonly global_value: unknown;
+};
+
+type RegisterRow = {
   readonly configuration_version_id: string;
   readonly configuration_key: string;
-  readonly configuration_kind: string;
   readonly status: string;
-  readonly version: number;
-  readonly scope_kind?: string;
-  readonly scope_reference?: string;
+  readonly version_number: number;
+  readonly scope: { readonly kind: string; readonly reference: string };
 };
 
-type PolicyTemplate = {
-  readonly id: string;
-  readonly label: string;
-  readonly catalogue: string;
-  readonly key: string;
-  readonly kind: 'SETTING' | 'FEATURE_FLAG';
-  readonly value: string;
+type Detail = {
+  readonly configuration_version_id: string;
+  readonly configuration_key: string;
+  readonly version_number: number;
+  readonly status: string;
+  readonly scope: { readonly kind: string; readonly reference: string };
+  readonly effective_from: string | null;
+  readonly effective_until: string | null;
+  readonly closing_reason_code: string | null;
+  readonly rollback_of_version_id: string | null;
+  readonly validation_report: unknown;
+  readonly preview: {
+    readonly title: string;
+    readonly protected: boolean;
+    readonly rule: string | null;
+    readonly in_force: { readonly value: unknown; readonly version_number: number | null };
+    readonly proposed: unknown;
+    readonly changed_fields: readonly string[];
+    readonly examples: readonly { case: string; before: string; after: string }[];
+    readonly affected_scope: {
+      readonly vendor_locations: number;
+      readonly open_orders: number;
+      readonly partners_online: number;
+      readonly note: string;
+    };
+    readonly issues: readonly string[];
+  };
+  readonly history: readonly {
+    readonly to_status: string;
+    readonly reason_code: string;
+    readonly occurred_at: string;
+  }[];
 };
 
-/**
- * Starting points, not a closed list: the key and the document body are both
- * editable. They exist so an operator does not have to invent the shape of a
- * fee table from an empty box.
- */
-const templates: readonly PolicyTemplate[] = [
-  {
-    id: 'taxonomy',
-    label: 'Category taxonomy',
-    catalogue: 'ADM-17',
-    key: 'catalogue.taxonomy',
-    kind: 'SETTING',
-    value: JSON.stringify(
-      {
-        categories: [
-          { key: 'grocery', label_en: 'Grocery', label_hi: 'किराना' },
-          { key: 'vegetables', label_en: 'Vegetables', label_hi: 'सब्ज़ी' },
-        ],
-      },
-      null,
-      2,
-    ),
-  },
-  {
-    id: 'delivery_fee',
-    label: 'Delivery fee',
-    catalogue: 'ADM-19',
-    key: 'pricing.delivery_fee',
-    kind: 'SETTING',
-    value: JSON.stringify(
-      { base_minor: 2500, per_km_minor: 800, free_above_minor: 40000, currency: 'INR' },
-      null,
-      2,
-    ),
-  },
-  {
-    id: 'commission',
-    label: 'Vendor fee and commission',
-    catalogue: 'ADM-20',
-    key: 'pricing.vendor_commission',
-    kind: 'SETTING',
-    value: JSON.stringify({ commission_basis_points: 1200, platform_fee_minor: 500 }, null, 2),
-  },
-  {
-    id: 'payout',
-    label: 'Payout and earning policy',
-    catalogue: 'ADM-21',
-    key: 'finance.payout_policy',
-    kind: 'SETTING',
-    value: JSON.stringify(
-      { settlement_cadence: 'DAILY', hold_days: 2, partner_base_minor: 3000 },
-      null,
-      2,
-    ),
-  },
-];
+export type PolicyAction = 'validate' | 'approve' | 'reject' | 'schedule' | 'cancel' | 'rollback';
+
+const CATEGORY_LABELS: Record<CatalogueSetting['category'], string> = {
+  FEES_COMMISSIONS_EARNINGS: 'Fees, commissions and earnings',
+  TIMERS: 'Timers',
+  LIMITS: 'Limits',
+  OPERATIONAL_RULES: 'Operational rules',
+};
+
+/** A protected change is announced this far ahead of taking force. */
+export const PROTECTED_NOTICE_MS = 60 * 60_000;
+
+/** What can be done to a version in each state; the server refuses the rest. */
+export function actionsFor(status: string): readonly PolicyAction[] {
+  switch (status) {
+    case 'DRAFT':
+      return ['validate', 'reject'];
+    case 'VALIDATED':
+      return ['approve', 'reject'];
+    case 'APPROVED':
+      return ['schedule', 'reject'];
+    case 'SCHEDULED':
+      return ['cancel'];
+    case 'ACTIVE':
+    case 'SUPERSEDED':
+      return ['rollback'];
+    default:
+      return [];
+  }
+}
+
+/** Reads the value an operator typed, in the shape the setting takes. */
+export function parseDraftValue(
+  setting: Pick<CatalogueSetting, 'value_type'>,
+  text: string,
+):
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly message: string } {
+  if (setting.value_type === 'INTEGER') {
+    const trimmed = text.trim();
+    return /^-?\d+$/.test(trimmed)
+      ? { ok: true, value: Number(trimmed) }
+      : { ok: false, message: 'Enter a whole number.' };
+  }
+  try {
+    return { ok: true, value: JSON.parse(text) as unknown };
+  } catch {
+    return { ok: false, message: 'The value must be valid JSON.' };
+  }
+}
+
+/** The draft request: the server stores the global scope as 'global'. */
+export function draftBody(
+  setting: Pick<CatalogueSetting, 'key'>,
+  scopeKind: 'GLOBAL' | 'ZONE',
+  zoneId: string,
+  value: unknown,
+  reason: string,
+) {
+  return {
+    configuration_key: setting.key,
+    configuration_value: value,
+    scope_kind: scopeKind,
+    scope_reference: scopeKind === 'GLOBAL' ? 'global' : zoneId.trim(),
+    reason_code: reasonCode(reason),
+  };
+}
+
+/** A reason as the server records it: upper case, words joined by underscores. */
+export function reasonCode(text: string): string {
+  return text
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+/** The earliest start the server accepts, so the default schedule is never refused. */
+export function earliestStart(isProtected: boolean, nowMs: number): Date {
+  return new Date(nowMs + (isProtected ? PROTECTED_NOTICE_MS + 60_000 : 60_000));
+}
+
+export function valueText(value: unknown): string {
+  if (value === null || value === undefined) return 'unset';
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+}
+
+function editableText(setting: CatalogueSetting): string {
+  const current = setting.global_value ?? setting.default_value;
+  return setting.value_type === 'JSON' ? JSON.stringify(current, null, 2) : valueText(current);
+}
 
 export function PolicyPanel() {
-  const [records, setRecords] = useState<ConfigurationRecord[]>([]);
-  const [templateId, setTemplateId] = useState(templates[0]?.id ?? 'taxonomy');
-  const [configurationKey, setConfigurationKey] = useState(templates[0]?.key ?? '');
-  const [documentBody, setDocumentBody] = useState(templates[0]?.value ?? '{}');
-  const [scopeReference, setScopeReference] = useState('GLOBAL');
-  const [versionId, setVersionId] = useState('');
+  const [settings, setSettings] = useState<CatalogueSetting[]>([]);
+  const [records, setRecords] = useState<RegisterRow[]>([]);
+  const [settingKey, setSettingKey] = useState('');
+  const [scopeKind, setScopeKind] = useState<'GLOBAL' | 'ZONE'>('GLOBAL');
+  const [zoneId, setZoneId] = useState('');
+  const [valueBody, setValueBody] = useState('');
+  const [reason, setReason] = useState('');
   const [effectiveFrom, setEffectiveFrom] = useState('');
-  const [message, setMessage] = useState('Load the policy register to begin.');
+  const [effectiveUntil, setEffectiveUntil] = useState('');
+  const [detail, setDetail] = useState<Detail | null>(null);
+  const [message, setMessage] = useState('Loading the configuration catalogue.');
+
+  const setting = settings.find((candidate) => candidate.key === settingKey);
 
   const load = useCallback(async () => {
     try {
-      const result = await adminRequest<{ configurations?: ConfigurationRecord[] }>(
-        'admin/configuration',
-      );
-      const list = Array.isArray(result) ? result : (result.configurations ?? []);
-      setRecords(list as ConfigurationRecord[]);
-      setMessage(`Policy register: ${list.length} versions.`);
+      const [catalogue, register] = await Promise.all([
+        adminRequest<{ settings: CatalogueSetting[] }>('admin/configuration/catalogue'),
+        adminRequest<RegisterRow[]>('admin/configuration'),
+      ]);
+      setSettings(catalogue.settings);
+      setRecords(Array.isArray(register) ? register : []);
+      setSettingKey((current) => {
+        if (current) return current;
+        const first = catalogue.settings[0];
+        if (first) setValueBody(editableText(first));
+        return first?.key ?? '';
+      });
+      setMessage(`${catalogue.settings.length} settings; ${register.length} versions on record.`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The policy register failed to load.');
+      setMessage(error instanceof Error ? error.message : 'The catalogue failed to load.');
     }
   }, []);
 
@@ -115,156 +206,294 @@ export function PolicyPanel() {
     void load();
   }, [load]);
 
-  function selectTemplate(id: string) {
-    const template = templates.find((candidate) => candidate.id === id);
-    if (!template) return;
-    setTemplateId(id);
-    setConfigurationKey(template.key);
-    setDocumentBody(template.value);
+  const open = useCallback(async (id: string) => {
+    try {
+      setDetail(await adminRequest<Detail>(`admin/configuration/${id}`));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'The version failed to load.');
+    }
+  }, []);
+
+  function chooseSetting(key: string) {
+    const next = settings.find((candidate) => candidate.key === key);
+    if (!next) return;
+    setSettingKey(key);
+    setScopeKind('GLOBAL');
+    setValueBody(editableText(next));
   }
 
-  const template = templates.find((candidate) => candidate.id === templateId);
-
   async function draft() {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(documentBody);
-    } catch {
-      setMessage('The policy document must be valid JSON.');
+    if (!setting) return;
+    const parsed = parseDraftValue(setting, valueBody);
+    if (!parsed.ok) {
+      setMessage(parsed.message);
+      return;
+    }
+    if (!reasonCode(reason)) {
+      setMessage('Say why this change is proposed.');
       return;
     }
     try {
-      const result = await adminRequest<{ configuration_version_id: string; status: string }>(
+      const created = await adminRequest<{ configuration_version_id: string }>(
         'admin/configuration/drafts',
         {
           method: 'POST',
-          body: JSON.stringify({
-            configuration_key: configurationKey,
-            configuration_kind: template?.kind ?? 'SETTING',
-            configuration_value: parsed,
-            reason_code: 'ADMIN_POLICY_CHANGE',
-            scope_kind: 'GLOBAL',
-            scope_reference: scopeReference,
-          }),
+          body: JSON.stringify(draftBody(setting, scopeKind, zoneId, parsed.value, reason)),
         },
       );
-      setVersionId(result.configuration_version_id);
-      setMessage(`Draft ${result.configuration_version_id} is ${result.status}.`);
-      await load();
+      setMessage('Draft created. Check the preview, then validate it.');
+      await Promise.all([open(created.configuration_version_id), load()]);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The draft could not be created.');
+      setMessage(error instanceof Error ? error.message : 'The draft was refused.');
     }
   }
 
-  async function transition(action: 'validate' | 'approve' | 'schedule' | 'rollback') {
-    if (!versionId) {
-      setMessage('Create or select a policy version first.');
-      return;
-    }
+  async function act(action: PolicyAction) {
+    if (!detail) return;
+    const why = reasonCode(reason) || `ADMIN_POLICY_${action.toUpperCase()}`;
+    const from = effectiveFrom
+      ? new Date(effectiveFrom)
+      : earliestStart(detail.preview.protected, Date.now());
     try {
-      const result = await adminRequest<{ status?: string }>(
-        `admin/configuration/${versionId}/${action}`,
+      const result = await adminRequest<{ configuration_version_id?: string }>(
+        `admin/configuration/${detail.configuration_version_id}/${action}`,
         {
           method: 'POST',
           body: JSON.stringify({
-            reason_code: `ADMIN_POLICY_${action.toUpperCase()}`,
+            reason_code: why,
             ...(action === 'schedule'
               ? {
-                  effective_from: effectiveFrom
-                    ? new Date(effectiveFrom).toISOString()
-                    : new Date(Date.now() + 60_000).toISOString(),
+                  effective_from: from.toISOString(),
+                  ...(effectiveUntil
+                    ? { effective_until: new Date(effectiveUntil).toISOString() }
+                    : {}),
                 }
               : {}),
           }),
         },
       );
-      setMessage(`${action} recorded${result.status ? `: ${result.status}` : ''}.`);
-      await load();
+      setMessage(
+        action === 'rollback'
+          ? 'The earlier value is a new draft; it goes through approval like any change.'
+          : `${action} recorded.`,
+      );
+      await Promise.all([
+        open(
+          action === 'rollback' && result.configuration_version_id
+            ? result.configuration_version_id
+            : detail.configuration_version_id,
+        ),
+        load(),
+      ]);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : `The ${action} step failed.`);
+      setMessage(error instanceof Error ? error.message : `The ${action} step was refused.`);
     }
   }
+
+  const categories = Object.keys(CATEGORY_LABELS) as CatalogueSetting['category'][];
 
   return (
     <section className="catalogue-oversight" id="policy">
       <div>
         <p className="eyebrow">OPERATING POLICY</p>
-        <h2>Fees, commissions, payouts and taxonomy</h2>
+        <h2>Fees, commissions, earnings, timers, limits and rules</h2>
         <p>
-          Each change is a new version under maker-checker approval. Orders keep the version they
-          were priced against, so a change never rewrites a settled order.
+          Each change is a new version: previewed, validated, approved by someone else, and
+          scheduled. Orders keep the values they were given, so a change never rewrites one in
+          flight.
         </p>
       </div>
       <p aria-live="polite">{message}</p>
       <div className="catalogue-flag">
         <label>
-          Policy
-          <select value={templateId} onChange={(event) => selectTemplate(event.target.value)}>
-            {templates.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                {candidate.label} ({candidate.catalogue})
+          Setting
+          <select value={settingKey} onChange={(event) => chooseSetting(event.target.value)}>
+            {categories.map((category) => (
+              <optgroup key={category} label={CATEGORY_LABELS[category]}>
+                {settings
+                  .filter((candidate) => candidate.category === category)
+                  .map((candidate) => (
+                    <option key={candidate.key} value={candidate.key}>
+                      {candidate.title}
+                      {candidate.protected ? ' (protected)' : ''}
+                    </option>
+                  ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+        {setting && (
+          <small>
+            {setting.rule} In force: {valueText(setting.global_value ?? setting.default_value)}
+            {setting.global_value === null ? ' (default)' : ''}.
+            {setting.protected
+              ? ' Protected: approved by someone independent, and announced an hour ahead.'
+              : ''}
+          </small>
+        )}
+        <label>
+          Scope
+          <select
+            value={scopeKind}
+            onChange={(event) => setScopeKind(event.target.value as 'GLOBAL' | 'ZONE')}
+          >
+            {(setting?.scopes ?? ['GLOBAL']).map((kind) => (
+              <option key={kind} value={kind}>
+                {kind === 'GLOBAL' ? 'Everywhere' : 'One service zone'}
               </option>
             ))}
           </select>
         </label>
+        {scopeKind === 'ZONE' && (
+          <label>
+            Service zone id
+            <input value={zoneId} onChange={(event) => setZoneId(event.target.value)} />
+          </label>
+        )}
         <label>
-          Configuration key
-          <input value={configurationKey} onChange={(e) => setConfigurationKey(e.target.value)} />
+          Value
+          {setting?.value_type === 'JSON' ? (
+            <textarea
+              rows={8}
+              value={valueBody}
+              onChange={(event) => setValueBody(event.target.value)}
+              spellCheck={false}
+            />
+          ) : (
+            <input
+              inputMode="numeric"
+              value={valueBody}
+              onChange={(event) => setValueBody(event.target.value)}
+            />
+          )}
         </label>
         <label>
-          Scope reference
-          <input value={scopeReference} onChange={(e) => setScopeReference(e.target.value)} />
-        </label>
-        <label>
-          Document
-          <textarea
-            rows={10}
-            value={documentBody}
-            onChange={(e) => setDocumentBody(e.target.value)}
-            spellCheck={false}
-          />
-        </label>
-        <label>
-          Effective from
+          Reason
           <input
-            type="datetime-local"
-            value={effectiveFrom}
-            onChange={(e) => setEffectiveFrom(e.target.value)}
+            placeholder="e.g. slower shops need time"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
           />
         </label>
         <div className="actions">
-          <button type="button" onClick={() => void draft()}>
+          <button type="button" disabled={!setting} onClick={() => void draft()}>
             Create draft
           </button>
-          <button type="button" disabled={!versionId} onClick={() => void transition('validate')}>
-            Validate
-          </button>
-          <button type="button" disabled={!versionId} onClick={() => void transition('approve')}>
-            Approve
-          </button>
-          <button type="button" disabled={!versionId} onClick={() => void transition('schedule')}>
-            Schedule
-          </button>
-          <button type="button" disabled={!versionId} onClick={() => void transition('rollback')}>
-            Roll back
-          </button>
           <button type="button" onClick={() => void load()}>
-            Refresh register
+            Refresh
           </button>
         </div>
-        {versionId && <small>Working version: {versionId}</small>}
       </div>
+
+      {detail && (
+        <article className="catalogue-flag" aria-label="Configuration version">
+          <p className="eyebrow">
+            {detail.status} · v{detail.version_number} · {detail.scope.kind.toLowerCase()}{' '}
+            {detail.scope.kind === 'GLOBAL' ? '' : detail.scope.reference}
+          </p>
+          <h3>{detail.preview.title}</h3>
+          <p>
+            In force: {valueText(detail.preview.in_force.value)}
+            {detail.preview.in_force.version_number === null
+              ? ' (default)'
+              : ` (v${detail.preview.in_force.version_number})`}{' '}
+            → proposed: {valueText(detail.preview.proposed)}
+            {detail.preview.changed_fields.length > 0 &&
+              ` · changes ${detail.preview.changed_fields.join(', ')}`}
+          </p>
+          {detail.preview.examples.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>Case</th>
+                  <th>Now</th>
+                  <th>After</th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.preview.examples.map((example) => (
+                  <tr key={example.case}>
+                    <td>{example.case}</td>
+                    <td>{example.before}</td>
+                    <td>{example.after}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p>
+            Touches {detail.preview.affected_scope.vendor_locations} shops,{' '}
+            {detail.preview.affected_scope.partners_online} partners online;{' '}
+            {detail.preview.affected_scope.open_orders} open orders.{' '}
+            {detail.preview.affected_scope.note}
+          </p>
+          {detail.preview.issues.length > 0 && detail.status === 'DRAFT' && (
+            <ul role="alert">
+              {detail.preview.issues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          )}
+          {detail.validation_report !== null && <small>Validation report recorded.</small>}
+          {detail.effective_from && (
+            <small>
+              Takes force {new Date(detail.effective_from).toLocaleString()}
+              {detail.effective_until
+                ? ` until ${new Date(detail.effective_until).toLocaleString()}`
+                : ''}
+              .
+            </small>
+          )}
+          {detail.closing_reason_code && <small>Closed: {detail.closing_reason_code}</small>}
+          {detail.status === 'APPROVED' && (
+            <>
+              <label>
+                Takes force from
+                <input
+                  type="datetime-local"
+                  value={effectiveFrom}
+                  onChange={(event) => setEffectiveFrom(event.target.value)}
+                />
+              </label>
+              <label>
+                Until (optional)
+                <input
+                  type="datetime-local"
+                  value={effectiveUntil}
+                  onChange={(event) => setEffectiveUntil(event.target.value)}
+                />
+              </label>
+            </>
+          )}
+          <div className="actions">
+            {actionsFor(detail.status).map((action) => (
+              <button key={action} type="button" onClick={() => void act(action)}>
+                {action === 'rollback' ? 'Roll back to this version' : action}
+              </button>
+            ))}
+          </div>
+          <ol>
+            {detail.history.map((event) => (
+              <li key={`${event.to_status}-${event.occurred_at}`}>
+                {event.to_status} · {event.reason_code} ·{' '}
+                {new Date(event.occurred_at).toLocaleString()}
+              </li>
+            ))}
+          </ol>
+        </article>
+      )}
+
       <div className="admin-card-grid" style={{ marginTop: '1rem' }}>
-        {records.length === 0 && <p>No policy versions recorded yet.</p>}
+        {records.length === 0 && <p>No configuration versions recorded yet.</p>}
         {records.map((record) => (
           <article key={record.configuration_version_id}>
             <span>{record.status}</span>
             <strong>{record.configuration_key}</strong>
             <p>
-              v{record.version} · {record.configuration_kind}
+              v{record.version_number} · {record.scope.kind.toLowerCase()}
             </p>
-            <button type="button" onClick={() => setVersionId(record.configuration_version_id)}>
-              Work on this version
+            <button type="button" onClick={() => void open(record.configuration_version_id)}>
+              Open
             </button>
           </article>
         ))}

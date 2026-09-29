@@ -57,6 +57,7 @@ import {
   SUPPORT_CASES,
   TRUST_REVIEW,
   FINANCE_QUEUES,
+  CONFIGURATION_PUBLICATION,
 } from './tokens.js';
 import { AdminControlPlaneController } from './admin-control-plane.controller.js';
 import { AdminOrderMonitorController } from './admin-order-monitor.controller.js';
@@ -186,6 +187,7 @@ const memberProviders: ReadonlyMap<symbol, (services: DomainServices) => unknown
   [SUPPORT_CASES, (services) => services.supportCases],
   [TRUST_REVIEW, (services) => services.trust],
   [FINANCE_QUEUES, (services) => services.financeQueues],
+  [CONFIGURATION_PUBLICATION, (services) => services.configurationPublication],
   [VENDOR_FULFILMENT, (services) => services.fulfilment],
   [VENDOR_NETWORK, (services) => services.vendorNetwork],
   [VENDOR_ONBOARDING, (services) => services.onboarding],

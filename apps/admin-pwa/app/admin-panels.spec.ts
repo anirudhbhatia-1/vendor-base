@@ -9,6 +9,14 @@ import { interventionBody, timeInState } from './order-intervention-panel.js';
 import { supportActionBody, turnSentence, type ActionForm } from './support-panel.js';
 import { decisionBody, proposalBody, type ProposalForm } from './trust-panel.js';
 import { ageText, exceptionActionBody, valuesText } from './finance-exceptions-queue.js';
+import {
+  actionsFor,
+  draftBody,
+  earliestStart,
+  parseDraftValue,
+  PROTECTED_NOTICE_MS,
+  reasonCode,
+} from './policy-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -25,7 +33,16 @@ function panel(file: string): string {
 }
 
 const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
-  ['policy-panel.tsx', ['admin/configuration', 'admin/configuration/drafts']],
+  [
+    'policy-panel.tsx',
+    [
+      'admin/configuration/catalogue',
+      'admin/configuration',
+      'admin/configuration/drafts',
+      'admin/configuration/${id}',
+      'admin/configuration/${detail.configuration_version_id}/${action}',
+    ],
+  ],
   [
     'incidents-panel.tsx',
     ['admin/control/incidents', 'admin/control/maintenance/expire', 'admin/control/dashboard'],
@@ -426,4 +443,42 @@ test('each finance step carries the version on screen and only its own fields (1
     false,
   );
   assert.equal(exceptionActionBody('NOTE', 'SECOND_LOOK', 2, fields).note, 'why');
+});
+
+test('the policy screen drafts catalogued settings in the shape the server stores (11.6)', () => {
+  // The global scope is stored as 'global'; the screen sent 'GLOBAL'.
+  assert.deepEqual(
+    draftBody(
+      { key: 'vendor.accept_deadline_seconds' },
+      'GLOBAL',
+      'x',
+      300,
+      'slower shops need time',
+    ),
+    {
+      configuration_key: 'vendor.accept_deadline_seconds',
+      configuration_value: 300,
+      scope_kind: 'GLOBAL',
+      scope_reference: 'global',
+      reason_code: 'SLOWER_SHOPS_NEED_TIME',
+    },
+  );
+  assert.equal(draftBody({ key: 'k' }, 'ZONE', ' zone-1 ', 1, 'r').scope_reference, 'zone-1');
+  assert.deepEqual(parseDraftValue({ value_type: 'INTEGER' }, ' 300 '), { ok: true, value: 300 });
+  assert.equal(parseDraftValue({ value_type: 'INTEGER' }, '3.5').ok, false);
+  assert.equal(parseDraftValue({ value_type: 'JSON' }, '{').ok, false);
+  assert.equal(reasonCode('  --  '), '');
+  // A protected change's default start clears the server's hour of notice.
+  const now = Date.UTC(2026, 8, 29);
+  assert.ok(earliestStart(true, now).getTime() > now + PROTECTED_NOTICE_MS);
+  assert.ok(earliestStart(false, now).getTime() > now);
+});
+
+test('each version offers only the steps its state allows (11.6)', () => {
+  assert.deepEqual(actionsFor('DRAFT'), ['validate', 'reject']);
+  assert.deepEqual(actionsFor('APPROVED'), ['schedule', 'reject']);
+  assert.deepEqual(actionsFor('SCHEDULED'), ['cancel']);
+  assert.deepEqual(actionsFor('SUPERSEDED'), ['rollback']);
+  assert.deepEqual(actionsFor('REJECTED'), []);
+  assert.deepEqual(actionsFor('CANCELLED'), []);
 });

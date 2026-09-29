@@ -50,6 +50,7 @@ import { verifyOrderMonitor } from './verify-order-monitor.js';
 import { verifySupportCases } from './verify-support-cases.js';
 import { verifyTrustReview } from './verify-trust-review.js';
 import { verifyFinanceQueues } from './verify-finance-queues.js';
+import { verifyConfigurationPublication } from './verify-configuration-publication.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -826,6 +827,9 @@ await withDatabaseClient(config, async (client) => {
   await measure('support_cases', () => verifySupportCases(config.connectionString));
   await measure('trust_review', () => verifyTrustReview(config.connectionString));
   await measure('finance_queues', () => verifyFinanceQueues(config.connectionString));
+  await measure('configuration_publication', () =>
+    verifyConfigurationPublication(config.connectionString),
+  );
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);
@@ -895,6 +899,20 @@ await withDatabaseClient(config, async (client) => {
     marketplace.vendor_location_operating_hours, marketplace.vendor_locations,
     marketplace.vendors CASCADE
       `);
+
+  // Configuration versions are append-only, and the seeded ones outlive this
+  // rehearsal, so only the publication walk's rejections, cancellations and
+  // validation reports -- which 0120 refuses to roll back over -- are cleared.
+  await client.query(`BEGIN;
+    SET LOCAL session_replication_role = replica;
+    DELETE FROM marketplace.configuration_lifecycle_events e
+     USING marketplace.configuration_versions v
+     WHERE e.configuration_version_id = v.configuration_version_id
+       AND v.status IN ('REJECTED', 'CANCELLED');
+    DELETE FROM marketplace.configuration_versions WHERE status IN ('REJECTED', 'CANCELLED');
+    UPDATE marketplace.configuration_versions SET validation_report = NULL
+     WHERE validation_report IS NOT NULL;
+    COMMIT;`);
 
   await revertThrough(client, '0015_money_lifecycle');
   const moneyTablesAfterRollback = await client.query<{

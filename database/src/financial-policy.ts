@@ -40,6 +40,11 @@ const NUMERIC_FIELDS = [
   'wait_per_completed_minute_minor',
 ] as const;
 
+/** Reads a proposed policy the way pricing will (11.6): throws what it would refuse. */
+export function checkFinancialPolicy(value: unknown): FinancialPolicy {
+  return readPolicy(value, 'draft');
+}
+
 function readPolicy(value: unknown, reference: string): FinancialPolicy {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new FinancialPolicyUnavailableError(`Financial policy ${reference} is not an object`);

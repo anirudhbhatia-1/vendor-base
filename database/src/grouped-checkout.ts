@@ -23,6 +23,7 @@ import {
 } from './money-policy.js';
 import { transaction as tx } from './transaction.js';
 import { DEFAULT_ACCEPT_DEADLINE_SECONDS } from './vendor-fulfilment.js';
+import { resolveConfiguration } from './versioned-configuration.js';
 
 /**
  * Prepaid methods the platform accepts.
@@ -1586,7 +1587,21 @@ export class GroupedCheckoutService {
     // Nothing set it before: the fulfilment service had a method to issue
     // deadlines that only the verifier called, so every real order sat PLACED
     // with no countdown and the worker's expiry sweep never found a row.
-    const acceptBy = new Date(input.now.getTime() + DEFAULT_ACCEPT_DEADLINE_SECONDS * 1000);
+    // How long, from `vendor.accept_deadline_seconds` (11.6: a versioned
+    // setting, 60-1800), else the default three minutes.
+    const configured = await resolveConfiguration(client, {
+      configuration_key: 'vendor.accept_deadline_seconds',
+      configuration_kind: 'SETTING',
+      at: input.now,
+    });
+    const acceptSeconds =
+      typeof configured?.configuration_value === 'number' &&
+      Number.isSafeInteger(configured.configuration_value) &&
+      configured.configuration_value >= 60 &&
+      configured.configuration_value <= 1800
+        ? configured.configuration_value
+        : DEFAULT_ACCEPT_DEADLINE_SECONDS;
+    const acceptBy = new Date(input.now.getTime() + acceptSeconds * 1000);
     for (const group of groups.rows) {
       const orderId = createUuidV7();
       const orderRef = reference('ORDER', orderId);

@@ -260,7 +260,7 @@
       "name": "Versioned operating policies",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "ConfigurationAdminService with full lifecycle. Audit run 41: resolving as of a past instant now finds the SUPERSEDED version then in force; before that the first change to a key made every earlier order unsettleable.",
+      "notes": "ConfigurationAdminService with full lifecycle. Audit run 41: resolving as of a past instant now finds the SUPERSEDED version then in force; before that the first change to a key made every earlier order unsettleable. Audit run 78: operators change these through the catalogue-driven publication workflow; drafts can be rejected and schedules cancelled.",
       "owner": "platform",
       "catalogue_status": "Launch",
       "evidence": {
@@ -276,6 +276,7 @@
         "apps/api/src/configuration.controller.spec.ts",
         "apps/customer-pwa/app/customer-panels.spec.ts",
         "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts",
         "database/src/versioned-configuration.spec.ts"
       ]
     },
@@ -1053,7 +1054,7 @@
       "name": "Configurable store-group limit",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Server enforces the limit read from versioned configuration key customer.cart_group_limit (default three; audit run 39 -- before that the 'configured' limit was a constant).",
+      "notes": "Server enforces the limit read from versioned configuration key customer.cart_group_limit (default three; audit run 39 -- before that the 'configured' limit was a constant). Audit run 78: a catalogued setting (1–10), changed through the publication workflow.",
       "owner": "customer-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -1070,6 +1071,7 @@
         "apps/api/src/customer-cart.controller.spec.ts",
         "apps/customer-pwa/app/customer-panels.spec.ts",
         "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts",
         "database/scripts/verify-customer-cart.ts"
       ]
     },
@@ -5036,20 +5038,20 @@
     {
       "id": "ADM-17",
       "name": "Category taxonomy",
-      "status": "complete_local_synthetic",
-      "target_stage": null,
-      "notes": "Category taxonomy is a versioned configuration document",
+      "status": "partial_workflow",
+      "target_stage": "7",
+      "notes": "Categories are the fixed set catalogue products enforce (verified by the catalogue walk). Audit run 78: the console offered a free-text `catalogue.taxonomy` document that nothing read, so an operator “changed” the taxonomy to no effect; it was removed. An admin-editable taxonomy is a forward finding.",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
         "domain": true,
         "api": true,
         "worker": false,
-        "pwa": true,
+        "pwa": false,
         "android": false,
         "tests": true
       },
-      "files": ["apps/admin-pwa/app/policy-panel.tsx", "apps/admin-pwa/app/admin-panels.spec.ts"],
+      "files": ["database/src/catalogue-products.ts"],
       "phase_steps": ["5.5"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
@@ -5064,7 +5066,7 @@
       "name": "Service-zone editor",
       "status": "partial_workflow",
       "target_stage": "7",
-      "notes": "Zones are read and rendered with real coordinates. Editing geometry is blocked: admin/zones is read-only and the only zone write is vendor-scoped (vendor.settings.manage), so an admin editor needs a new endpoint and capability.",
+      "notes": "Zones are read and rendered with real coordinates. Editing geometry is blocked: admin/zones is read-only and the only zone write is vendor-scoped (vendor.settings.manage), so an admin editor needs a new endpoint and capability. Audit run 78: timers and radii can be set per zone (ZONE-scoped settings, checked against an active zone); the boundaries themselves stay vendor-managed.",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5079,7 +5081,8 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
-        "database/scripts/verify-configuration-lifecycle.ts"
+        "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts"
       ]
     },
     {
@@ -5087,7 +5090,7 @@
       "name": "Delivery-fee configuration",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Delivery fee policy is a versioned configuration document",
+      "notes": "The delivery fee (base, included distance, per-kilometre rate, outer-route limit) is part of `finance.financial_policy`, a protected catalogued setting: drafted with a value the pricing code accepts, previewed with worked fares before and after, approved by someone independent and announced an hour ahead (audit run 78; the console had offered a `pricing.delivery_fee` key nothing read).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5103,7 +5106,8 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
-        "database/scripts/verify-configuration-lifecycle.ts"
+        "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts"
       ]
     },
     {
@@ -5111,7 +5115,7 @@
       "name": "Vendor-fee and commission configuration",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Vendor fee and commission policy is a versioned configuration document",
+      "notes": "Commission is part of `finance.financial_policy` (protected; capped at 50%), previewed with a worked order before and after (audit run 78; the console had offered a `pricing.vendor_commission` key nothing read).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5127,7 +5131,8 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
-        "database/scripts/verify-configuration-lifecycle.ts"
+        "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts"
       ]
     },
     {
@@ -5135,7 +5140,7 @@
       "name": "Payout and earning policy configuration",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Payout and earning policy is a versioned configuration document",
+      "notes": "Partner earnings (base, per-kilometre, per-package, wait allowance and cap) and the settlement delay are part of `finance.financial_policy` (protected), previewed with a worked offer before and after; the second-approval threshold for corrections is its own protected setting. (audit run 78; the console had offered a `finance.payout_policy` key nothing read).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5151,7 +5156,8 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
-        "database/scripts/verify-configuration-lifecycle.ts"
+        "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts"
       ]
     },
     {
@@ -5159,7 +5165,7 @@
       "name": "Operational timer configuration",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Zones page demos full config lifecycle",
+      "notes": "Every timer a consumer reads is catalogued with the range it accepts: shop accept deadline (now read at order creation, previously fixed at three minutes), offer, customer decision, wait-to-leave, offline-proof grace, support acknowledgement and order-alert escalation; offer and wait-to-leave also per zone (audit run 78).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5174,7 +5180,8 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
-        "database/scripts/verify-configuration-lifecycle.ts"
+        "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts"
       ]
     },
     {
@@ -5182,7 +5189,7 @@
       "name": "Configuration validation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Validate endpoint with overlap detection",
+      "notes": "Validation checks the value against the setting’s rule and the key against the catalogue, previews the value in force, the proposed value, changed fields, worked examples and the shops, partners and open orders in scope, refuses a change to the value already in force, and records that report on the version (audit run 78; validation had checked nothing).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5198,6 +5205,7 @@
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
         "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts",
         "database/src/versioned-configuration.spec.ts"
       ]
     },
@@ -5206,7 +5214,7 @@
       "name": "Maker-checker activation",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Separate propose/approve capabilities",
+      "notes": "Separate propose/approve capabilities; the proposer never approves, even after moving to an approver role; a protected change’s approver also did not validate it; an approver rejects a proposal (audit run 78).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5221,7 +5229,8 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
-        "database/scripts/verify-configuration-lifecycle.ts"
+        "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts"
       ]
     },
     {
@@ -5229,7 +5238,7 @@
       "name": "Scheduled activation and rollback",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "schedule with effective_from. Rollback creates new version",
+      "notes": "Scheduled for now or later, never the past (which had rewritten what was in force), a protected change at least an hour ahead; a schedule can be cancelled before it takes force; rollback to an earlier version is a new version through approval, and never to the version already in force (audit run 78).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5244,7 +5253,8 @@
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
-        "database/scripts/verify-configuration-lifecycle.ts"
+        "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts"
       ]
     },
     {
@@ -6930,6 +6940,7 @@
         "apps/api/src/complete-money-lifecycle.controller.spec.ts",
         "apps/api/src/configuration.controller.spec.ts",
         "database/scripts/verify-configuration-lifecycle.ts",
+        "database/scripts/verify-configuration-publication.ts",
         "database/scripts/verify-financial-corrections.ts",
         "database/scripts/verify-money-lifecycle.ts"
       ],
@@ -8422,12 +8433,12 @@
     "launch_features": 309,
     "by_status": {
       "backend_only": 12,
-      "complete_local_synthetic": 268,
+      "complete_local_synthetic": 267,
       "excluded": 15,
       "gated": 7,
       "later": 23,
       "not_started": 10,
-      "partial_workflow": 17,
+      "partial_workflow": 18,
       "ui_only": 2
     },
     "by_catalogue_status": {
@@ -8438,9 +8449,9 @@
     },
     "launch_by_status": {
       "backend_only": 12,
-      "complete_local_synthetic": 268,
+      "complete_local_synthetic": 267,
       "not_started": 10,
-      "partial_workflow": 17,
+      "partial_workflow": 18,
       "ui_only": 2
     }
   }

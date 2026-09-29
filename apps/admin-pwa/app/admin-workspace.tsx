@@ -212,9 +212,6 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
   const [accessRole, setAccessRole] = useState('SUPPORT_AGENT');
   const [roleAssignmentId, setRoleAssignmentId] = useState('');
   const [notices, setNotices] = useState<Notice[]>([]);
-  const [configurationKey, setConfigurationKey] = useState('delivery.wait.enabled');
-  const [configurationValue, setConfigurationValue] = useState('true');
-  const [configurationVersionId, setConfigurationVersionId] = useState('');
   const [partnerApplicationId, setPartnerApplicationId] = useState('');
   const [partnerApplicationVersion, setPartnerApplicationVersion] = useState(1);
   const [financeExceptions, setFinanceExceptions] = useState<Record<string, unknown>[]>([]);
@@ -652,39 +649,6 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
     }
   }
 
-  async function configurationAction(action: 'draft' | 'validate' | 'approve' | 'schedule') {
-    try {
-      const path =
-        action === 'draft'
-          ? 'admin/configuration/drafts'
-          : `admin/configuration/${configurationVersionId}/${action}`;
-      const result = (await request(path, {
-        method: 'POST',
-        body: JSON.stringify(
-          action === 'draft'
-            ? {
-                configuration_key: configurationKey,
-                configuration_kind: 'FEATURE_FLAG',
-                configuration_value: configurationValue === 'true',
-                scope_kind: 'GLOBAL',
-                scope_reference: 'global',
-                reason_code: 'COMPANY_TEST_CONFIGURATION',
-              }
-            : action === 'schedule'
-              ? {
-                  effective_from: new Date(Date.now() + 2_000).toISOString(),
-                  reason_code: 'COMPANY_TEST_CONFIGURATION',
-                }
-              : { reason_code: 'COMPANY_TEST_CONFIGURATION' },
-        ),
-      })) as { configuration_version_id: string; status: string };
-      setConfigurationVersionId(result.configuration_version_id);
-      setOutput(`Configuration ${result.configuration_version_id} is ${result.status}.`);
-    } catch (error) {
-      setOutput(error instanceof Error ? error.message : 'Configuration action failed.');
-    }
-  }
-
   return (
     <AppShell
       className="admin-workbench"
@@ -1044,44 +1008,6 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
                 No zones loaded yet — refresh to fetch every service zone the server knows about.
               </p>
             )}
-          </section>
-          <section className="catalogue-oversight" id="configuration">
-            <div>
-              <p className="eyebrow">VERSIONED CONFIGURATION</p>
-              <h2>Maker/checker activation</h2>
-            </div>
-            <div className="catalogue-flag">
-              <label>
-                Configuration key
-                <input
-                  value={configurationKey}
-                  onChange={(event) => setConfigurationKey(event.target.value)}
-                />
-              </label>
-              <label>
-                Boolean value
-                <select
-                  value={configurationValue}
-                  onChange={(event) => setConfigurationValue(event.target.value)}
-                >
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-              </label>
-              <label>
-                Version UUID
-                <input
-                  value={configurationVersionId}
-                  onChange={(event) => setConfigurationVersionId(event.target.value)}
-                />
-              </label>
-              <div className="actions">
-                <button onClick={() => void configurationAction('draft')}>Create draft</button>
-                <button onClick={() => void configurationAction('validate')}>Validate</button>
-                <button onClick={() => void configurationAction('approve')}>Approve</button>
-                <button onClick={() => void configurationAction('schedule')}>Schedule</button>
-              </div>
-            </div>
           </section>
         </>
       )}

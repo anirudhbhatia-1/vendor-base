@@ -60,3 +60,4 @@ export * from './support-cases.js';
 export * from './composition.js';
 export * from './trust-review.js';
 export * from './finance-queues.js';
+export * from './configuration-publication.js';
