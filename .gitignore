@@ -65,3 +65,8 @@ apps/*/ios/
 
 # Local build outputs (APKs from build-android-apk.mjs); never a store artefact
 artifacts/
+
+# Local-only scratch and hand-off material
+database/scripts/_probe-rt.ts
+handoff.zip
+manager_daily_work_log_*.xlsx

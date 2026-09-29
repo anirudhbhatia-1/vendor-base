@@ -18,8 +18,11 @@ must never contain credentials or real data: `online-test/compose.yaml` takes ev
 private material through `${VAR:?...}` so a missing value stops the deployment instead of
 falling back to the synthetic defaults committed to this repository.
 
-The online-test procedure is in `runbooks/online-test/README.md`. D-16 selects an Azure for
-Students VM for compute and Azure Static Web Apps for the static shells; the stack runs the
-`supabase-production` profile in synthetic mode against the development Supabase project.
+The online-test procedure is in `runbooks/online-test/README.md`. D-16's compute target is Azure
+Container Apps (`online-test/aca/*.json`, rendered and applied by
+`tooling/scripts/deploy-azure-test.mjs`), with Azure Static Web Apps for the static shells; the
+earlier Azure for Students VM definition remains in `online-test/compose.yaml` for reference. The
+stack runs the `supabase-production` profile in synthetic mode against the development Supabase
+project.
 Production secrets, production domains, public launch and paid resources remain separately
 gated.

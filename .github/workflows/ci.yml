@@ -103,6 +103,10 @@ jobs:
       - id: online_test_build
         name: Build the online-test PWA exports
         if: always()
+        # Without continue-on-error a failure here skipped the database,
+        # dependency-audit and secret-scan steps, and the evidence gate saw
+        # them as skipped rather than run; the gate is what fails the job.
+        continue-on-error: true
         run: pnpm build:online-test:pwas
 
       - id: database

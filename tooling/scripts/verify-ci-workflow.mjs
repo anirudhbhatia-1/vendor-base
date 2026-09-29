@@ -89,6 +89,19 @@ export function validateWorkflow(text, aggregateCommands = []) {
     }
   }
 
+  // Every evidence step must carry continue-on-error so a failure cannot
+  // silently skip the steps after it: the gate reads the outcomes and is the
+  // only thing allowed to fail the job. online_test_build once lacked it, and
+  // a failed export build skipped db:verify, the audit and the secret scan.
+  for (const match of text.matchAll(/- id: ([a-z_]+)\n(?:.*\n)*?(?=\n {6}- |\n {4}\S|$)/g)) {
+    const [step, id] = [match[0], match[1]];
+    if (id === 'evidence_gate' || id.startsWith('gate')) continue;
+    if (step.includes('ci-evidence.mjs gate')) continue;
+    if (!step.includes('continue-on-error: true')) {
+      errors.push(`step ${id} must set continue-on-error so later evidence steps still run`);
+    }
+  }
+
   const foundActions = new Set();
   for (const match of text.matchAll(/^\s*uses:\s+([^@\s]+)@([^\s#]+)(?:\s+#\s+(.+))?$/gm)) {
     const [, action, reference, versionComment] = match;

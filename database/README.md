@@ -75,12 +75,14 @@ The runner:
 
 Migration SQL must not contain `BEGIN`, `COMMIT`, or `ROLLBACK`; transaction ownership belongs to the runner. Use additive expand-and-contract migrations. A destructive or irreversible change needs a separately approved recovery plan and must not be disguised as an empty down file.
 
-The reviewed migration ladder is authoritative and currently contains 40 paired migrations through
-`0040_production_access_baseline`. It covers the shared reliability/identity foundations, vendor and
-catalogue lifecycle, customer shopping and checkout, fulfilment/custody, complete synthetic money,
-partner/admin operations, search/localization, partner availability and wait policy, controlled
-admin provisioning, local notification delivery and password-origin sessions. A status command
-prints the exact ordered files; later migrations must always roll back before the baseline.
+The reviewed migration ladder is authoritative and currently contains 118 paired migrations through
+`0117_support_case_lifecycle`. It covers the shared reliability/identity foundations, vendor and
+catalogue lifecycle, customer shopping and checkout, fulfilment/custody, the complete synthetic
+money lifecycle and ledger posting engine, partner/admin operations, search/localization, partner
+availability and wait policy, controlled admin provisioning, local notification delivery,
+password-origin sessions, and the admin control plane (dashboard, order monitor, support cases).
+The count above goes stale; `pnpm --dir database migration:status` prints the exact ordered files,
+and later migrations must always roll back before the baseline.
 
 Drizzle configuration lives in `drizzle.config.ts`, and typed schema declarations start in `schema.ts`. Drizzle-generated SQL must be converted into a paired reviewed migration before execution. Never apply automatic schema synchronization.
 
