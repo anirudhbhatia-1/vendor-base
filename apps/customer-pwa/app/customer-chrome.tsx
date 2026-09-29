@@ -3,10 +3,11 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import type { Address } from '@neighbourhood-store/contracts';
+import { bannersFor, type Address } from '@neighbourhood-store/contracts';
 import {
   ActionDock,
   AppShell,
+  LiveServiceBanners,
   Button,
   Icon,
   TabBar,
@@ -17,7 +18,11 @@ import type { TabItem } from '@neighbourhood-store/ui';
 import { CartProvider, useCart } from './cart-store';
 import { displayLabel } from './display';
 import { LocaleProvider, useLocale } from './locale';
-import { customerApiClient, readCustomerSession } from './customer-session';
+import {
+  anonymousCustomerClient,
+  customerApiClient,
+  readCustomerSession,
+} from './customer-session';
 import { createRequestScope, showBasketDock } from './shell-policy';
 
 const tabs = (t: (key: string, fallback: string) => string): readonly TabItem[] => [
@@ -197,6 +202,10 @@ function BasketDock() {
   );
 }
 
+/** What is paused that a customer would run into (11.7). */
+const loadCustomerBanners = async () =>
+  bannersFor((await anonymousCustomerClient().serviceStatus()).banners, { kind: 'customer' });
+
 function Chrome({ children }: Readonly<{ children: ReactNode }>) {
   const pathname = usePathname();
   const { itemCount } = useCart();
@@ -291,6 +300,7 @@ function Chrome({ children }: Readonly<{ children: ReactNode }>) {
           ← {t('customer.account.back', 'Your account')}
         </Link>
       ) : null}
+      <LiveServiceBanners load={loadCustomerBanners} />
       {children}
     </AppShell>
   );

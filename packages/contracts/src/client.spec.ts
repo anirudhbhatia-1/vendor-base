@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ApiError, createApiClient, createRawRequester, passwordSignIn } from './client.js';
+import {
+  ApiError,
+  bannersFor,
+  createApiClient,
+  createRawRequester,
+  passwordSignIn,
+} from './client.js';
 
 type FetchInit = {
   method?: string;
@@ -533,4 +539,39 @@ test('completing a delivery carries the customer OTP to the server', async () =>
   } finally {
     restore();
   }
+});
+
+test('each surface is shown the pauses that reach it (11.7)', () => {
+  const banner = (control_key: string, scope_kind: string, scope_reference: string) => ({
+    control_key,
+    scope_kind,
+    scope_reference,
+    message: `${control_key} ${scope_reference}`,
+    until: '2026-09-30T00:00:00.000Z',
+  });
+  const all = [
+    banner('VENDOR_PAUSE', 'VENDOR_LOCATION', 'shop-a'),
+    banner('VENDOR_PAUSE', 'VENDOR_LOCATION', 'shop-b'),
+    banner('GROUPED_CHECKOUT_PAUSE', 'GLOBAL', 'global'),
+    banner('PAYOUT_PAUSE', 'PAYOUT_BENEFICIARY', 'VENDOR'),
+    banner('PAYOUT_PAUSE', 'PAYOUT_BENEFICIARY', 'PARTNER'),
+    banner('PARTNER_ASSIGNMENT_PAUSE', 'ZONE', 'north'),
+  ];
+  const refs = (list: readonly { control_key: string; scope_reference: string }[]) =>
+    list.map((entry) => `${entry.control_key}:${entry.scope_reference}`);
+  assert.deepEqual(refs(bannersFor(all, { kind: 'customer' })), [
+    'GROUPED_CHECKOUT_PAUSE:global',
+    'PARTNER_ASSIGNMENT_PAUSE:north',
+  ]);
+  assert.deepEqual(refs(bannersFor(all, { kind: 'vendor', vendor_location_ids: ['shop-a'] })), [
+    'VENDOR_PAUSE:shop-a',
+    'GROUPED_CHECKOUT_PAUSE:global',
+    'PAYOUT_PAUSE:VENDOR',
+    'PARTNER_ASSIGNMENT_PAUSE:north',
+  ]);
+  assert.deepEqual(refs(bannersFor(all, { kind: 'partner' })), [
+    'PAYOUT_PAUSE:PARTNER',
+    'PARTNER_ASSIGNMENT_PAUSE:north',
+  ]);
+  assert.equal(bannersFor(all, { kind: 'admin' }).length, all.length);
 });

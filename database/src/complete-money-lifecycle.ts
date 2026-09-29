@@ -662,10 +662,14 @@ export class CompleteMoneyLifecycleService {
   }) {
     financeAutomation(input.context);
     const now = input.now ?? new Date();
+    // A batch whose payouts are paused (11.7) is left READY, not failed: it
+    // is submitted when the pause lifts.
     const scheduled = await this.#pool.query<{ payout_id: string; version: number }>(
       `SELECT payout_id, version FROM marketplace.payouts
-        WHERE payout_batch_id=$1 AND payout_state='SCHEDULED' ORDER BY payout_id`,
-      [input.payout_batch_id],
+        WHERE payout_batch_id=$1 AND payout_state='SCHEDULED'
+          AND NOT marketplace.incident_pauses('PAYOUT_PAUSE',NULL,NULL,beneficiary_kind,$2)
+        ORDER BY payout_id`,
+      [input.payout_batch_id, now],
     );
     for (const payout of scheduled.rows)
       await this.#money.submitPayout({

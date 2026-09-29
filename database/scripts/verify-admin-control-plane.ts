@@ -2,7 +2,6 @@ import {
   createAuthenticatedActor,
   createRequestContext,
   createUuidV7,
-  parseUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
 import { AdminControlNotFoundError, AdminControlPlaneService } from '../src/admin-control-plane.js';
@@ -29,21 +28,8 @@ export async function verifyAdminControlPlane(connectionString: string): Promise
     // verify-support-cases.ts).
     // Trust restrictions moved to their own service and walk (11.4,
     // verify-trust-review.ts).
-    const incident = await service.setIncident({
-      context: context(),
-      control_key: 'DELIVERY_PAUSE',
-      scope_kind: 'ZONE',
-      scope_reference: 'SYNTH-ZONE-JAIPUR-0001',
-      reason_code: 'WEATHER_CHECK',
-      expires_at: new Date(Date.now() + 86_400_000),
-      review_at: new Date(Date.now() + 3_600_000),
-      obligations: { banner: 'SYNTH Delivery paused' },
-    });
-    await service.revokeIncident({
-      context: context(),
-      incident_control_id: parseUuidV7(String(incident.incident_control_id)),
-      reason_code: 'WEATHER_CLEARED',
-    });
+    // Incident controls moved to their own service and walk (11.7,
+    // verify-incident-controls.ts).
     const created = await service.createExport({
       context: context(),
       report_kind: 'SUPPORT',

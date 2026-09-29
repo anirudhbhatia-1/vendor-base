@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ApiError } from '@neighbourhood-store/contracts';
-import { bufferSentence, classifyPlacementFailure, decisionRuleSentence } from './checkout-outcome';
+import {
+  bufferSentence,
+  classifyPlacementFailure,
+  decisionRuleSentence,
+  pausedCheckout,
+  pausedSentence,
+} from './checkout-outcome';
 
 const t = (_key: string, fallback: string) => fallback;
 
@@ -46,4 +52,18 @@ test('the decision rule and the buffer are always said', () => {
     bufferSentence({ authorization_buffer_minor: 500 }, (m) => `₹${m}`, t),
     /₹500/,
   );
+});
+
+test('a paused checkout names its way forward (11.7)', () => {
+  assert.deepEqual(
+    classifyPlacementFailure(new ApiError(409, 'x', { code: 'GROUPED_CHECKOUT_PAUSED' })),
+    { kind: 'paused', pause: 'GROUPED' },
+  );
+  assert.deepEqual(classifyPlacementFailure(new ApiError(409, 'x', { code: 'PAYMENT_PAUSED' })), {
+    kind: 'paused',
+    pause: 'PAYMENT',
+  });
+  assert.equal(pausedCheckout(new ApiError(409, 'x', { code: 'QUOTE_CHANGED' })), null);
+  assert.match(pausedSentence('GROUPED', t), /one store at a time/);
+  assert.match(pausedSentence('PAYMENT', t), /Choose another/);
 });

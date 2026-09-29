@@ -1948,3 +1948,21 @@ export const financeExceptionEvents = marketplaceSchema.table(
     index('finance_exception_events_exception').on(table.financeExceptionId, table.occurredAt),
   ],
 );
+
+export const incidentControlEvents = marketplaceSchema.table(
+  'incident_control_events',
+  {
+    incidentControlEventId: uuid('incident_control_event_id').primaryKey(),
+    incidentControlId: uuid('incident_control_id').notNull(),
+    eventType: text('event_type').notNull(),
+    fromState: text('from_state'),
+    toState: text('to_state').notNull(),
+    actorId: uuid('actor_id'),
+    reasonCode: text('reason_code').notNull(),
+    payload: jsonb('payload').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index('incident_control_events_control').on(table.incidentControlId, table.occurredAt),
+  ],
+);

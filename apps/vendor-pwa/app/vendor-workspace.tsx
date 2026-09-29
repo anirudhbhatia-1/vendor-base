@@ -1,6 +1,6 @@
 'use client';
 
-import type { WhoAmI } from '@neighbourhood-store/contracts';
+import { bannersFor, type WhoAmI } from '@neighbourhood-store/contracts';
 import { revokeAndSignOut } from '@neighbourhood-store/pwa-auth';
 import { RequireWorkspaceRole } from '@neighbourhood-store/pwa-auth/guard';
 import {
@@ -13,6 +13,7 @@ import {
   Notice,
   TabBar,
   TopBar,
+  LiveServiceBanners,
 } from '@neighbourhood-store/ui';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -29,7 +30,7 @@ import { PayoutsPanel } from './payouts-panel';
 import { StoreSettingsPanel } from './store-settings-panel';
 import { VendorOnboardingPanel } from './onboarding-panel';
 import { displayName } from './display';
-import { getSupabase, supabaseConfigured } from './supabase-client';
+import { getSupabase, supabaseConfigured, workspaceAuth } from './supabase-client';
 import { WorkspaceTaskNavigation } from './workspace-task-navigation';
 import type { VendorView } from './workspace-navigation';
 
@@ -152,6 +153,16 @@ function VendorWorkspaceContent({ view }: { view: VendorView }) {
     }
   }
 
+  // What is paused: this shop's own pause, and what reaches every shop (11.7).
+  const loadBanners = useCallback(
+    async () =>
+      bannersFor((await (await workspaceAuth.apiClient()).serviceStatus()).banners, {
+        kind: 'vendor',
+        vendor_location_ids: locations.map((location) => location.vendor_location_id),
+      }),
+    [locations],
+  );
+
   const activeName = locations.find((l) => l.vendor_location_id === locationId)?.location_name;
 
   return (
@@ -228,6 +239,7 @@ function VendorWorkspaceContent({ view }: { view: VendorView }) {
         />
       }
     >
+      <LiveServiceBanners load={loadBanners} />
       {actionError ? <Notice tone="danger">{actionError}</Notice> : null}
       {loading ? (
         <LoadingState label="Loading your store…" lines={4} />

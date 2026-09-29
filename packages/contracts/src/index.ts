@@ -68,9 +68,17 @@ export type {
 
 export {
   ApiError,
+  bannersFor,
   catalogueImageUrl,
   createApiClient,
   createRawRequester,
   passwordSignIn,
 } from './client.js';
-export type { ApiClient, ApiClientOptions, RawRequester } from './client.js';
+export type {
+  ApiClient,
+  ApiClientOptions,
+  BannerAudience,
+  RawRequester,
+  ServiceBanner,
+  ServiceStatus,
+} from './client.js';

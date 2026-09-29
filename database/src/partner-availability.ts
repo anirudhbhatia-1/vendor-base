@@ -403,19 +403,12 @@ export class PartnerAvailabilityService {
     const needsMotor =
       (input.package_count ?? 1) > BICYCLE_PACKAGE_LIMIT ||
       (input.handling_flags ?? []).includes('HEAVY');
-    // Incident controls (9.2): a paused delivery network, a paused partner
-    // assignment, or a paused zone or store offers nobody. Until audit run 57
-    // dispatch ignored them.
+    // Incident controls: a paused partner assignment offers nobody (9.2).
+    // Paused platform delivery and paused zones stop new orders at checkout
+    // (11.7), not the orders already placed: until audit run 79 they stopped
+    // offers too, so an order placed before the pause waited for ever.
     const paused = await this.#pool.query(
-      `SELECT 1 FROM marketplace.incident_controls c
-        WHERE c.lifecycle_state='ACTIVE' AND c.expires_at > $2
-          AND c.control_key IN ('DELIVERY_PAUSE','PARTNER_ASSIGNMENT_PAUSE','ZONE_PAUSE')
-          AND (c.scope_kind='GLOBAL'
-               OR (c.scope_kind='VENDOR_LOCATION' AND c.scope_reference=$1::text)
-               OR (c.scope_kind='ZONE' AND EXISTS(SELECT 1 FROM marketplace.vendor_service_zones z
-                     WHERE z.vendor_location_id=$1::uuid AND z.lifecycle_state='ACTIVE'
-                       AND z.zone_name=c.scope_reference)))
-        LIMIT 1`,
+      `SELECT 1 WHERE marketplace.incident_pauses('PARTNER_ASSIGNMENT_PAUSE',$1::uuid,NULL,NULL,$2)`,
       [String(input.vendor_location_id), now],
     );
     if (paused.rows.length > 0) return [];

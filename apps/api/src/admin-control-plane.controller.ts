@@ -3,7 +3,7 @@ import { AdminControlPlaneService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ADMIN_CONTROL_PLANE } from './tokens.js';
-import { optionalWholeQuery, dateField, object, stringField, uuid } from './request-fields.js';
+import { optionalWholeQuery, object, stringField, uuid } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const global = (capability: string) =>
   RequireAuthorization({ capability, admin_scope: { kind: 'GLOBAL' }, conceal_resource: true });
@@ -46,41 +46,6 @@ export class AdminControlPlaneController {
     } catch (error) {
       translateDomainError(error);
     }
-  }
-  @Post('incidents') @global('admin.incident.manage') async incident(@Body() raw: unknown) {
-    const b = object(raw);
-    try {
-      return await this.control.setIncident({
-        context: currentRequestContext(),
-        control_key: stringField(b, 'control_key'),
-        scope_kind: stringField(b, 'scope_kind'),
-        scope_reference: stringField(b, 'scope_reference'),
-        reason_code: stringField(b, 'reason_code'),
-        expires_at: dateField(b, 'expires_at'),
-        review_at: dateField(b, 'review_at'),
-        obligations: object(b.obligations),
-      });
-    } catch (e) {
-      translateDomainError(e);
-    }
-  }
-  @Post('incidents/:id/revoke') @global('admin.incident.manage') async revokeIncident(
-    @Param('id') id: string,
-    @Body() raw: unknown,
-  ) {
-    const b = object(raw);
-    try {
-      return await this.control.revokeIncident({
-        context: currentRequestContext(),
-        incident_control_id: uuid(id),
-        reason_code: stringField(b, 'reason_code'),
-      });
-    } catch (e) {
-      translateDomainError(e);
-    }
-  }
-  @Post('maintenance/expire') @global('admin.incident.manage') expire() {
-    return this.control.expireOperationalControls({ context: currentRequestContext() });
   }
   @Get('audit') @global('admin.audit.read') audit(@Query('q') q?: string) {
     return this.control.audit({ context: currentRequestContext(), ...(q ? { query: q } : {}) });

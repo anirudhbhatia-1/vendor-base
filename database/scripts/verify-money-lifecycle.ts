@@ -201,6 +201,43 @@ export async function verifyMoneyLifecycle(connectionString: string): Promise<vo
       settlement_id: settlement.settlement_id,
       now: payoutTime,
     });
+    // 11.7: payouts paused for shops wait SCHEDULED and the provider is not
+    // asked; lifted, the same payout is submitted.
+    const payoutPause = createUuidV7();
+    await pool.query(
+      `INSERT INTO marketplace.incident_controls
+         (incident_control_id, control_key, scope_kind, scope_reference, lifecycle_state,
+          reason_code, owner_user_id, proposed_by, approval_required, approved_by, approved_at,
+          activated_at, expires_at, review_at, obligations, request_id, correlation_id)
+       VALUES ($1,'PAYOUT_PAUSE','PAYOUT_BENEFICIARY','VENDOR','ACTIVE','PROVIDER_OUTAGE',
+               $2,$2,true,$3,$4,$4,$5,$5,'{}'::jsonb,$6,$6)`,
+      [
+        payoutPause,
+        admin,
+        approver,
+        new Date(payoutTime.getTime() - 60_000),
+        new Date(Math.max(Date.now(), payoutTime.getTime()) + 86_400_000),
+        createUuidV7(),
+      ],
+    );
+    await rejects(
+      () =>
+        service.submitPayout({
+          context: context(),
+          expected_version: 1,
+          payout_id: vendorPayout.payout_id,
+          now: new Date(payoutTime.getTime() + 1_000),
+        }),
+      MoneyStateError,
+      'A payout was submitted while payouts to shops were paused',
+    );
+    await pool.query(
+      `UPDATE marketplace.incident_controls
+          SET lifecycle_state='REVOKED', closed_by=owner_user_id, closed_at=clock_timestamp(),
+              closing_reason_code='PROVIDER_RECOVERED'
+        WHERE incident_control_id=$1`,
+      [payoutPause],
+    );
     const paidVendor = await service.submitPayout({
       context: context(),
       expected_version: 1,

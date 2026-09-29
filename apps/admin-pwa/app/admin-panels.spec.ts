@@ -17,6 +17,12 @@ import {
   PROTECTED_NOTICE_MS,
   reasonCode,
 } from './policy-panel.js';
+import {
+  approvalNeeded,
+  engageBody,
+  reasonCode as incidentReason,
+  scopeChoices,
+} from './incidents-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -45,7 +51,12 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
   ],
   [
     'incidents-panel.tsx',
-    ['admin/control/incidents', 'admin/control/maintenance/expire', 'admin/control/dashboard'],
+    [
+      'admin/incidents/catalogue',
+      'admin/incidents',
+      'admin/incidents/preview',
+      'admin/incidents/${control.incident_control_id}/actions/${action}',
+    ],
   ],
   [
     'support-panel.tsx',
@@ -146,12 +157,14 @@ test('trust proposals take the subject and its scopes from the server (11.4)', (
   assert.ok(source.includes('<ConfirmDialog'), 'decisions go through a confirmation');
 });
 
-test('incident controls use the keys the schema allows', () => {
+test('incident controls come from the server catalogue, not a list in the page (11.7)', () => {
   const source = panel('incidents-panel.tsx');
-  for (const key of ['GROUPED_CHECKOUT_PAUSE', 'DELIVERY_PAUSE', 'PAYOUT_PAUSE']) {
-    assert.ok(source.includes(key), `control key ${key}`);
+  // The page offered PROMOTION_PAUSE, which nothing honours; the catalogue
+  // offers only what the server enforces.
+  for (const key of ['PROMOTION_PAUSE', 'GROUPED_CHECKOUT_PAUSE', 'ORDER_INTAKE_PAUSED']) {
+    assert.ok(!source.includes(key), `hard-coded control key ${key}`);
   }
-  assert.ok(!source.includes('ORDER_INTAKE_PAUSED'));
+  assert.ok(source.includes('admin/incidents/catalogue'));
 });
 
 test('report exports use a kind both the reader and the export register accept', () => {
@@ -481,4 +494,46 @@ test('each version offers only the steps its state allows (11.6)', () => {
   assert.deepEqual(actionsFor('SUPERSEDED'), ['rollback']);
   assert.deepEqual(actionsFor('REJECTED'), []);
   assert.deepEqual(actionsFor('CANCELLED'), []);
+});
+
+test('an incident pause is engaged in the shape the server accepts (11.7)', () => {
+  const now = Date.UTC(2026, 8, 29, 10);
+  const body = engageBody(
+    {
+      control_key: 'VENDOR_PAUSE',
+      scope_kind: 'VENDOR_LOCATION',
+      scope_reference: ' shop-1 ',
+      reason: 'store power cut',
+      banner: ' This shop is not taking new orders for now. ',
+      hours: 500,
+      review_minutes: 5_000,
+    },
+    now,
+  );
+  assert.equal(body.scope_reference, 'shop-1');
+  assert.equal(body.reason_code, 'STORE_POWER_CUT');
+  assert.equal(body.banner, 'This shop is not taking new orders for now.');
+  // Clamped to what the server allows: a week, and a review within a day.
+  assert.equal(new Date(body.expires_at).getTime(), now + 7 * 24 * 3_600_000);
+  assert.equal(new Date(body.review_at).getTime(), now + 24 * 3_600_000);
+  assert.equal(
+    engageBody(
+      {
+        ...body,
+        scope_kind: 'GLOBAL',
+        reason: 'x',
+        hours: 2,
+        review_minutes: 30,
+        scope_reference: 'anything',
+      },
+      now,
+    ).scope_reference,
+    'global',
+  );
+  assert.equal(incidentReason('  '), '');
+  assert.deepEqual(scopeChoices('PAYMENT_METHOD'), ['UPI', 'CARD', 'WALLET']);
+  assert.equal(scopeChoices('VENDOR_LOCATION'), null);
+  assert.equal(approvalNeeded({ approval: 'WHEN_GLOBAL' }, 'VENDOR_LOCATION'), false);
+  assert.equal(approvalNeeded({ approval: 'WHEN_GLOBAL' }, 'GLOBAL'), true);
+  assert.equal(approvalNeeded({ approval: 'ALWAYS' }, 'PAYMENT_METHOD'), true);
 });

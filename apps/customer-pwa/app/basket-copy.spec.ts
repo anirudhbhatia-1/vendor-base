@@ -46,6 +46,7 @@ test('a blocked quote group is explained by its reason, and a new reason is stil
     /existing orders are not affected/,
   );
   assert.match(quoteBlockedSentence('INVENTORY_UNAVAILABLE', fallback), /not have enough/);
+  assert.match(quoteBlockedSentence('INCIDENT_PAUSED', fallback), /paused for now/);
   assert.match(quoteBlockedSentence('SOMETHING_NEW', fallback), /cannot take this order/);
 });
 

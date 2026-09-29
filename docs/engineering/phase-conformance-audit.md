@@ -2868,6 +2868,117 @@ The full ladder found one defect of mine before any probe ran. The first cut of 
 
 **Step 11.6: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 79 (29 September 2026) — step 11.7, incident controls
+
+Five requirements, and none held as written. The schema listed ten pause keys, but only dispatch read three of them. The other seven paused nothing: a shop, category, payment, substitution, grouped-checkout or payout pause changed nothing anywhere. Worse, two of the three that dispatch did read did the wrong thing. A delivery pause and a zone pause stopped partners being offered orders that had already been placed, so those orders waited indefinitely. Any scope was accepted, including scopes no code could act on. Promotions do not exist in this product, yet the console offered to pause them. The "impact preview" was a text search of live orders, run in the browser. Nothing was approved by anyone. Engaging a control was not audited. A control was one row per key and scope, so re-engaging it overwrote the last engagement's owner, reason and times. There was no banner anywhere and no recovery checklist. Nothing showed that lifting a control left orders, custody and money alone.
+
+What changed:
+- one migration (0121);
+- an incident control service with seven routes, replacing three on the control plane;
+- enforcement in checkout, substitution, payout submission and dispatch;
+- a public service status and banners on all four apps;
+- the console screen rebuilt;
+- a new connected walk;
+- four unit tests;
+- twenty-two mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Pause a scoped shop, category, zone, platform delivery, partner assignment, payment method or provider, promotion, substitution, grouped checkout or payout | **Seven of ten enforced nowhere**; the delivery and zone pauses stranded orders already placed; promotions offered but non-existent — P79-01. |
+| 2 | Show affected new flows and obligations that must continue | **A browser text search**; no obligations — P79-02. |
+| 3 | Owner, reason, expiry/review, approval where necessary | Owner, reason and times recorded, but **overwritten on re-engagement**; no approval; no bound on expiry or review — P79-03. |
+| 4 | Status banners and recovery checklist | **None** — P79-04. |
+| 5 | Prove rollback does not cancel orders, lose custody or rewrite money | **Not shown** — P79-05. |
+
+**P79-01 — nine pauses, each honoured.** 0121 fits each pause to the scopes the code that honours it can see, and adds one predicate, `marketplace.incident_pauses`, that every consumer asks. Each pause stops only new work:
+
+| Pause | Scopes | What stops |
+|---|---|---|
+| Shop | one shop | The shop's checkout group is blocked (new reason `INCIDENT_PAUSED`). |
+| Zone | a zone, by id or name | The same, for every shop in the zone. |
+| Category | a category | Its lines are unavailable at every shop. |
+| Platform delivery | everywhere, a zone, a shop | A delivery group is blocked by method; pickup stays open. |
+| Grouped checkout | everywhere | Quoting and placing more than one shop at once (`GROUPED_CHECKOUT_PAUSED`); one shop still checks out. |
+| Payment | the provider (everywhere) or UPI, card, wallet | Placement with that method is refused before the provider is asked (`PAYMENT_PAUSED`). |
+| Substitution | everywhere, a zone, a shop | Shops cannot propose substitutions; they can still mark an item unavailable. |
+| Payout | everywhere, shops, partners | Scheduled payouts wait; a batch is left READY, not failed. |
+| Partner assignment | everywhere, a zone, a shop | Dispatch offers nobody; this is now the only pause dispatch reads. |
+
+A pause engaged after a quote makes that quote stale at placement. A quote that left a group out is replayed only while the same groups are still blocked for the same reasons. Before this, a customer who quoted during a pause kept an incomplete quote for up to five minutes after it lifted; the walk found this. The promotion pause is refused, and 0121 closes any live control whose scope its pause cannot act on.
+
+**P79-02 — the preview.** `POST admin/incidents/preview` changes nothing. It counts what would stop (shops, baskets, live quotes, waiting deliveries or scheduled payouts, depending on the pause) and what carries on (open orders, deliveries under way, authorised payments still captured, refunds still submitted, pending customer decisions). It also gives the rule for each, whether a second commander must approve, and the recovery checklist. The counts are stored on the record when the pause is engaged.
+
+**P79-03 — accountability.** Each engagement is its own record: a partial unique index allows one live pause per key and scope, and nothing is overwritten. Every engagement needs:
+- a reason and an owner, who must hold incident management;
+- a banner of 8 to 200 characters;
+- an expiry within a week;
+- a review within a day and no later than the expiry.
+
+A global pause, and any payment or payout pause, is proposed and takes force only when a second commander approves it; the table refuses an approver who proposed it. Engaging, approving, rejecting, reviewing (which can extend the expiry within the week), ticking a checklist item and lifting are each done against the version read. Each writes a history event and an operational audit row. The expiry sweep closes lapsed and pending controls on their own record, with no operator.
+
+**P79-04 — banners and checklist.** `GET service-status` is public: it gives what is paused and until when, never who or why. Each surface shows what reaches it:
+- **Customer:** everything except shop-level pauses (checkout explains those) and payouts.
+- **Vendor:** its own shop and what reaches every shop.
+- **Partner:** assignment, delivery, zone and partner payout pauses.
+- **Admin:** everything.
+
+The checklist has three common items, plus one per pause where it needs one (reconcile the incident's payments, submit held payouts, re-offer waiting orders). It must be worked before a pause is lifted.
+
+**P79-05 — lifting leaves the world alone.** Before the pause, the walk:
+1. checks out two shops together and packs order A;
+2. hands A's goods to a partner;
+3. has a second customer place order C at the first shop.
+
+Under the pause, C is accepted and packed. The walk takes a snapshot of every ledger entry, the orders at both shops, their custody and their payments; engaging the pause changed none of it. It takes the snapshot again before lifting; lifting changed none of it either. Both orders stay READY, A's goods stay with its partner, and the shop quotes again. The partner-availability walk shows paused delivery no longer strands placed orders and a lifted assignment pause offers work again.
+
+**The console.** The incident screen is built from the server's catalogue. It offers only the scopes each pause takes (fixed choices where there are fixed choices) and requires a preview before engaging. It says when a second commander must approve. It lists each control with its banner, review and expiry, an overdue flag, the checklist with a button per item, and the steps its state allows. Lifting stays disabled until the checklist is done.
+
+**Mutation results.** Twenty-two probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| The shop pause not read at checkout | *A new checkout at the paused shop was not blocked with its reason* |
+| The delivery pause not read at checkout | *Paused delivery did not block the delivery group by its method* |
+| The category pause not read | *The category pause did not stop its items* |
+| Grouped pause not checked at quote | *A grouped basket was quoted while grouped checkout was paused* |
+| Grouped pause not checked at placement | the same, at placement: the staleness check alone answers QUOTE_CHANGED, not the pause |
+| Payment pause not checked | *The paused method was taken* |
+| A quote made before the pause not stale | *A quote made before the pause was placed under it* |
+| A lifted block replayed | *The shop still refused new orders after the pause was lifted*, the defect the walk first found |
+| Substitution pause not checked | *A substitution was proposed while substitutions were paused*, after the walk checked the refusal named the pause |
+| Payout pause not checked | *A payout was submitted while payouts to shops were paused* (money walk) |
+| Dispatch ignores the assignment pause | *A paused partner assignment still offered work* |
+| Delivery pause strands placed orders | the same assertion, the defect the audit found |
+| No approval for broad pauses | *A global pause took force without approval* |
+| The proposer may approve | the table's approval constraint, a second layer |
+| The checklist not required | *A pause was lifted before its recovery checklist was worked* |
+| A stale version accepted | *A pause was changed against a stale version*, after the walk used a step that would otherwise succeed |
+| A review put off beyond a day | *A review was put off for more than a day*, likewise |
+| Expiry leaves no record | *…did not expire on its record* |
+| Engagement not audited | *Engaging and lifting the pause were not audited* |
+| A promotion pause offered | *A promotion pause was engaged where no promotions exist* |
+| Two live pauses on one scope (index) | *A second pause on the same shop was engaged beside the first* |
+| A closed pause reopens (constraint) | *A closed pause reopened* |
+
+Three probes survived the first cut and the walk was sharpened for them: substitution, stale version and review. One kill was by an SQL error rather than an assertion; that probe was rewritten until an assertion caught it.
+
+**Forward findings.**
+- (discovery) A paused shop is still listed; its checkout says why and the banner is shown to its own shop.
+- (promotions) There is no promotion to pause; the pause returns when promotions exist.
+- (provider) One payment provider, so pausing the provider is the global payment pause.
+- (notify) The banner is shown, not sent; notifying the people a pause touches is 12.x.
+- (11.9) Incident steps are on the operational audit.
+
+**Verification.**
+- `pnpm db:verify` exit 0 locally: 122 migration files (0000–0121), the full ladder with rollback rehearsal, and conservation after every module (45 checks).
+- `incident_controls` makes 50 assertions (new). The partner-availability, money-lifecycle, admin-dashboard and admin-control-plane walks were updated and pass.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm security:secrets` and `pnpm features:check` exit 0.
+- `pnpm test:unit`: 654 pass, 0 fail.
+- `pnpm test:integration` exit 0 on a migrated test stack.
+- All twenty-two probes killed on rebuilt databases.
+
+**Step 11.7: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import type { WhoAmI } from '@neighbourhood-store/contracts';
+import { bannersFor, type WhoAmI } from '@neighbourhood-store/contracts';
 import { revokeAndSignOut } from '@neighbourhood-store/pwa-auth';
 import { RequireWorkspaceRole } from '@neighbourhood-store/pwa-auth/guard';
 import {
@@ -17,8 +17,9 @@ import {
   StatusPill,
   TopBar,
   type DataTableColumn,
+  LiveServiceBanners,
 } from '@neighbourhood-store/ui';
-import { adminRequest, apiUrl } from './authenticated-api';
+import { adminApiClient, adminRequest, apiUrl } from './authenticated-api';
 import { CorrectionsPanel } from './corrections-panel';
 import { FinanceQueuesPanel } from './finance-queues-panel';
 import { IncidentsPanel } from './incidents-panel';
@@ -649,6 +650,13 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
     }
   }
 
+  // Every pause in force, on every page of the console (11.7).
+  const loadBanners = useCallback(
+    async () =>
+      bannersFor((await (await adminApiClient()).serviceStatus()).banners, { kind: 'admin' }),
+    [],
+  );
+
   return (
     <AppShell
       className="admin-workbench"
@@ -683,6 +691,7 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
         />
       }
     >
+      <LiveServiceBanners load={loadBanners} />
       {view === 'overview' && (
         <section className="command-header">
           <div>

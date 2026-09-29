@@ -19,24 +19,10 @@ export class AdminControlInputError extends Error {}
 export class AdminControlNotFoundError extends Error {}
 export class AdminControlStateError extends Error {}
 export class AdminControlAuthorizationError extends Error {}
-const REFERENCE = /^[A-Z0-9][A-Z0-9._:/-]{3,127}$/;
 const REASON = /^[A-Z][A-Z0-9_]{2,63}$/;
 function admin(context: RequestContext) {
   if (context.actor?.actor_kind !== 'admin') throw new AdminControlAuthorizationError();
   return context.actor.actor_id;
-}
-function operator(context: RequestContext) {
-  if (context.actor?.actor_kind !== 'admin' && context.actor?.actor_kind !== 'system')
-    throw new AdminControlAuthorizationError();
-  return context.actor.actor_id;
-}
-function reason(value: string) {
-  if (!REASON.test(value)) throw new AdminControlInputError('Reason code is invalid');
-  return value;
-}
-function marked(value: string) {
-  if (!REFERENCE.test(value)) throw new AdminControlInputError('Reference is invalid');
-  return value;
 }
 /**
  * A finance exception's severity (D-09): a conservation break or money paid
@@ -195,9 +181,11 @@ export class AdminControlPlaneService {
         owner_user_id: string;
         review_at: Date;
         created_at: Date;
+        lifecycle_state: string;
       }>(
-        `SELECT incident_control_id, control_key, owner_user_id, review_at, created_at
-           FROM marketplace.incident_controls WHERE lifecycle_state='ACTIVE' LIMIT 200`,
+        `SELECT incident_control_id, control_key, owner_user_id, review_at, created_at, lifecycle_state
+           FROM marketplace.incident_controls
+          WHERE lifecycle_state IN ('ACTIVE','PENDING_APPROVAL') LIMIT 200`,
       );
       return rows.rows.map((row) => ({
         kind: 'INCIDENT',
@@ -207,7 +195,11 @@ export class AdminControlPlaneService {
         object_id: row.incident_control_id,
         title: row.control_key,
         owner: `USER-${row.owner_user_id}`,
-        next_action: 'REVIEW_OR_REVOKE_CONTROL',
+        // 11.7: a proposed pause waits on its second person.
+        next_action:
+          row.lifecycle_state === 'PENDING_APPROVAL'
+            ? 'APPROVE_OR_REJECT_CONTROL'
+            : 'REVIEW_OR_REVOKE_CONTROL',
         created_at: row.created_at,
         due_at: row.review_at,
         amount_at_risk_minor: 0,
@@ -690,74 +682,6 @@ export class AdminControlPlaneService {
     return { stalled_orders: stalled.rows };
   }
 
-  async setIncident(input: {
-    readonly context: RequestContext;
-    readonly control_key: string;
-    readonly scope_kind: string;
-    readonly scope_reference: string;
-    readonly reason_code: string;
-    readonly expires_at: Date;
-    readonly review_at: Date;
-    readonly obligations: object;
-  }) {
-    const who = admin(input.context);
-    if (input.review_at > input.expires_at) throw new AdminControlInputError();
-    const r = await this.#pool.query(
-      `INSERT INTO marketplace.incident_controls(incident_control_id,control_key,scope_kind,scope_reference,reason_code,owner_user_id,expires_at,review_at,obligations,request_id,correlation_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(control_key,scope_kind,scope_reference) DO UPDATE SET lifecycle_state='ACTIVE',reason_code=EXCLUDED.reason_code,owner_user_id=EXCLUDED.owner_user_id,expires_at=EXCLUDED.expires_at,review_at=EXCLUDED.review_at,obligations=EXCLUDED.obligations,updated_at=clock_timestamp() RETURNING *`,
-      [
-        createUuidV7(),
-        input.control_key,
-        input.scope_kind,
-        marked(input.scope_reference),
-        reason(input.reason_code),
-        who,
-        input.expires_at,
-        input.review_at,
-        JSON.stringify(input.obligations),
-        parseRequestId(input.context.request_id),
-        parseUuidV7(input.context.correlation_id),
-      ],
-    );
-    return r.rows[0];
-  }
-  async revokeIncident(input: {
-    readonly context: RequestContext;
-    readonly incident_control_id: UuidV7;
-    readonly reason_code: string;
-  }) {
-    const who = admin(input.context);
-    const r = await this.#pool.query(
-      `UPDATE marketplace.incident_controls SET lifecycle_state='REVOKED',updated_at=clock_timestamp() WHERE incident_control_id=$1 AND lifecycle_state='ACTIVE' RETURNING *`,
-      [input.incident_control_id],
-    );
-    if (!r.rows[0]) throw new AdminControlStateError();
-    await this.#pool.query(
-      `INSERT INTO marketplace.operational_audit_events(operational_audit_event_id,action,target_kind,target_reference,actor_id,reason_code,request_id,correlation_id)VALUES($1,'INCIDENT_CONTROL_REVOKED','INCIDENT_CONTROL',$2,$3,$4,$5,$6)`,
-      [
-        createUuidV7(),
-        input.incident_control_id,
-        who,
-        reason(input.reason_code),
-        parseRequestId(input.context.request_id),
-        parseUuidV7(input.context.correlation_id),
-      ],
-    );
-    return r.rows[0];
-  }
-  async expireOperationalControls(input: {
-    readonly context: RequestContext;
-    readonly now?: Date;
-  }) {
-    operator(input.context);
-    const now = input.now ?? new Date();
-    // Lapsed trust restrictions expire through TrustReviewService.expireLapsed
-    // (11.4), which writes the decision and the case history.
-    const incidents = await this.#pool.query(
-      `UPDATE marketplace.incident_controls SET lifecycle_state='EXPIRED',updated_at=$1 WHERE lifecycle_state='ACTIVE' AND expires_at<=$1`,
-      [now],
-    );
-    return { incidents: incidents.rowCount ?? 0 };
-  }
   async audit(input: { readonly context: RequestContext; readonly query?: string }) {
     admin(input.context);
     const r = await this.#pool.query(

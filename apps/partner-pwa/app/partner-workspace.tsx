@@ -1,6 +1,6 @@
 'use client';
 
-import type { WhoAmI } from '@neighbourhood-store/contracts';
+import { bannersFor, type WhoAmI } from '@neighbourhood-store/contracts';
 import { revokeAndSignOut } from '@neighbourhood-store/pwa-auth';
 import { RequireWorkspaceRole } from '@neighbourhood-store/pwa-auth/guard';
 import {
@@ -24,6 +24,7 @@ import {
   formatDistanceMeters,
   formatTravelSeconds,
   formatMoneyMinor,
+  LiveServiceBanners,
 } from '@neighbourhood-store/ui';
 import Link from 'next/link';
 import { useMapsConfig } from './maps-config';
@@ -69,7 +70,7 @@ export function isNetworkFailure(cause: unknown): boolean {
 import { EarningsPanel } from './earnings-panel';
 import { FieldOpsPanel } from './field-ops-panel';
 import { PartnerProfilePanel } from './profile-panel';
-import { getSupabase, supabaseConfigured } from './supabase-client';
+import { getSupabase, supabaseConfigured, workspaceAuth } from './supabase-client';
 import {
   deliveryProofAllowed,
   offerIsCurrent,
@@ -1289,6 +1290,15 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
   const activeJob =
     assignments.find((job) => job.delivery_assignment_id === selectedJobId) ?? assignments[0];
 
+  // What is paused that reaches partners: assignment, delivery, zones, payouts (11.7).
+  const loadBanners = useCallback(
+    async () =>
+      bannersFor((await (await workspaceAuth.apiClient()).serviceStatus()).banners, {
+        kind: 'partner',
+      }),
+    [],
+  );
+
   return (
     <AppShell
       surface="partner"
@@ -1359,6 +1369,7 @@ function PartnerWorkspaceContent({ view }: { view: PartnerView }) {
         />
       }
     >
+      <LiveServiceBanners load={loadBanners} />
       {message ? <Notice tone="success">{message}</Notice> : null}
       {error ? <Notice tone="danger">{error}</Notice> : null}
       {positionNeeded && !isOnline ? (

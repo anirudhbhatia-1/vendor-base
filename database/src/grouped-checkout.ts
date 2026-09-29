@@ -44,7 +44,11 @@ export class CheckoutConflictError extends Error {
   constructor(
     message: string,
     readonly code:
-      'ORDER_STATE_CONFLICT' | 'QUOTE_CHANGED' | 'QUOTE_EXPIRED' = 'ORDER_STATE_CONFLICT',
+      | 'ORDER_STATE_CONFLICT'
+      | 'QUOTE_CHANGED'
+      | 'QUOTE_EXPIRED'
+      | 'GROUPED_CHECKOUT_PAUSED'
+      | 'PAYMENT_PAUSED' = 'ORDER_STATE_CONFLICT',
   ) {
     super(message);
   }
@@ -149,6 +153,8 @@ type GroupRow = {
    * (11.4). Their orders already placed are not read against it.
    */
   customer_restricted: boolean;
+  /** An incident pause on the shop or its zone stops new orders from it (11.7). */
+  incident_paused: boolean;
   tip_minor: string;
   minimum_order_minor: string;
   /** The straight line, kept as the estimate's input; the road comes from routing. */
@@ -346,6 +352,40 @@ function reference(prefix: 'CHECKOUT' | 'ORDER' | 'PAY' | 'CMD', id: string) {
   return `SYNTH-${prefix}-${id.replaceAll('-', '').toUpperCase()}`;
 }
 
+/**
+ * Why a store group cannot be quoted, or null. Ordered by what the customer
+ * can repair: a store that cannot take the order at all, then a method it
+ * does not offer (CUS-33), then a line it can no longer supply, then the
+ * minimum, then stock. A restriction on the customer comes first: nothing
+ * they change in the basket repairs it, and it is the one thing they can
+ * appeal; then an incident pause (11.7), which lifts on its own.
+ */
+function blockedReason(group: GroupRow) {
+  const subtotal = group.lines.reduce(
+    (sum, line) => sum + Number(line.unit_price_minor ?? 0) * line.quantity,
+    0,
+  );
+  return group.customer_restricted
+    ? 'CUSTOMER_RESTRICTED'
+    : group.incident_paused
+      ? 'INCIDENT_PAUSED'
+      : !group.store_available
+        ? 'STORE_UNAVAILABLE'
+        : !group.method_offered
+          ? 'FULFILMENT_METHOD_UNAVAILABLE'
+          : group.lines.some((line) => !line.supplied)
+            ? 'LINE_UNAVAILABLE'
+            : subtotal < Number(group.minimum_order_minor)
+              ? 'MINIMUM_NOT_MET'
+              : group.lines.some(
+                    (line) =>
+                      line.quantity_basis === 'COUNTED' &&
+                      Number(line.exact_available_quantity) < line.quantity,
+                  )
+                ? 'INVENTORY_UNAVAILABLE'
+                : null;
+}
+
 export class GroupedCheckoutService {
   readonly #pool: Pool;
   readonly #provider: MoneyProviderAdapter;
@@ -393,11 +433,12 @@ export class GroupedCheckoutService {
       // replays the live quote -- the first quote's own hold has changed the
       // stock, which is why stock is not part of the identity -- and a change
       // to the content supersedes any live quote that no longer matches it.
+      const current = (await this.#loadCartGroups(client, userId, input.cart_id, now)).rows;
       const digest = quoteContentDigest({
         user_id: userId,
         cart_id: input.cart_id,
         customer_address_id: addressId,
-        groups: (await this.#loadCartGroups(client, userId, input.cart_id, now)).rows,
+        groups: current,
       });
       const replay = await client.query<{ checkout_quote_id: string }>(
         `SELECT checkout_quote_id FROM marketplace.checkout_quotes
@@ -409,9 +450,18 @@ export class GroupedCheckoutService {
       // that placement would refuse -- a price, a paused store, a restriction
       // since (11.4) -- is released below with the others and quoted afresh;
       // until audit run 76 it was handed back, and placing it failed again.
+      // Nor one that left out a group no longer blocked for the reason it
+      // gave: a pause or restriction lifted since, which a replay kept out
+      // until the quote lapsed (audit run 79).
       if (
         replay.rows[0] &&
-        !(await this.#quoteStale(client, replay.rows[0].checkout_quote_id as UuidV7, userId, now))
+        !(await this.#quoteStale(
+          client,
+          replay.rows[0].checkout_quote_id as UuidV7,
+          userId,
+          now,
+        )) &&
+        (await this.#blockedStillHold(client, replay.rows[0].checkout_quote_id, current))
       )
         return this.#projectQuote(client, replay.rows[0].checkout_quote_id);
       // Every other quote this cart still holds: lapsed ones, and live ones the
@@ -438,39 +488,17 @@ export class GroupedCheckoutService {
       }
       const groups = await this.#loadCartGroups(client, userId, input.cart_id, now);
       if (!groups.rows.length) throw new CheckoutConflictError('No cart group can be quoted');
-      const classified = groups.rows.map((group) => {
-        const subtotal = group.lines.reduce(
-          (sum, line) => sum + Number(line.unit_price_minor ?? 0) * line.quantity,
-          0,
-        );
-        // Ordered by what the customer can repair: a store that cannot take
-        // the order at all, then a method it does not offer (CUS-33), then a
-        // line it can no longer supply, then the minimum, then stock.
-        // A restriction on the customer comes first: nothing they change in
-        // the basket repairs it, and it is the one thing they can appeal.
-        const reason = group.customer_restricted
-          ? 'CUSTOMER_RESTRICTED'
-          : !group.store_available
-            ? 'STORE_UNAVAILABLE'
-            : !group.method_offered
-              ? 'FULFILMENT_METHOD_UNAVAILABLE'
-              : group.lines.some((line) => !line.supplied)
-                ? 'LINE_UNAVAILABLE'
-                : subtotal < Number(group.minimum_order_minor)
-                  ? 'MINIMUM_NOT_MET'
-                  : group.lines.some(
-                        (line) =>
-                          line.quantity_basis === 'COUNTED' &&
-                          Number(line.exact_available_quantity) < line.quantity,
-                      )
-                    ? 'INVENTORY_UNAVAILABLE'
-                    : null;
-        return { group, reason };
-      });
+      const classified = groups.rows.map((group) => ({ group, reason: blockedReason(group) }));
       const valid = classified
         .filter((entry) => entry.reason === null)
         .map((entry) => entry.group as unknown as SuppliedGroupRow);
       if (!valid.length) throw new CheckoutConflictError('Every cart group is blocked');
+      // Grouped checkout paused (11.7): one shop still checks out.
+      if (valid.length > 1 && (await this.#groupedCheckoutPaused(client, now)))
+        throw new CheckoutConflictError(
+          'Ordering from more than one store at once is paused; check out one store at a time',
+          'GROUPED_CHECKOUT_PAUSED',
+        );
       // The road from each store to the door, for every group that travels
       // one. D-05 prices per route kilometre; until routing existed the fee
       // was priced on the straight line and no travel time was promised.
@@ -711,6 +739,26 @@ export class GroupedCheckoutService {
         );
         throw new CheckoutConflictError('Quote expired', 'QUOTE_EXPIRED');
       }
+      // Pauses engaged since the quote (11.7): a grouped quote while grouped
+      // checkout is paused, and the method the customer chose while it is.
+      const quotedGroups = await client.query<{ n: string }>(
+        'SELECT count(*)::text AS n FROM marketplace.checkout_quote_groups WHERE checkout_quote_id=$1',
+        [input.checkout_quote_id],
+      );
+      if (
+        Number(quotedGroups.rows[0]?.n ?? 0) > 1 &&
+        (await this.#groupedCheckoutPaused(client, now))
+      )
+        throw new CheckoutConflictError(
+          'Ordering from more than one store at once is paused; check out one store at a time',
+          'GROUPED_CHECKOUT_PAUSED',
+        );
+      const paymentPaused = await client.query<{ paused: boolean }>(
+        `SELECT marketplace.incident_pauses('PAYMENT_PAUSE',NULL,NULL,$1,$2) AS paused`,
+        [input.payment_method ?? '', now],
+      );
+      if (paymentPaused.rows[0]?.paused)
+        throw new CheckoutConflictError('This way of paying is paused for now', 'PAYMENT_PAUSED');
       if (await this.#quoteStale(client, input.checkout_quote_id, userId, now))
         throw new CheckoutConflictError('Quote contents changed', 'QUOTE_CHANGED');
       // The cart itself may have moved on since the quote: a line added or
@@ -2109,6 +2157,32 @@ export class GroupedCheckoutService {
    * changed or withdrawn, the store closed or unpublished, or a trust
    * restriction in force since on the customer, the store, or a category.
    */
+  async #blockedStillHold(
+    client: Pick<PoolClient, 'query'>,
+    quoteId: string,
+    current: readonly GroupRow[],
+  ): Promise<boolean> {
+    const blocked = await client.query<{ cart_vendor_group_id: string; reason_code: string }>(
+      `SELECT cart_vendor_group_id, reason_code FROM marketplace.checkout_quote_blocked_groups
+        WHERE checkout_quote_id=$1`,
+      [quoteId],
+    );
+    return blocked.rows.every((row) => {
+      const group = current.find(
+        (entry) => entry.cart_vendor_group_id === row.cart_vendor_group_id,
+      );
+      return group !== undefined && blockedReason(group) === row.reason_code;
+    });
+  }
+
+  async #groupedCheckoutPaused(client: Pick<PoolClient, 'query'>, at: Date): Promise<boolean> {
+    const paused = await client.query<{ paused: boolean }>(
+      `SELECT marketplace.incident_pauses('GROUPED_CHECKOUT_PAUSE',NULL,NULL,NULL,$1) AS paused`,
+      [at],
+    );
+    return paused.rows[0]?.paused === true;
+  }
+
   async #quoteStale(
     client: Pick<PoolClient, 'query'>,
     quoteId: UuidV7,
@@ -2134,7 +2208,18 @@ export class GroupedCheckoutService {
            OR marketplace.trust_restricts('CUSTOMER',$2::text,vl.vendor_location_id,NULL,$3)
            OR marketplace.trust_restricts('VENDOR_LOCATION',vl.vendor_location_id::text,vl.vendor_location_id,NULL,$3)
            OR marketplace.trust_restricts('VENDOR_LOCATION',vl.vendor_location_id::text,vl.vendor_location_id,p.category,$3)
-           OR marketplace.trust_restricts('CATEGORY',p.category,vl.vendor_location_id,NULL,$3)) LIMIT 1`,
+           OR marketplace.trust_restricts('CATEGORY',p.category,vl.vendor_location_id,NULL,$3)
+           -- A pause engaged after the quote (11.7).
+           OR marketplace.incident_pauses('VENDOR_PAUSE',vl.vendor_location_id,NULL,NULL,$3)
+           OR marketplace.incident_pauses('ZONE_PAUSE',vl.vendor_location_id,NULL,NULL,$3)
+           OR marketplace.incident_pauses('CATEGORY_PAUSE',vl.vendor_location_id,p.category,NULL,$3)
+           OR ((SELECT count(*) FROM marketplace.checkout_quote_groups multi
+                 WHERE multi.checkout_quote_id=$1) > 1
+               AND marketplace.incident_pauses('GROUPED_CHECKOUT_PAUSE',NULL,NULL,NULL,$3))
+           OR (EXISTS (SELECT 1 FROM marketplace.cart_vendor_groups cvg
+                        WHERE cvg.cart_vendor_group_id=qg.cart_vendor_group_id
+                          AND cvg.fulfilment_method='PLATFORM_DELIVERY')
+               AND marketplace.incident_pauses('DELIVERY_PAUSE',vl.vendor_location_id,NULL,NULL,$3))) LIMIT 1`,
       [quoteId, userId, now],
     );
     return changed.rows.length > 0;
@@ -2171,10 +2256,15 @@ export class GroupedCheckoutService {
                AND NOT marketplace.trust_restricts('VENDOR_LOCATION',l.vendor_location_id::text,
                                                    l.vendor_location_id,NULL,$3)) store_available,
               marketplace.trust_restricts('CUSTOMER',$2::uuid::text,l.vendor_location_id,NULL,$3) customer_restricted,
-              EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes m
-                       WHERE m.vendor_location_id=g.vendor_location_id
-                         AND m.fulfilment_mode=g.fulfilment_method
-                         AND m.approval_state='APPROVED') method_offered,
+              (marketplace.incident_pauses('VENDOR_PAUSE',l.vendor_location_id,NULL,NULL,$3)
+               OR marketplace.incident_pauses('ZONE_PAUSE',l.vendor_location_id,NULL,NULL,$3)) incident_paused,
+              (EXISTS (SELECT 1 FROM marketplace.vendor_location_fulfilment_modes m
+                        WHERE m.vendor_location_id=g.vendor_location_id
+                          AND m.fulfilment_mode=g.fulfilment_method
+                          AND m.approval_state='APPROVED')
+               -- Paused platform delivery leaves pickup open (11.7).
+               AND NOT (g.fulfilment_method='PLATFORM_DELIVERY'
+                        AND marketplace.incident_pauses('DELIVERY_PAUSE',g.vendor_location_id,NULL,NULL,$3))) method_offered,
               json_agg(json_build_object('cart_line_id',cl.cart_line_id,'catalogue_variant_id',cl.catalogue_variant_id,
                 'substitution_preference',cl.substitution_preference,
                 'supplied',(v.catalogue_variant_id IS NOT NULL AND p.catalogue_product_id IS NOT NULL
@@ -2182,7 +2272,9 @@ export class GroupedCheckoutService {
                             -- Nor a category restricted here, or for this shop.
                             AND NOT marketplace.trust_restricts('CATEGORY',p.category,g.vendor_location_id,NULL,$3)
                             AND NOT marketplace.trust_restricts('VENDOR_LOCATION',g.vendor_location_id::text,
-                                                                g.vendor_location_id,p.category,$3)),
+                                                                g.vendor_location_id,p.category,$3)
+                            -- Nor a category paused by an incident (11.7).
+                            AND NOT marketplace.incident_pauses('CATEGORY_PAUSE',g.vendor_location_id,p.category,NULL,$3)),
                 'inventory_item_id',i.inventory_item_id,'product_title',p.title,'variant_title',v.variant_title,
                 'quantity',cl.quantity,'unit_price_minor',price.price_minor,'product_version',p.version,
                 'variant_version',v.version,'exact_available_quantity',i.exact_available_quantity,

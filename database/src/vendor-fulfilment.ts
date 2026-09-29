@@ -1713,6 +1713,16 @@ export class VendorFulfilmentService {
       input.decision_deadline_seconds ?? (await this.decisionDeadlineSeconds(input.now));
     if (deadlineSeconds < 60 || deadlineSeconds > 3600)
       throw new FulfilmentInputError('Decision deadline must be between 60s and 60 minutes');
+    // Substitutions paused by an incident (11.7): the shop can still mark
+    // the item unavailable or propose a weight; proposals already sent stand.
+    const paused = await this.#pool.query<{ paused: boolean }>(
+      `SELECT marketplace.incident_pauses('SUBSTITUTION_PAUSE',$1::uuid,NULL,NULL,$2) AS paused`,
+      [input.vendor_location_id, input.now ?? new Date()],
+    );
+    if (paused.rows[0]?.paused)
+      throw new FulfilmentConflictError(
+        'Substitutions are paused for now; mark the item unavailable instead',
+      );
     return this.#recordPickAndProposal({
       ...input,
       pick_state: 'PROPOSED_SUBSTITUTION',

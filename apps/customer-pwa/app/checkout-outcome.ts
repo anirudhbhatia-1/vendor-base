@@ -24,8 +24,34 @@ export type PlacementFailure =
   | { readonly kind: 'declined' }
   | { readonly kind: 'quote_expired' }
   | { readonly kind: 'quote_changed' }
+  | { readonly kind: 'paused'; readonly pause: PausedCheckout }
   | { readonly kind: 'interrupted'; readonly message: string }
   | { readonly kind: 'refused'; readonly message: string };
+
+/** What operations have paused that stops this checkout (11.7). */
+export type PausedCheckout = 'GROUPED' | 'PAYMENT';
+
+export function pausedCheckout(cause: unknown): PausedCheckout | null {
+  if (!(cause instanceof ApiError)) return null;
+  return cause.code === 'GROUPED_CHECKOUT_PAUSED'
+    ? 'GROUPED'
+    : cause.code === 'PAYMENT_PAUSED'
+      ? 'PAYMENT'
+      : null;
+}
+
+/** The way forward each pause leaves: one shop at a time, or another way to pay. */
+export function pausedSentence(pause: PausedCheckout, t: Translate): string {
+  return pause === 'GROUPED'
+    ? t(
+        'checkout.grouped_checkout_paused',
+        'Ordering from more than one store at once is paused for now. Check out one store at a time.',
+      )
+    : t(
+        'checkout.payment_paused',
+        'This way of paying is paused for now. Choose another, or try again later.',
+      );
+}
 
 export function classifyPlacementFailure(cause: unknown): PlacementFailure {
   if (cause instanceof ApiError) {
@@ -36,6 +62,10 @@ export function classifyPlacementFailure(cause: unknown): PlacementFailure {
         return { kind: 'quote_expired' };
       case 'QUOTE_CHANGED':
         return { kind: 'quote_changed' };
+      case 'GROUPED_CHECKOUT_PAUSED':
+        return { kind: 'paused', pause: 'GROUPED' };
+      case 'PAYMENT_PAUSED':
+        return { kind: 'paused', pause: 'PAYMENT' };
       default:
         break;
     }

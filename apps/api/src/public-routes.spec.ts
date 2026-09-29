@@ -25,6 +25,8 @@ const EXPECTED_PUBLIC = new Set([
   'GET /customer/catalogue/images/:catalogue_image_id',
   'GET /customer/discovery/categories',
   'POST /customer/checkout/provider-webhook',
+  // 11.7: what is paused and until when, for every surface's banner.
+  'GET /service-status',
 ]);
 
 const METHOD_NAMES = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'ALL', 'OPTIONS', 'HEAD'] as const;

@@ -19,9 +19,6 @@ test('every admin control-plane route is capability protected and globally scope
     orders: 'admin.control.dashboard_read',
     deadLetters: 'admin.messaging.deadletter_read',
     recoverDeadLetter: 'admin.messaging.deadletter_recover',
-    incident: 'admin.incident.manage',
-    revokeIncident: 'admin.incident.manage',
-    expire: 'admin.incident.manage',
     audit: 'admin.audit.read',
     report: 'admin.reporting.read',
     export: 'admin.reporting.export',
@@ -35,7 +32,11 @@ test('every admin control-plane route is capability protected and globally scope
   }
   // Support cases moved to their own controller (11.3, support-case.controller.ts).
   // Trust restrictions moved to theirs (11.4, trust-review.controller.ts).
+  // Incident controls moved to theirs (11.7, incident-controls.controller.ts).
   for (const gone of [
+    'incident',
+    'revokeIncident',
+    'expire',
     'createSupport',
     'support',
     'evidence',

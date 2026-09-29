@@ -6,11 +6,11 @@ import {
 } from '@nestjs/common';
 import {
   type AssignmentCustodyService,
-  type AdminControlPlaneService,
   type DomainServices,
   type SupportCaseService,
   type TrustReviewService,
   type FinanceQueueService,
+  type IncidentControlService,
   type GroupedCheckoutService,
   type InventoryReservationService,
   type PartnerAvailabilityService,
@@ -71,7 +71,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #workerId = createUuidV7();
   readonly #pool: Pool;
   readonly #assignments: AssignmentCustodyService;
-  readonly #adminControl: AdminControlPlaneService;
+  readonly #incidentControls: IncidentControlService;
   readonly #supportCases: SupportCaseService;
   readonly #trust: TrustReviewService;
   readonly #financeQueues: FinanceQueueService;
@@ -109,7 +109,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     // on one pool this module — not this service — closes at shutdown.
     this.#pool = services.pool;
     this.#inventory = services.inventory;
-    this.#adminControl = services.adminControl;
+    this.#incidentControls = services.incidentControls;
     this.#supportCases = services.supportCases;
     this.#trust = services.trust;
     this.#financeQueues = services.financeQueues;
@@ -400,8 +400,9 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         0,
       );
       const controls = await pass(
-        'adminControl.expireOperationalControls',
-        () => this.#adminControl.expireOperationalControls({ context, now }),
+        // Lapsed incident controls close on their own record (11.7).
+        'incidentControls.expireDue',
+        () => this.#incidentControls.expireDue({ context, now }),
         { incidents: 0 },
       );
       // Lapsed restrictions end on their case history; new signals are read

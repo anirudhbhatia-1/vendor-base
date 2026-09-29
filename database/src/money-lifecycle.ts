@@ -688,6 +688,13 @@ export class MoneyLifecycleService {
       if (current.payout_state === 'SUBMITTED') return Object.freeze(current);
       if (current.payout_state !== 'SCHEDULED' || current.version !== input.expected_version)
         throw new MoneyStateError('Payout state or version does not permit submission');
+      // Payouts paused by an incident (11.7) wait SCHEDULED; the provider is
+      // not asked, and nothing owed changes.
+      const paused = await client.query<{ paused: boolean }>(
+        `SELECT marketplace.incident_pauses('PAYOUT_PAUSE',NULL,NULL,$1,$2) AS paused`,
+        [current.beneficiary_kind, now],
+      );
+      if (paused.rows[0]?.paused) throw new MoneyStateError('Payouts are paused for now');
       const outcome = await providerOutcome(() =>
         this.#provider.submitPayout({
           amount_minor: Number(current.amount_minor),

@@ -171,6 +171,9 @@ export function createApiClient(options: ApiClientOptions) {
   const r = makeRequest(options);
 
   return {
+    /** What is paused and until when (11.7); public, for every surface's banner. */
+    serviceStatus: () => r<ServiceStatus>('/service-status'),
+
     auth: {
       requestOtp: (body: { device_id: string; phone_identifier: string; request_key: string }) =>
         r<{ challenge_id: string }>('/auth/otp/request', { method: 'POST', json: body }),
@@ -1382,6 +1385,60 @@ export function passwordSignIn(
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;
+
+/** One pause in force, as every surface may show it (11.7). */
+export type ServiceBanner = {
+  readonly control_key: string;
+  readonly scope_kind: string;
+  readonly scope_reference: string;
+  readonly message: string;
+  readonly until: string;
+};
+
+export type ServiceStatus = { readonly banners: readonly ServiceBanner[] };
+
+export type BannerAudience =
+  | { readonly kind: 'customer' }
+  | { readonly kind: 'vendor'; readonly vendor_location_ids: readonly string[] }
+  | { readonly kind: 'partner' }
+  | { readonly kind: 'admin' };
+
+const PARTNER_KEYS = new Set([
+  'PARTNER_ASSIGNMENT_PAUSE',
+  'DELIVERY_PAUSE',
+  'ZONE_PAUSE',
+  'PAYOUT_PAUSE',
+]);
+
+/**
+ * The banners one audience is shown. A shop sees its own shop's pause and
+ * not another's; payouts are the business of the people paid; a customer is
+ * told what they would run into, and a shop's own pause reaches them at
+ * checkout instead.
+ */
+export function bannersFor(
+  banners: readonly ServiceBanner[],
+  audience: BannerAudience,
+): readonly ServiceBanner[] {
+  return banners.filter((banner) => {
+    switch (audience.kind) {
+      case 'admin':
+        return true;
+      case 'customer':
+        return banner.control_key !== 'PAYOUT_PAUSE' && banner.scope_kind !== 'VENDOR_LOCATION';
+      case 'vendor':
+        if (banner.scope_kind === 'VENDOR_LOCATION')
+          return audience.vendor_location_ids.includes(banner.scope_reference);
+        return !(banner.scope_kind === 'PAYOUT_BENEFICIARY' && banner.scope_reference !== 'VENDOR');
+      case 'partner':
+        return (
+          PARTNER_KEYS.has(banner.control_key) &&
+          banner.scope_kind !== 'VENDOR_LOCATION' &&
+          !(banner.scope_kind === 'PAYOUT_BENEFICIARY' && banner.scope_reference !== 'PARTNER')
+        );
+    }
+  });
+}
 
 export function createRawRequester(options: ApiClientOptions) {
   return makeRequest(options);

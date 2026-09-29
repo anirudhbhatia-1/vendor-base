@@ -40,6 +40,7 @@ import { SupportCaseService } from './support-cases.js';
 import { TrustReviewService } from './trust-review.js';
 import { FinanceQueueService } from './finance-queues.js';
 import { ConfigurationPublicationService } from './configuration-publication.js';
+import { IncidentControlService } from './incident-controls.js';
 import { ConfigurationAdminService } from './versioned-configuration.js';
 import { VendorFulfilmentService } from './vendor-fulfilment.js';
 import { VendorNetworkService } from './vendor-network.js';
@@ -133,6 +134,7 @@ export interface DomainServices {
   readonly trust: TrustReviewService;
   readonly financeQueues: FinanceQueueService;
   readonly configurationPublication: ConfigurationPublicationService;
+  readonly incidentControls: IncidentControlService;
   readonly vendorNetwork: VendorNetworkService;
   readonly vendorSettings: VendorSettingsService;
   readonly vendorStaff: VendorStaffService;
@@ -236,6 +238,7 @@ export function createDomainServices(options: DomainCompositionOptions): DomainS
     trust: new TrustReviewService(shared),
     financeQueues: new FinanceQueueService({ ...shared, money }),
     configurationPublication: new ConfigurationPublicationService(shared),
+    incidentControls: new IncidentControlService(shared),
     vendorNetwork: new VendorNetworkService(shared),
     vendorSettings: new VendorSettingsService(shared),
     vendorStaff: new VendorStaffService({ ...shared, access, hash_key: otp_hash_key }),

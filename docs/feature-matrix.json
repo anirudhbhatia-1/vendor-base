@@ -5439,7 +5439,7 @@
       "name": "Incident kill switches",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Incident kill switches with expiry, review time and obligations",
+      "notes": "Nine pauses, each in the scopes the code that honours it can see: a shop, a category, a zone, platform delivery, partner assignment, a payment method or the provider, substitutions, grouped checkout and payouts — read at checkout (quote and placement), substitution, payout submission and dispatch. Each carries an owner, reason, banner, expiry (at most a week) and a review within a day; global and money-touching pauses take force only when a second commander approves. Audit run 79: until then only dispatch read three of the ten keys, promotions (which do not exist) could be \"paused\", and re-engaging overwrote the last record.",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5451,13 +5451,20 @@
         "tests": true
       },
       "files": [
+        "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/admin-pwa/app/incidents-panel.tsx",
-        "apps/admin-pwa/app/admin-panels.spec.ts"
+        "database/src/incident-controls.ts"
       ],
       "phase_steps": ["11.7"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/public-routes.spec.ts",
+        "apps/customer-pwa/app/basket-copy.spec.ts",
+        "apps/customer-pwa/app/checkout-outcome.spec.ts",
+        "database/scripts/verify-incident-controls.ts",
+        "database/scripts/verify-money-lifecycle.ts",
+        "database/scripts/verify-partner-availability.ts"
       ]
     },
     {
@@ -5465,7 +5472,7 @@
       "name": "Incident impact preview",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Impact preview reports the blast radius before engaging",
+      "notes": "The preview (server-side, changes nothing) counts what stops — shops, baskets, live quotes, waiting deliveries, scheduled payouts — and what carries on — open orders, deliveries under way, authorised payments, refunds, pending decisions — with the rules for each, the approval it needs and the recovery checklist; the counts are kept on the record. Audit run 79: it had been a text search of live orders in the browser.",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5477,13 +5484,16 @@
         "tests": true
       },
       "files": [
+        "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/admin-pwa/app/incidents-panel.tsx",
-        "apps/admin-pwa/app/admin-panels.spec.ts"
+        "database/src/incident-controls.ts"
       ],
       "phase_steps": ["11.7"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/public-routes.spec.ts",
+        "database/scripts/verify-incident-controls.ts"
       ]
     },
     {
@@ -5491,7 +5501,7 @@
       "name": "Reversible incident recovery",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Revocation reverses a control without erasing its history",
+      "notes": "A pause is lifted only once its recovery checklist is worked, against the version read, and stays on record with its history (engaged, approved, reviewed, each item, lifted or expired); a new engagement is a new record. The walk shows engaging and lifting cancelled no order, moved no goods and wrote no money, and that paused delivery or zones no longer strand orders already placed. Banners show on every surface from the public service status, each audience seeing what reaches it (audit run 79).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5503,13 +5513,17 @@
         "tests": true
       },
       "files": [
+        "apps/admin-pwa/app/admin-panels.spec.ts",
         "apps/admin-pwa/app/incidents-panel.tsx",
-        "apps/admin-pwa/app/admin-panels.spec.ts"
+        "database/src/incident-controls.ts"
       ],
       "phase_steps": ["11.7"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/public-routes.spec.ts",
+        "database/scripts/verify-incident-controls.ts",
+        "packages/contracts/src/client.spec.ts"
       ]
     },
     {

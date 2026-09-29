@@ -159,11 +159,13 @@ export async function verifyAdminDashboard(connectionString: string): Promise<vo
     await pool.query(
       `INSERT INTO marketplace.incident_controls
         (incident_control_id,control_key,scope_kind,scope_reference,reason_code,owner_user_id,
-         expires_at,review_at,obligations,request_id,correlation_id,created_at,updated_at)
-       VALUES ($1,'PAYOUT_PAUSE','ZONE',$2,'PROVIDER_OUTAGE',$3,$4,$5,'[]',$6,$6,$7,$7)`,
+         proposed_by,activated_at,expires_at,review_at,obligations,request_id,correlation_id,
+         created_at,updated_at)
+       VALUES ($1,'VENDOR_PAUSE','VENDOR_LOCATION',$2,'PROVIDER_OUTAGE',$3,$3,$7,$4,$5,'[]',$6,$6,$7,$7)`,
       [
         pause,
-        `zone-dashboard-${tag.toLowerCase()}`,
+        // A shop that does not exist, so the pause stops nothing in later walks.
+        createUuidV7(),
         people.commander,
         new Date(now.getTime() + 86_400_000),
         new Date(now.getTime() + 3_600_000),

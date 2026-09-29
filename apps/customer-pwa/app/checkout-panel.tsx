@@ -37,6 +37,8 @@ import {
   classifyPlacementFailure,
   decisionRuleSentence,
   fulfilmentSentence,
+  pausedCheckout,
+  pausedSentence,
 } from './checkout-outcome';
 import { useCart } from './cart-store';
 import { customerApiClient } from './customer-session';
@@ -334,7 +336,10 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
       setNow(Date.now());
     } catch (cause) {
       if (generation !== quoteGeneration.current) return;
-      setFailure(actionErrorText(cause, 'A quote could not be created.'));
+      const pause = pausedCheckout(cause);
+      setFailure(
+        pause ? pausedSentence(pause, t) : actionErrorText(cause, 'A quote could not be created.'),
+      );
     } finally {
       if (generation === quoteGeneration.current) setBusy(false);
     }
@@ -393,6 +398,10 @@ export function CheckoutPanel({ mode = 'checkout' }: { readonly mode?: 'cart' | 
           // The quote stays: asking again with the same key is answered with
           // whatever happened, and never with a second order.
           setInterrupted(true);
+          break;
+        case 'paused':
+          // The quote stays: another way to pay, or one shop at a time.
+          setFailure(pausedSentence(outcome.pause, t));
           break;
         case 'refused':
           setFailure(outcome.message);

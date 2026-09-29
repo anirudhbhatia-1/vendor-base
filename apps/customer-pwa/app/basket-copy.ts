@@ -74,6 +74,12 @@ export function quoteBlockedSentence(reason: string, t: Translate): string {
         'customer.checkout.blocked.customer_restricted',
         'Your account cannot place new orders here for now. Your existing orders are not affected.',
       );
+    // 11.7: operations paused new orders here; it lifts on its own.
+    case 'INCIDENT_PAUSED':
+      return t(
+        'customer.checkout.blocked.incident_paused',
+        'New orders from this store are paused for now. Orders already placed are not affected.',
+      );
     case 'STORE_UNAVAILABLE':
       return t(
         'customer.quote.blocked.store_unavailable',

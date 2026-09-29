@@ -193,6 +193,7 @@ assert(
       '0118_trust_review',
       '0119_finance_queues',
       '0120_configuration_publication',
+      '0121_incident_controls',
     ]),
   'Unexpected reviewed migrations',
 );

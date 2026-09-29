@@ -435,19 +435,40 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
         !bigLoad.some((candidate) => candidate.partner_user_id === partnerId),
       'A bicycle was offered a load it cannot carry, or refused one it can',
     );
-    // Incident control: a paused delivery network offers nobody; revoked, it
-    // offers them again.
-    const controlId = createUuidV7();
-    await pool.query(
-      `INSERT INTO marketplace.incident_controls
-         (incident_control_id, control_key, scope_kind, scope_reference, lifecycle_state,
-          reason_code, owner_user_id, expires_at, review_at, obligations, request_id, correlation_id)
-       VALUES ($1,'DELIVERY_PAUSE','GLOBAL','global','ACTIVE','WEATHER',$2,$3,$3,'{}'::jsonb,$4,$4)`,
-      // The row's own check compares against the database's clock, so the
-      // control expires an hour from real now; the search compares against
-      // the walk's synthetic instant, which is earlier still.
-      [controlId, adminId, new Date(Date.now() + 3_600_000), createUuidV7()],
-    );
+    // Incident controls (11.7): a paused partner assignment offers nobody;
+    // paused platform delivery stops new orders at checkout, not the offers
+    // for orders already placed; lifted, the pause offers them again.
+    const pause = async (key: string) => {
+      const id = createUuidV7();
+      await pool.query(
+        `INSERT INTO marketplace.incident_controls
+           (incident_control_id, control_key, scope_kind, scope_reference, lifecycle_state,
+            reason_code, owner_user_id, proposed_by, activated_at, expires_at, review_at,
+            obligations, request_id, correlation_id)
+         VALUES ($1,$2,'VENDOR_LOCATION',$3,'ACTIVE','WEATHER',$4,$4,$5,$6,$6,'{}'::jsonb,$7,$7)`,
+        // The row's own check compares against the database's clock, so the
+        // control expires an hour from real now; it took force before the
+        // walk's synthetic instant.
+        [
+          id,
+          key,
+          locationId,
+          adminId,
+          new Date(later.getTime() - 60_000),
+          new Date(Date.now() + 3_600_000),
+          createUuidV7(),
+        ],
+      );
+      return id;
+    };
+    const deliveryPause = await pause('DELIVERY_PAUSE');
+    const underDeliveryPause = await service.eligible({
+      context: context('admin', adminId),
+      vendor_location_id: locationId,
+      radius_meters: 5_000,
+      now: later,
+    });
+    const controlId = await pause('PARTNER_ASSIGNMENT_PAUSE');
     const underPause = await service.eligible({
       context: context('admin', adminId),
       vendor_location_id: locationId,
@@ -455,8 +476,11 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
       now: later,
     });
     await pool.query(
-      `UPDATE marketplace.incident_controls SET lifecycle_state='REVOKED' WHERE incident_control_id=$1`,
-      [controlId],
+      `UPDATE marketplace.incident_controls
+          SET lifecycle_state='REVOKED', closed_by=owner_user_id, closed_at=clock_timestamp(),
+              closing_reason_code='WEATHER_CLEARED'
+        WHERE incident_control_id = ANY($1::uuid[])`,
+      [[controlId, deliveryPause]],
     );
     const afterPause = await service.eligible({
       context: context('admin', adminId),
@@ -466,8 +490,9 @@ export async function verifyPartnerAvailability(connectionString: string): Promi
     });
     check(
       underPause.length === 0 &&
+        underDeliveryPause.some((candidate) => candidate.partner_user_id === partnerId) &&
         afterPause.some((candidate) => candidate.partner_user_id === partnerId),
-      `A paused delivery network still offered work, or a revoked pause kept blocking (${underPause.length}/${afterPause.length})`,
+      `A paused partner assignment still offered work, paused delivery stranded a placed order, or a lifted pause kept blocking (${underPause.length}/${underDeliveryPause.length}/${afterPause.length})`,
     );
     // 9.3 -- one offer at a time: a partner holding a live offer is not
     // offered a second attempt; once that offer has lapsed they are.
