@@ -14,11 +14,11 @@ import {
   VendorNetworkTransitionError,
   VendorNetworkVersionConflictError,
 } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {} from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { VENDOR_NETWORK } from './tokens.js';
-import { object } from './request-fields.js';
+import { uuid, object } from './request-fields.js';
 const readsZones = RequireAuthorization({
   capability: 'admin.control.dashboard_read',
   admin_scope: { kind: 'GLOBAL' },
@@ -70,7 +70,7 @@ export class AdminZonesController {
         expected_version: value.expected_version,
         lifecycle_state: action === 'suspend' ? 'INACTIVE' : 'ACTIVE',
         reason_code: value.reason_code,
-        service_zone_id: parseUuidV7(zoneId),
+        service_zone_id: uuid(zoneId),
       });
       return { service_zone_id: zoneId, version };
     } catch (error) {

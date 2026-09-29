@@ -14,11 +14,11 @@ import {
   type ConfigurationScopeKind,
   type ConfigurationStatus,
 } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {} from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { CONFIGURATION_ADMIN } from './tokens.js';
-import { dateField, object, stringField } from './request-fields.js';
+import { uuid, dateField, object, stringField } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 function identity() {
   const context = currentRequestContext();
@@ -91,7 +91,7 @@ export class ConfigurationController {
     try {
       return await this.configuration.validate({
         actor_id: identity().actor_id,
-        configuration_version_id: parseUuidV7(id),
+        configuration_version_id: uuid(id),
         reason_code: stringField(object(raw), 'reason_code'),
         request_id: identity().request_id,
       });
@@ -108,7 +108,7 @@ export class ConfigurationController {
     try {
       return await this.configuration.approve({
         actor_id: identity().actor_id,
-        configuration_version_id: parseUuidV7(id),
+        configuration_version_id: uuid(id),
         reason_code: stringField(object(raw), 'reason_code'),
         request_id: identity().request_id,
       });
@@ -126,7 +126,7 @@ export class ConfigurationController {
     try {
       return await this.configuration.schedule({
         actor_id: identity().actor_id,
-        configuration_version_id: parseUuidV7(id),
+        configuration_version_id: uuid(id),
         effective_from: dateField(input, 'effective_from'),
         ...(input['effective_until']
           ? { effective_until: dateField(input, 'effective_until') }
@@ -148,7 +148,7 @@ export class ConfigurationController {
     try {
       return await this.configuration.rollback({
         ...identity(),
-        target_version_id: parseUuidV7(id),
+        target_version_id: uuid(id),
         reason_code: stringField(input, 'reason_code'),
       });
     } catch (error) {

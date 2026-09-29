@@ -7,7 +7,7 @@ import {
   type LocaleNamespace,
 } from '@neighbourhood-store/database';
 import { LOCALE_REGISTRY } from './tokens.js';
-import { RequireAuthorization } from './authorization.js';
+import { Public, RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { object, stringField } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
@@ -33,6 +33,7 @@ const namespaces = [
 export class LocaleController {
   constructor(@Inject(LOCALE_REGISTRY) private readonly locales: LocaleRegistryService) {}
 
+  @Public('Locale strings must load before sign-in, on the sign-in screen itself')
   @Get('bundle')
   async bundle(@Query('language') language?: string, @Query('audience') audience?: string) {
     if (!language || !languages.includes(language as LocaleLanguage))

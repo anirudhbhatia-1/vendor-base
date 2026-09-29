@@ -9,11 +9,11 @@ import {
   Post,
 } from '@nestjs/common';
 import { AssignmentCustodyService, PartnerWaitPolicyService } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {} from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ASSIGNMENT_CUSTODY, PARTNER_WAIT_POLICY } from './tokens.js';
-import { object, stringField } from './request-fields.js';
+import { uuid, object, stringField } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const act = RequireAuthorization({
   capability: 'partner.assignment.act',
@@ -34,7 +34,7 @@ export class PartnerWaitPolicyController {
     try {
       return await this.service.get({
         context: currentRequestContext(),
-        delivery_assignment_id: parseUuidV7(assignmentId),
+        delivery_assignment_id: uuid(assignmentId),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();
@@ -50,7 +50,7 @@ export class PartnerWaitPolicyController {
     try {
       return await this.service.start({
         context: currentRequestContext(),
-        delivery_assignment_id: parseUuidV7(assignmentId),
+        delivery_assignment_id: uuid(assignmentId),
         command_reference: stringField(input, 'command_reference'),
         reason_code: stringField(input, 'reason_code'),
       });
@@ -67,7 +67,7 @@ export class PartnerWaitPolicyController {
     try {
       return await this.service.refresh({
         context: currentRequestContext(),
-        delivery_assignment_id: parseUuidV7(assignmentId),
+        delivery_assignment_id: uuid(assignmentId),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();
@@ -82,7 +82,7 @@ export class PartnerWaitPolicyController {
     const input = object(raw);
     try {
       const context = currentRequestContext();
-      const id = parseUuidV7(assignmentId);
+      const id = uuid(assignmentId);
       // Where the partner is decides what leaving means (9.5): at the store the
       // attempt goes back to the pool with the wait paid; at the customer's
       // door the delivery fails under the policy (DLP-38). The custody

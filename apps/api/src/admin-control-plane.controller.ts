@@ -12,7 +12,14 @@ import { AdminControlPlaneService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ADMIN_CONTROL_PLANE } from './tokens.js';
-import { dateField, object, stringField, uuid } from './request-fields.js';
+import {
+  expectedVersion,
+  optionalWholeQuery,
+  dateField,
+  object,
+  stringField,
+  uuid,
+} from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const global = (capability: string) =>
   RequireAuthorization({ capability, admin_scope: { kind: 'GLOBAL' }, conceal_resource: true });
@@ -37,7 +44,9 @@ export class AdminControlPlaneController {
   ) {
     return this.control.deadLetterQueue({
       context: currentRequestContext(),
-      ...(limit ? { limit: Number(limit) } : {}),
+      ...(optionalWholeQuery(limit) !== undefined
+        ? { limit: optionalWholeQuery(limit) as number }
+        : {}),
     });
   }
   @Post('dead-letters/:event_id/recover')
@@ -82,7 +91,7 @@ export class AdminControlPlaneController {
       return await this.control.approveTrust({
         context: currentRequestContext(),
         trust_restriction_case_id: uuid(id),
-        expected_version: Number(b.expected_version),
+        expected_version: expectedVersion(b),
         reason_code: stringField(b, 'reason_code'),
       });
     } catch (e) {
@@ -100,7 +109,7 @@ export class AdminControlPlaneController {
       return await this.control.transitionTrust({
         context: currentRequestContext(),
         trust_restriction_case_id: uuid(id),
-        expected_version: Number(b.expected_version),
+        expected_version: expectedVersion(b),
         action: action === 'reject' ? 'REJECT' : 'REVOKE',
         reason_code: stringField(b, 'reason_code'),
       });

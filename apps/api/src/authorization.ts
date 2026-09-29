@@ -33,6 +33,23 @@ export type AuthorizedRequest = FastifyRequest & {
   [AUTHORIZED_ROLE]?: AuthorizedRoleEvidence;
 };
 
+export const PUBLIC_ROUTE = Symbol('PUBLIC_ROUTE');
+
+/**
+ * Marks a route as intentionally unauthenticated.
+ *
+ * Routes are denied by default: a handler with no decorator at all is refused
+ * by the guard, so an exposed route is always a written decision with a stated
+ * reason, never a forgotten decorator. public-routes.spec.ts asserts the exact
+ * list of routes carrying this.
+ */
+export function Public(reason: string): MethodDecorator & ClassDecorator {
+  if (reason.trim().length < 10) {
+    throw new Error('A public route must state a real reason');
+  }
+  return SetMetadata(PUBLIC_ROUTE, reason);
+}
+
 export function RequireSession(): MethodDecorator {
   return SetMetadata(SESSION_REQUIREMENT, true);
 }

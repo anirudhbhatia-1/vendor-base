@@ -12,7 +12,14 @@ import { VendorStaffService, type ManagedVendorRole } from '@neighbourhood-store
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { VENDOR_STAFF } from './tokens.js';
-import { dateField, integerField, object, stringField, uuid } from './request-fields.js';
+import {
+  optionalWholeQuery,
+  dateField,
+  integerField,
+  object,
+  stringField,
+  uuid,
+} from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const managedRoles = ['VENDOR_MANAGER', 'VENDOR_PICKER'] as const;
 
@@ -99,7 +106,9 @@ export class VendorStaffController {
         activity: await this.staff.activityHistory({
           context: currentRequestContext(),
           vendor_location_id: uuid(locationId),
-          ...(limit !== undefined ? { limit: Number(limit) } : {}),
+          ...(optionalWholeQuery(limit) !== undefined
+            ? { limit: optionalWholeQuery(limit) as number }
+            : {}),
         }),
       };
     } catch (error) {

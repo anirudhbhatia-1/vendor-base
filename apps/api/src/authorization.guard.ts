@@ -23,6 +23,7 @@ import {
   AUTHENTICATED_SESSION,
   AUTHORIZED_ACTOR,
   AUTHORIZED_ROLE,
+  PUBLIC_ROUTE,
   SESSION_REQUIREMENT,
   type AuthorizationRequirement,
   type AuthorizedRequest,
@@ -82,7 +83,17 @@ export class AuthorizationGuard implements CanActivate {
       context.getHandler(),
       context.getClass(),
     ]);
-    if (!requirement && !sessionRequired) return true;
+    if (!requirement && !sessionRequired) {
+      // Deny by default: a route with no requirement is served only when it
+      // explicitly declares itself public. A forgotten decorator is a 401,
+      // never a silently exposed route.
+      const publicReason = this.reflector.getAllAndOverride<string>(PUBLIC_ROUTE, [
+        context.getHandler(),
+        context.getClass(),
+      ]);
+      if (publicReason) return true;
+      throw new UnauthorizedException();
+    }
 
     const request = context.switchToHttp().getRequest<AuthorizedRequest>();
     const bearer = bearerToken(request.headers.authorization);

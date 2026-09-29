@@ -25,7 +25,6 @@ import {
   createAuthenticatedActor,
   createRequestContext,
   createUuidV7,
-  parseUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
@@ -544,7 +543,7 @@ export class CustomerDeliveryRatingController {
     try {
       await this.assignments.submitDeliveryRating({
         context: currentRequestContext(),
-        delivery_assignment_id: parseUuidV7(assignmentId),
+        delivery_assignment_id: uuid(assignmentId),
         stars: body.stars,
         ...(typeof body.review_note === 'string' ? { review_note: body.review_note } : {}),
       });

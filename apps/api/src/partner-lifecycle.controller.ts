@@ -30,6 +30,7 @@ import {
   PARTNER_LIFECYCLE,
 } from './tokens.js';
 import {
+  optionalWholeQuery,
   dateField,
   integerField,
   object,
@@ -167,7 +168,9 @@ export class AdminPartnerApplicationController {
       return {
         applications: await this.lifecycle.listApplicationsForAdmin({
           context: currentRequestContext(),
-          ...(limit === undefined ? {} : { limit: Number(limit) }),
+          ...(optionalWholeQuery(limit) === undefined
+            ? {}
+            : { limit: optionalWholeQuery(limit) as number }),
         }),
       };
     } catch (error) {
@@ -320,7 +323,9 @@ export class AdminPartnerDocumentController {
       return {
         renewals: await this.lifecycle.listDocumentRenewalsForAdmin({
           context: currentRequestContext(),
-          ...(limit === undefined ? {} : { limit: Number(limit) }),
+          ...(optionalWholeQuery(limit) === undefined
+            ? {}
+            : { limit: optionalWholeQuery(limit) as number }),
         }),
       };
     } catch (error) {

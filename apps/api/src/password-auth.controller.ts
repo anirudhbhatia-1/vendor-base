@@ -20,6 +20,7 @@ import {
 import { currentRequestContext } from './request-context-storage.js';
 import { IDENTITY_PASSWORD, SESSION_IDENTITY } from './tokens.js';
 import { nullableString, object, stringField } from './request-fields.js';
+import { Public } from './authorization.js';
 @Controller('auth/password')
 export class PasswordAuthController {
   constructor(
@@ -27,6 +28,7 @@ export class PasswordAuthController {
     @Inject(SESSION_IDENTITY) private readonly sessions: IdentitySessionService,
   ) {}
 
+  @Public('Deprecated password sign-in; removal tracked in native-auth-migration-todo')
   @Post('verify')
   @HttpCode(200)
   @Header('Deprecation', 'true')

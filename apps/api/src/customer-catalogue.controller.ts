@@ -1,3 +1,5 @@
+import { uuid, decimalQuery, optionalWholeQuery } from './request-fields.js';
+import { Public } from './authorization.js';
 import {
   Controller,
   Get,
@@ -10,7 +12,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { CatalogueProductService, CustomerDiscoveryService } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {} from '@neighbourhood-store/domain-types';
 import type { FastifyReply } from 'fastify';
 import { CATALOGUE_PRODUCTS, CUSTOMER_DISCOVERY } from './tokens.js';
 import { RUNTIME_CONFIG, type RuntimeConfig } from './runtime-config.js';
@@ -21,6 +23,7 @@ function requireQuery(value: string | undefined): string {
   return value;
 }
 
+@Public('Category tiles render on the storefront before sign-in')
 @Controller('customer/discovery/categories')
 export class CustomerCategoriesController {
   constructor(@Inject(CATALOGUE_PRODUCTS) private readonly catalogue: CatalogueProductService) {}
@@ -44,6 +47,7 @@ export class CustomerCategoriesController {
  * `catalogue_image_id` against the catalogue table and the object key is never
  * accepted from the caller.
  */
+@Public('Product images render on the public storefront')
 @Controller('customer/catalogue/images')
 export class CustomerCatalogueImageController {
   constructor(@Inject(CATALOGUE_PRODUCTS) private readonly catalogue: CatalogueProductService) {}
@@ -55,7 +59,7 @@ export class CustomerCatalogueImageController {
   ): Promise<void> {
     let parsed;
     try {
-      parsed = parseUuidV7(imageId);
+      parsed = uuid(imageId);
     } catch {
       throw new BadRequestException();
     }
@@ -101,6 +105,7 @@ export class CustomerCatalogueImageController {
  * provider is configured, every picker falls back to hand-entered
  * coordinates and says so.
  */
+@Public('The map token is publishable and the picker shows before sign-in')
 @Controller('catalogue/maps')
 export class MapsConfigController {
   constructor(@Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig) {}
@@ -123,6 +128,7 @@ export class MapsConfigController {
   }
 }
 
+@Public('Browsing stores and products needs no account')
 @Controller('catalogue')
 export class PublicDiscoveryController {
   constructor(@Inject(CUSTOMER_DISCOVERY) private readonly discovery: CustomerDiscoveryService) {}
@@ -137,10 +143,14 @@ export class PublicDiscoveryController {
     try {
       return {
         stores: await this.discovery.discoverStoresNear({
-          latitude: Number(requireQuery(latitude)),
-          longitude: Number(requireQuery(longitude)),
-          ...(limit !== undefined ? { limit: Number(limit) } : {}),
-          ...(offset !== undefined ? { offset: Number(offset) } : {}),
+          latitude: decimalQuery(latitude),
+          longitude: decimalQuery(longitude),
+          ...(optionalWholeQuery(limit) !== undefined
+            ? { limit: optionalWholeQuery(limit) as number }
+            : {}),
+          ...(optionalWholeQuery(offset) !== undefined
+            ? { offset: optionalWholeQuery(offset) as number }
+            : {}),
         }),
       };
     } catch (error) {
@@ -162,14 +172,18 @@ export class PublicDiscoveryController {
     try {
       return {
         results: await this.discovery.searchProductsNear({
-          latitude: Number(requireQuery(latitude)),
-          longitude: Number(requireQuery(longitude)),
+          latitude: decimalQuery(latitude),
+          longitude: decimalQuery(longitude),
           term: requireQuery(term),
-          ...(limit !== undefined ? { limit: Number(limit) } : {}),
+          ...(optionalWholeQuery(limit) !== undefined
+            ? { limit: optionalWholeQuery(limit) as number }
+            : {}),
           ...(category ? { category } : {}),
           ...(availableOnly !== undefined ? { available_only: availableOnly === 'true' } : {}),
           ...(fulfilmentMode ? { fulfilment_mode: fulfilmentMode } : {}),
-          ...(maxDistance !== undefined ? { max_distance_meters: Number(maxDistance) } : {}),
+          ...(optionalWholeQuery(maxDistance) !== undefined
+            ? { max_distance_meters: optionalWholeQuery(maxDistance) as number }
+            : {}),
         }),
       };
     } catch (error) {
@@ -181,7 +195,7 @@ export class PublicDiscoveryController {
   async storefront(@Param('vendor_location_id') locationId: string) {
     let parsed;
     try {
-      parsed = parseUuidV7(locationId);
+      parsed = uuid(locationId);
     } catch {
       throw new BadRequestException();
     }

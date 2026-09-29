@@ -13,7 +13,7 @@ import {
   CatalogueFreshnessModerationService,
   type CatalogueModerationState,
 } from '@neighbourhood-store/database';
-import { RequireAuthorization } from './authorization.js';
+import { Public, RequireAuthorization } from './authorization.js';
 import { CATALOGUE_FRESHNESS_MODERATION } from './tokens.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { integerField, object, stringField, uuid } from './request-fields.js';
@@ -23,6 +23,7 @@ function state(value: string): CatalogueModerationState {
     throw new BadRequestException();
   return value as CatalogueModerationState;
 }
+@Public('Live availability shows on the public storefront before sign-in')
 @Controller('catalogue/locations/:vendor_location_id/availability')
 export class CustomerAvailabilityController {
   constructor(

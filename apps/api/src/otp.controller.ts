@@ -21,6 +21,7 @@ import { currentRequestContext } from './request-context-storage.js';
 import { OTP_IDENTITY, SESSION_IDENTITY } from './tokens.js';
 import {
   AUTHENTICATED_SESSION,
+  Public,
   RequireAuthorization,
   RequireSession,
   type AuthorizedRequest,
@@ -51,6 +52,7 @@ export class OtpController {
     return { actor_kind: actor.actor_kind, user_id: actor.actor_id };
   }
 
+  @Public('Requesting a sign-in code is how a session begins')
   @Post('otp/request')
   @HttpCode(202)
   async request(@Body() rawBody: unknown) {
@@ -85,6 +87,7 @@ export class OtpController {
     }
   }
 
+  @Public('Verifying the sign-in code is how a session begins')
   @Post('otp/verify')
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
@@ -111,6 +114,7 @@ export class OtpController {
     }
   }
 
+  @Public('Refresh presents its own refresh token in the body, not a bearer')
   @Post('sessions/refresh')
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')

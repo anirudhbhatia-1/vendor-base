@@ -1,3 +1,4 @@
+import { uuid } from './request-fields.js';
 import {
   BadRequestException,
   Controller,
@@ -9,7 +10,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { LocalNotificationService, NotificationNotFoundError } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {} from '@neighbourhood-store/domain-types';
 import { RequireSession } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { LOCAL_NOTIFICATIONS } from './tokens.js';
@@ -40,7 +41,7 @@ export class NotificationsController {
     try {
       return await this.notifications.markRead({
         context: currentRequestContext(),
-        in_app_notification_id: parseUuidV7(id),
+        in_app_notification_id: uuid(id),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();

@@ -24,6 +24,7 @@ import {
   AUTHORIZATION_REQUIREMENT,
   AUTHORIZED_ACTOR,
   AUTHORIZED_ROLE,
+  PUBLIC_ROUTE,
   SESSION_REQUIREMENT,
   type AuthorizationRequirement,
   type AuthorizedRequest,
@@ -65,6 +66,7 @@ function buildGuard(input: {
       }
     | { readonly allowed: false; readonly capability: string; readonly reason: 'DENY_BY_DEFAULT' };
   readonly onEvaluate?: (value: Record<string, unknown>) => void;
+  readonly publicReason?: string;
   readonly requirement?: AuthorizationRequirement;
   readonly sessionRequired?: boolean;
 }) {
@@ -74,7 +76,9 @@ function buildGuard(input: {
         ? input.requirement
         : key === SESSION_REQUIREMENT
           ? input.sessionRequired
-          : undefined,
+          : key === PUBLIC_ROUTE
+            ? input.publicReason
+            : undefined,
   } as unknown as Reflector;
   const sessions = {
     authenticateAccess: async ({ access_token }: { readonly access_token: string }) => {
@@ -123,8 +127,13 @@ async function activate(
   );
 }
 
-test('leaves routes without authorization metadata unchanged', async () => {
+test('refuses a route that carries no auth decision at all (deny by default)', async () => {
   const guard = buildGuard({});
+  await assert.rejects(() => activate(guard, { headers: {} }), UnauthorizedException);
+});
+
+test('serves a route that declared itself public, without any credential', async () => {
+  const guard = buildGuard({ publicReason: 'The storefront renders before sign-in' });
   assert.equal(await activate(guard, { headers: {} }), true);
 });
 

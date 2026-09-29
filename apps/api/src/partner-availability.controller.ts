@@ -9,11 +9,11 @@ import {
   Query,
 } from '@nestjs/common';
 import { PartnerAvailabilityService } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {} from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { PARTNER_AVAILABILITY } from './tokens.js';
-import { numberField, object, stringField } from './request-fields.js';
+import { uuid, optionalWholeQuery, numberField, object, stringField } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const own = RequireAuthorization({
   capability: 'partner.availability.manage',
@@ -92,8 +92,10 @@ export class AdminPartnerDispatchController {
       return {
         partners: await this.service.eligible({
           context: currentRequestContext(),
-          vendor_location_id: parseUuidV7(id),
-          ...(radius ? { radius_meters: Number(radius) } : {}),
+          vendor_location_id: uuid(id),
+          ...(optionalWholeQuery(radius) !== undefined
+            ? { radius_meters: optionalWholeQuery(radius) as number }
+            : {}),
         }),
       };
     } catch (e) {

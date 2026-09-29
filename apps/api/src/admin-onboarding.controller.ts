@@ -18,7 +18,7 @@ import {
   canonicalRequestHash,
   IdempotencyKeyReusedError,
 } from '@neighbourhood-store/database';
-import { createUuidV7, parseUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
+import { createUuidV7, type UuidV7 } from '@neighbourhood-store/domain-types';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { Pool } from 'pg';
 import { RequireAuthorization } from './authorization.js';
@@ -26,6 +26,7 @@ import { currentRequestContext } from './request-context-storage.js';
 import { ADMIN_ONBOARDING } from './tokens.js';
 import { RUNTIME_CONFIG, type RuntimeConfig } from './runtime-config.js';
 import {
+  uuid,
   numberField,
   object,
   optionalNumber,
@@ -354,7 +355,7 @@ export class AdminOnboardingController implements OnApplicationShutdown {
         context,
         expected_version: numberField(body, 'expected_version'),
         reason_code: stringField(body, 'reason_code'),
-        vendor_id: parseUuidV7(vendorId),
+        vendor_id: uuid(vendorId),
       });
     } catch (error) {
       translateDomainError(error);
@@ -373,7 +374,7 @@ export class AdminOnboardingController implements OnApplicationShutdown {
         context,
         expected_version: numberField(body, 'expected_version'),
         reason_code: stringField(body, 'reason_code'),
-        vendor_id: parseUuidV7(vendorId),
+        vendor_id: uuid(vendorId),
       });
     } catch (error) {
       translateDomainError(error);
@@ -392,7 +393,7 @@ export class AdminOnboardingController implements OnApplicationShutdown {
         context,
         expected_version: numberField(body, 'expected_version'),
         reason_code: stringField(body, 'reason_code'),
-        user_id: parseUuidV7(userId),
+        user_id: uuid(userId),
       });
     } catch (error) {
       translateDomainError(error);
@@ -411,7 +412,7 @@ export class AdminOnboardingController implements OnApplicationShutdown {
         context,
         expected_version: numberField(body, 'expected_version'),
         reason_code: stringField(body, 'reason_code'),
-        user_id: parseUuidV7(userId),
+        user_id: uuid(userId),
       });
     } catch (error) {
       translateDomainError(error);

@@ -1,5 +1,6 @@
 import { createDatabasePool } from '@neighbourhood-store/database';
 import { Controller, Get, Inject, type OnApplicationShutdown, Res } from '@nestjs/common';
+import { Public } from './authorization.js';
 import type { FastifyReply } from 'fastify';
 import { Pool } from 'pg';
 import {
@@ -26,6 +27,7 @@ export class HealthController implements OnApplicationShutdown {
     await this.#pool.end();
   }
 
+  @Public('Liveness must answer before any credential exists')
   @Get('live')
   liveness() {
     return {
@@ -53,6 +55,7 @@ export class HealthController implements OnApplicationShutdown {
    * would remove the very capacity needed to drain the backlog once the broker
    * returns. 503 stays reserved for this process being unable to serve.
    */
+  @Public('Readiness is read by the platform, which holds no credential')
   @Get('ready')
   async readiness(@Res({ passthrough: true }) reply: FastifyReply) {
     try {

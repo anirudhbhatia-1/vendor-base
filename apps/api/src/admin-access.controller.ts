@@ -13,11 +13,11 @@ import {
   type AdminRole,
   type AdminScopeKind,
 } from '@neighbourhood-store/database';
-import { parseUuidV7 } from '@neighbourhood-store/domain-types';
+import {} from '@neighbourhood-store/domain-types';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { ACCESS_IDENTITY } from './tokens.js';
-import { object, optionalDate, stringField } from './request-fields.js';
+import { uuid, object, optionalDate, stringField } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 const manage = RequireAuthorization({
   capability: 'admin.access.role_manage',
@@ -45,11 +45,9 @@ export class AdminAccessController {
         role: stringField(value, 'role') as AdminRole,
         scope: {
           kind: scopeKind,
-          ...(scopeKind === 'GLOBAL'
-            ? {}
-            : { scope_id: parseUuidV7(stringField(value, 'scope_id')) }),
+          ...(scopeKind === 'GLOBAL' ? {} : { scope_id: uuid(stringField(value, 'scope_id')) }),
         },
-        user_id: parseUuidV7(userId),
+        user_id: uuid(userId),
         ...(validUntil ? { valid_until: validUntil } : {}),
       });
       return { role_assignment_id: roleAssignmentId };
@@ -72,8 +70,8 @@ export class AdminAccessController {
       await this.access.revokeRole({
         context: currentRequestContext(),
         reason_code: stringField(value, 'reason_code'),
-        role_assignment_id: parseUuidV7(roleAssignmentId),
-        user_id: parseUuidV7(userId),
+        role_assignment_id: uuid(roleAssignmentId),
+        user_id: uuid(userId),
       });
     } catch (error) {
       if (error instanceof TypeError) throw new BadRequestException();

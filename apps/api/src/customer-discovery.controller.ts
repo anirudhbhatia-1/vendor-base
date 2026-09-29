@@ -13,7 +13,14 @@ import { CustomerDiscoveryService } from '@neighbourhood-store/database';
 import { RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { CUSTOMER_DISCOVERY } from './tokens.js';
-import { numberField, object, optionalString, stringField, uuid } from './request-fields.js';
+import {
+  optionalWholeQuery,
+  numberField,
+  object,
+  optionalString,
+  stringField,
+  uuid,
+} from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 function requireQuery(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0) throw new BadRequestException();
@@ -60,8 +67,12 @@ export class CustomerDiscoveryController {
         stores: await this.discovery.discoverStores({
           context: currentRequestContext(),
           customer_address_id: uuid(requireQuery(addressId)),
-          ...(limit !== undefined ? { limit: Number(limit) } : {}),
-          ...(offset !== undefined ? { offset: Number(offset) } : {}),
+          ...(optionalWholeQuery(limit) !== undefined
+            ? { limit: optionalWholeQuery(limit) as number }
+            : {}),
+          ...(optionalWholeQuery(offset) !== undefined
+            ? { offset: optionalWholeQuery(offset) as number }
+            : {}),
         }),
       };
     } catch (error) {
@@ -86,11 +97,15 @@ export class CustomerDiscoveryController {
           context: currentRequestContext(),
           customer_address_id: uuid(requireQuery(addressId)),
           term: requireQuery(term),
-          ...(limit !== undefined ? { limit: Number(limit) } : {}),
+          ...(optionalWholeQuery(limit) !== undefined
+            ? { limit: optionalWholeQuery(limit) as number }
+            : {}),
           ...(category ? { category } : {}),
           ...(availableOnly !== undefined ? { available_only: availableOnly === 'true' } : {}),
           ...(fulfilmentMode ? { fulfilment_mode: fulfilmentMode } : {}),
-          ...(maxDistance !== undefined ? { max_distance_meters: Number(maxDistance) } : {}),
+          ...(optionalWholeQuery(maxDistance) !== undefined
+            ? { max_distance_meters: optionalWholeQuery(maxDistance) as number }
+            : {}),
         }),
       };
     } catch (error) {

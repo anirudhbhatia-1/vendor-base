@@ -10,10 +10,10 @@ import {
   Query,
 } from '@nestjs/common';
 import { GroupedCheckoutService, type PaymentMethod } from '@neighbourhood-store/database';
-import { RequireAuthorization } from './authorization.js';
+import { Public, RequireAuthorization } from './authorization.js';
 import { currentRequestContext } from './request-context-storage.js';
 import { GROUPED_CHECKOUT } from './tokens.js';
-import { object, uuid } from './request-fields.js';
+import { optionalWholeQuery, object, uuid } from './request-fields.js';
 import { translateDomainError } from './domain-errors.js';
 /**
  * The prepaid method, validated server-side.
@@ -84,13 +84,16 @@ export class GroupedCheckoutController {
         context: currentRequestContext(),
         checkout_group_id: uuid(id),
         ...(cursor ? { cursor: uuid(cursor) } : {}),
-        ...(rawLimit ? { limit: Number(rawLimit) } : {}),
+        ...(optionalWholeQuery(rawLimit) !== undefined
+          ? { limit: optionalWholeQuery(rawLimit) as number }
+          : {}),
       });
     } catch (error) {
       translateDomainError(error);
     }
   }
 
+  @Public('The provider signs the webhook body; the signature is the credential')
   @Post('provider-webhook')
   async webhook(@Body() raw: unknown, @Headers('x-provider-signature') signature: string) {
     const value = object(raw);

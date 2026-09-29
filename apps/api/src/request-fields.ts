@@ -125,3 +125,37 @@ export function uuid(value: unknown): UuidV7 {
 export function optionalUuid(body: Body, key: string): UuidV7 | undefined {
   return present(body, key) ? uuid(body[key]) : undefined;
 }
+
+/**
+ * Query-string readers. Query values arrive as strings (or string arrays), and
+ * several controllers converted them with a bare `Number(...)`, so `?limit=abc`
+ * reached the service as NaN and surfaced as a 500. Absent and empty are both
+ * "absent" for the optional readers; a malformed value is a 400.
+ */
+type QueryValue = string | readonly string[] | undefined;
+
+function singleQuery(value: QueryValue): string | undefined {
+  const found = Array.isArray(value) ? value[0] : value;
+  return found === undefined || found === '' ? undefined : (found as string);
+}
+
+/** A whole number (digits only), e.g. a limit, offset or radius. */
+export function optionalWholeQuery(value: QueryValue): number | undefined {
+  const found = singleQuery(value);
+  if (found === undefined) return undefined;
+  if (!/^\d{1,15}$/.test(found)) refuse();
+  return Number(found);
+}
+
+/** A finite decimal, e.g. a coordinate. */
+export function decimalQuery(value: QueryValue): number {
+  const found = singleQuery(value);
+  if (found === undefined) refuse();
+  const parsed = Number(found);
+  if (!Number.isFinite(parsed)) refuse();
+  return parsed;
+}
+
+export function optionalDecimalQuery(value: QueryValue): number | undefined {
+  return singleQuery(value) === undefined ? undefined : decimalQuery(value);
+}

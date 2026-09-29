@@ -30,6 +30,7 @@ import {
 import { currentRequestContext } from './request-context-storage.js';
 import { VENDOR_ONBOARDING } from './tokens.js';
 import {
+  optionalWholeQuery,
   integerField,
   numberField,
   object,
@@ -422,7 +423,9 @@ export class VendorOnboardingController {
       return {
         cases: await this.onboarding.listForAdmin({
           context: currentRequestContext(),
-          ...(limit === undefined ? {} : { limit: Number(limit) }),
+          ...(optionalWholeQuery(limit) === undefined
+            ? {}
+            : { limit: optionalWholeQuery(limit) as number }),
         }),
       };
     } catch (error) {
