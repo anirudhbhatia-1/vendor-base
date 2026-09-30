@@ -88,6 +88,8 @@ export class AdminControlPlaneService {
       raw.push(...(await load()));
     };
 
+    // Each queue is read most urgent first, so its cap drops the least urgent
+    // rows; until the phase 11 gate the caps had no order and dropped any.
     // Safety and security: a partner in danger, a restriction awaiting its
     // decision, a pause in force.
     await add(
@@ -153,6 +155,7 @@ export class AdminControlPlaneService {
               AND appeal.lifecycle_state = 'OPEN'
             WHERE c.lifecycle_state = 'PROPOSED'
                OR (c.lifecycle_state = 'ACTIVE' AND (c.review_at <= $1 OR appeal.created_at IS NOT NULL))
+            ORDER BY c.review_at NULLS LAST, c.created_at
             LIMIT 200`,
           [now],
         );
@@ -183,7 +186,8 @@ export class AdminControlPlaneService {
       }>(
         `SELECT incident_control_id, control_key, owner_user_id, review_at, created_at, lifecycle_state
            FROM marketplace.incident_controls
-          WHERE lifecycle_state IN ('ACTIVE','PENDING_APPROVAL') LIMIT 200`,
+          WHERE lifecycle_state IN ('ACTIVE','PENDING_APPROVAL')
+          ORDER BY review_at, created_at LIMIT 200`,
       );
       return rows.rows.map((row) => ({
         kind: 'INCIDENT',
@@ -217,7 +221,8 @@ export class AdminControlPlaneService {
       }>(
         `SELECT finance_exception_id, exception_kind, amount_at_risk_minor::text, owner_reference,
                 next_action_code, created_at
-           FROM marketplace.finance_exceptions WHERE exception_state<>'RESOLVED' LIMIT 500`,
+           FROM marketplace.finance_exceptions WHERE exception_state<>'RESOLVED'
+          ORDER BY amount_at_risk_minor DESC, created_at LIMIT 500`,
       );
       const corrections = await this.#pool.query<{
         financial_correction_id: string;
@@ -228,7 +233,8 @@ export class AdminControlPlaneService {
       }>(
         `SELECT financial_correction_id, reason_code, impact_minor::text, approval_expires_at,
                 created_at
-           FROM marketplace.financial_corrections WHERE lifecycle_state='PROPOSED' LIMIT 200`,
+           FROM marketplace.financial_corrections WHERE lifecycle_state='PROPOSED'
+          ORDER BY approval_expires_at NULLS LAST, created_at LIMIT 200`,
       );
       return [
         ...exceptions.rows.map((row) => ({
@@ -270,7 +276,8 @@ export class AdminControlPlaneService {
       }>(
         `SELECT refund_id, trigger_code, refund_total_minor::text, approval_expires_at, created_at
            FROM marketplace.refunds
-          WHERE refund_state='PENDING_APPROVAL' AND approval_expires_at > $1 LIMIT 200`,
+          WHERE refund_state='PENDING_APPROVAL' AND approval_expires_at > $1
+          ORDER BY approval_expires_at, created_at LIMIT 200`,
         [now],
       );
       return rows.rows.map((row) => ({
@@ -326,7 +333,8 @@ export class AdminControlPlaneService {
         occurred_at: Date;
       }>(
         `SELECT event_id, event_type, updated_at AS occurred_at FROM marketplace.outbox_events
-          WHERE status = 'DEAD_LETTER' LIMIT 200`,
+          WHERE status = 'DEAD_LETTER'
+          ORDER BY updated_at LIMIT 200`,
       );
       return rows.rows.map((row) => ({
         kind: 'DEAD_LETTER',
@@ -362,6 +370,7 @@ export class AdminControlPlaneService {
                 quality_review_outcome, created_at
            FROM marketplace.support_cases
           WHERE lifecycle_state IN ('OPEN','IN_PROGRESS')
+          ORDER BY response_due_at NULLS LAST, created_at
           LIMIT 500`,
       );
       // The deadline is whoever's turn it is (11.3): the first response, the
@@ -395,7 +404,8 @@ export class AdminControlPlaneService {
       }>(
         `SELECT partner_application_id, lifecycle_state, submitted_at, created_at
            FROM marketplace.partner_applications
-          WHERE lifecycle_state IN ('SUBMITTED','UNDER_REVIEW') LIMIT 200`,
+          WHERE lifecycle_state IN ('SUBMITTED','UNDER_REVIEW')
+          ORDER BY submitted_at NULLS LAST, created_at LIMIT 200`,
       );
       const renewals = await this.#pool.query<{
         partner_document_renewal_id: string;
@@ -403,7 +413,8 @@ export class AdminControlPlaneService {
         created_at: Date;
       }>(
         `SELECT partner_document_renewal_id, document_kind, created_at
-           FROM marketplace.partner_document_renewals WHERE lifecycle_state='SUBMITTED' LIMIT 200`,
+           FROM marketplace.partner_document_renewals WHERE lifecycle_state='SUBMITTED'
+          ORDER BY created_at LIMIT 200`,
       );
       return [
         ...applications.rows.map((row) => ({
@@ -443,7 +454,8 @@ export class AdminControlPlaneService {
       }>(
         `SELECT onboarding_case_id, lifecycle_state, submitted_at, created_at
            FROM marketplace.vendor_onboarding_cases
-          WHERE lifecycle_state IN ('PENDING','UNDER_REVIEW') LIMIT 200`,
+          WHERE lifecycle_state IN ('PENDING','UNDER_REVIEW')
+          ORDER BY submitted_at NULLS LAST, created_at LIMIT 200`,
       );
       return rows.rows.map((row) => ({
         kind: 'VENDOR_ONBOARDING',
@@ -466,7 +478,8 @@ export class AdminControlPlaneService {
         created_at: Date;
       }>(
         `SELECT moderation_case_id, reason_code, created_at
-           FROM marketplace.catalogue_moderation_cases WHERE moderation_state='PENDING' LIMIT 200`,
+           FROM marketplace.catalogue_moderation_cases WHERE moderation_state='PENDING'
+          ORDER BY created_at LIMIT 200`,
       );
       return rows.rows.map((row) => ({
         kind: 'CATALOGUE',
@@ -492,7 +505,7 @@ export class AdminControlPlaneService {
       }>(
         `SELECT publication_case_id, created_at, updated_at
            FROM marketplace.vendor_publication_cases WHERE lifecycle_state='PENDING_APPROVAL'
-          LIMIT 200`,
+          ORDER BY created_at LIMIT 200`,
       );
       return rows.rows.map((row) => ({
         kind: 'VENDOR_PUBLICATION',

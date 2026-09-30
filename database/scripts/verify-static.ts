@@ -196,6 +196,7 @@ assert(
       '0121_incident_controls',
       '0122_reporting',
       '0123_audit_interface',
+      '0124_support_refund_proposal',
     ]),
   'Unexpected reviewed migrations',
 );

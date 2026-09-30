@@ -143,7 +143,16 @@ export async function createDiscoverableStoreFixture(
        (role_assignment_id, user_id, role_key, valid_from, granted_by_user_id,
         request_id, correlation_id)
      VALUES ($1,$2,'VENDOR_OWNER',$3,$4,$5,$5)`,
-    [ownerRoleAssignmentId, ownerUserId, now, approverUserId, requestId],
+    // Started a minute back: membership is checked against the database's
+    // clock, and a container clock a moment behind the host's read a
+    // membership stamped with the host's time as not yet begun.
+    [
+      ownerRoleAssignmentId,
+      ownerUserId,
+      new Date(now.getTime() - 60_000),
+      approverUserId,
+      requestId,
+    ],
   );
   await pool.query(
     `INSERT INTO marketplace.staff_memberships

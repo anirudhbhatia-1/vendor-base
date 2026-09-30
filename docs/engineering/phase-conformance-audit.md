@@ -3169,6 +3169,70 @@ Two probes survived the first cut, because on a fresh database the walk's three 
 
 **Step 11.9: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 82 (30 September 2026) — Phase 11 exit gate
+
+*"Operations can resolve launch scenarios through controlled product actions."*
+
+The launch scenarios are the fifteen in `implementation.md` §13.2, which the PRD makes the product acceptance gate. Operations resolve five of them: 8 (a return after pickup), 10 (one child order), 11 (a protected refund), 12 (a risk review) and 13 (a kill switch). The others belong to the customer, shop, partner or worker. Each of the five was verified on its own in steps 11.2–11.7. The gate asks something those runs did not show, so this run adds a connected walk, `verify-operations-gate.ts` (33 assertions). On one checkout across two shops, it shows that each scenario:
+- arrives on the dashboard of the people who resolve it, and nobody else's;
+- is resolved only by a previewed, capability-checked command;
+- leaves siblings, custody and the ledger as they were;
+- drops off the dashboard once resolved;
+- sits on the audit under the person who acted, who cannot erase it.
+
+The walk writes to the database directly only for its fixture of goods already on a partner. Nothing is resolved by editing rows.
+
+| # | §13.2 scenario | Resolved by | Finding |
+|---|---|---|---|
+| 10 | Support resolves one child order without mutating siblings | Support: previewed operator cancellation | Held; the sibling's state and version are unchanged. |
+| 11 | Support proposes a protected refund; finance approves; self-approval rejected | Support proposes, finance approves, support resolves the case | **Support could not propose a refund at all**, and neither step reached the operational audit — P82-01, P82-02. |
+| 12 | A risk signal opens review; no irreversible restriction without an attributable decision and appeal path | Trust operator proposes, a trust approver decides, the shop appeals, a second approver decides | Held; the customer's damaged-item case is the signal. |
+| 8 | Cancel after pickup; the return closes custody before financial resolution | Delivery operations direct the return | Held; cancellation is refused while a partner holds the goods, and custody stays with the partner until the goods are back. |
+| 13 | A kill switch blocks new scoped work; custody and ledger intact | Incident commander pauses the shop and lifts it on its checklist | Held. |
+
+**P82-01 — support could not propose a refund.** Only finance operators held `admin.finance.refund_propose`. Support owns the customer's case, and its REFUNDED resolution needs an approved refund on the order, yet support could not ask for one. That contradicts both §13.2 scenario 11 and the PRD ("support may propose but not solely approve high-value refunds"). 0124 grants the proposal, and only the proposal, to support agents. Approval stays with finance approvers, and a refund is refused to the person who proposed it, both by the service and by the table's `refund_maker_checker` constraint. The walk shows the whole path:
+1. The customer's case reaches support's queue and not finance's.
+2. Support proposes the refund.
+3. The refund reaches finance's approval queue and not support's.
+4. Support cannot approve its own proposal.
+5. Finance approves.
+6. Support resolves the case on the approved refund.
+
+The order-monitor walk's negative case now uses an operator without refund authority.
+
+**P82-02 — refund steps were not on the operational audit.** Proposing and approving a refund wrote only to `refund_events`, so the 11.9 audit search, by actor or by approval reference, could not find a protected money action. Both now also write `REFUND_PROPOSED` and `REFUND_APPROVED` to the operational audit. The approval reference is the refund; the approval records the proposer and the amount, and appears under the approver. The walk finds each resolution under its actor and both refund steps by the refund's approval reference, and the approver cannot delete their approval.
+
+**P82-03 — dashboard queues truncated in no order.** Found while reading the queues: twelve of the thirteen dashboard queues cap their rows (200 or 500) with no `ORDER BY`, so past the cap they dropped arbitrary rows, not the least urgent. Each now reads most urgent first:
+- deadlines ascending: reviews, approvals, replies owed, submissions;
+- finance exceptions by money at risk, then age;
+- everything else oldest first.
+
+This is not exercised above the caps, so it has no executable evidence beyond the unchanged dashboard walk.
+
+**P82-04 — an intermittent fixture failure.** The first full ladder failed in the vendor-fulfilment walk with an empty-message authorization error. It failed twice and then passed six times with the same code. The cause: the shared store fixture stamped the owner's membership with the host's clock, and the membership check reads the database's clock (`now()`). When the container's clock ran a moment behind the host's, the membership had not yet begun. The fixture now starts the membership a minute earlier. One passing run took ten minutes, which the change does not explain; it is noted, not resolved.
+
+**Stale evidence.** `docs/engineering/e2e-scenario-traceability.md` still cited the retired control-plane walk for scenarios 10, 12 and 13, which it had not verified since 11.3–11.7. Those rows, and scenarios 8 and 11, now cite the walks that verify them.
+
+**Mutation results.** Six probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| Support without the refund proposal | the refund intervention refused to support |
+| The proposer may approve | the table's `refund_maker_checker` constraint, a second layer beneath the service |
+| The approval not audited | *Resolutions missing from the audit: REFUND_APPROVED* |
+| The proposal not audited | *Resolutions missing from the audit: REFUND_PROPOSED* |
+| The approval queue shown to everyone | *The refund awaiting approval did not reach finance, or reached support* |
+| An approved refund stays queued | *Finance approval did not refund the customer and clear the approval queue* (after a rewrite: the first version was caught by an SQL error) |
+
+**Verification.**
+- `pnpm db:verify` exit 0 locally: 125 migration files (0000–0124), the full ladder with rollback rehearsal, and conservation after every module (47 checks).
+- `operations_gate` makes 33 assertions (new); the order-monitor and vendor-fulfilment walks pass.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm security:secrets` and `pnpm features:check` exit 0.
+- `pnpm test:unit`: 658 pass, 0 fail.
+- `pnpm test:integration` exit 0 on a migrated test stack.
+
+**Phase 11 exit gate: met.** Operations resolve every launch scenario that is theirs through controlled product actions: previewed, capability-checked, maker-checker where money or restriction is at stake, visible on the right queue, and on an audit nobody can erase. **Phase 11 is VERIFIED_LOCAL** on every step (runs 73–81) and on its gate (run 82). The standing qualification applies: local means this machine. Three carried findings remain: the forward findings of 11.1–11.9; the dashboard ordering, unexercised above the caps; and one slow walk, unexplained.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

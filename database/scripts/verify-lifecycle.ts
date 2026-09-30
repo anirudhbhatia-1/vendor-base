@@ -54,6 +54,7 @@ import { verifyConfigurationPublication } from './verify-configuration-publicati
 import { verifyIncidentControls } from './verify-incident-controls.js';
 import { verifyReporting } from './verify-reporting.js';
 import { verifyAuditSearch } from './verify-audit-search.js';
+import { verifyOperationsGate } from './verify-operations-gate.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
 import { verifyCatalogueFreshnessModeration } from './verify-catalogue-freshness-moderation.js';
@@ -834,6 +835,8 @@ await withDatabaseClient(config, async (client) => {
   await measure('incident_controls', () => verifyIncidentControls(config.connectionString));
   await measure('reporting', () => verifyReporting(config.connectionString));
   await measure('audit_search', () => verifyAuditSearch(config.connectionString));
+  // Phase 11 exit gate: the launch scenarios operations resolve, end to end.
+  await measure('operations_gate', () => verifyOperationsGate(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);

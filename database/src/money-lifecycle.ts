@@ -990,6 +990,24 @@ export class MoneyLifecycleService {
          VALUES ($1,$2,1,'REFUND_PROPOSED','PENDING_APPROVAL',$3,'REFUND_PROPOSED',$4,$5,$6,$7)`,
         [createUuidV7(), refundId, who, command, ids.request, ids.correlation, now],
       );
+      // On the operational audit too (phase 11 gate): a protected money action
+      // is found by who asked for it and on whose approval it waits.
+      await client.query(
+        `INSERT INTO marketplace.operational_audit_events
+           (operational_audit_event_id, action, target_kind, target_reference, actor_id, reason_code,
+            before_value, after_value, request_id, correlation_id, approval_reference, occurred_at)
+         VALUES ($1,'REFUND_PROPOSED','REFUND',$2::uuid::text,$3,$4,NULL,$5,$6,$7,$2::uuid,$8)`,
+        [
+          createUuidV7(),
+          refundId,
+          who,
+          input.trigger_code,
+          JSON.stringify({ state: 'PENDING_APPROVAL', refund_total_minor: total }),
+          ids.request,
+          ids.correlation,
+          now,
+        ],
+      );
       return Object.freeze({ ...inserted.rows[0], refund_total_minor: total });
     });
   }
@@ -1148,6 +1166,26 @@ export class MoneyLifecycleService {
           createUuidV7(),
           next,
           command,
+        ],
+      );
+      await client.query(
+        `INSERT INTO marketplace.operational_audit_events
+           (operational_audit_event_id, action, target_kind, target_reference, actor_id, reason_code,
+            before_value, after_value, request_id, correlation_id, approval_reference, occurred_at)
+         VALUES ($1,'REFUND_APPROVED','REFUND',$2::uuid::text,$3,'SECOND_PERSON_APPROVAL',$4,$5,$6,$7,$2::uuid,$8)`,
+        [
+          createUuidV7(),
+          input.refund_id,
+          who,
+          JSON.stringify({
+            state: 'PENDING_APPROVAL',
+            refund_total_minor: Number(refund.refund_total_minor),
+            proposed_by_user_id: refund.proposed_by_user_id,
+          }),
+          JSON.stringify({ state: next }),
+          ids.request,
+          ids.correlation,
+          now,
         ],
       );
       if (outcome === 'UNKNOWN') {

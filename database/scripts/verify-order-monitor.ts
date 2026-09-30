@@ -504,7 +504,9 @@ export async function verifyOrderMonitor(connectionString: string): Promise<void
     await rejects(
       () =>
         monitor.intervene({
-          context: support,
+          // Support may propose a refund since the phase 11 gate (0124); an
+          // operator whose work is configuration may not.
+          context: configurer,
           vendor_order_id: orderA.vendor_order_id,
           kind: 'REFUND',
           reason_code: 'ITEM_DAMAGED',
@@ -513,7 +515,7 @@ export async function verifyOrderMonitor(connectionString: string): Promise<void
           params: { amount_minor: 500 },
         }),
       OrderMonitorAuthorizationError,
-      'A support agent proposed a refund without the finance capability',
+      'An operator without refund authority proposed a refund',
     );
     const refunded = await monitor.intervene({
       context: finance,
