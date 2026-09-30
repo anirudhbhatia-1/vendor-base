@@ -59,6 +59,7 @@ import {
   FINANCE_QUEUES,
   CONFIGURATION_PUBLICATION,
   INCIDENT_CONTROLS,
+  REPORTING,
 } from './tokens.js';
 import { AdminControlPlaneController } from './admin-control-plane.controller.js';
 import { AdminOrderMonitorController } from './admin-order-monitor.controller.js';
@@ -135,6 +136,7 @@ import { PartnerWaitPolicyController } from './partner-wait-policy.controller.js
 import { AdminAccessController } from './admin-access.controller.js';
 import { NotificationsController } from './notifications.controller.js';
 import { ConfigurationController } from './configuration.controller.js';
+import { ReportingController } from './reporting.controller.js';
 import {
   IncidentControlsController,
   ServiceStatusController,
@@ -194,6 +196,7 @@ const memberProviders: ReadonlyMap<symbol, (services: DomainServices) => unknown
   [FINANCE_QUEUES, (services) => services.financeQueues],
   [CONFIGURATION_PUBLICATION, (services) => services.configurationPublication],
   [INCIDENT_CONTROLS, (services) => services.incidentControls],
+  [REPORTING, (services) => services.reporting],
   [VENDOR_FULFILMENT, (services) => services.fulfilment],
   [VENDOR_NETWORK, (services) => services.vendorNetwork],
   [VENDOR_ONBOARDING, (services) => services.onboarding],
@@ -269,6 +272,7 @@ const serviceProviders = [...memberProviders].map(([token, select]) => ({
     ConfigurationController,
     IncidentControlsController,
     ServiceStatusController,
+    ReportingController,
     AdminOnboardingController,
     PasswordAuthController,
     CustomerCatalogueImageController,

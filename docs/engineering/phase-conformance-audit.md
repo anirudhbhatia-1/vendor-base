@@ -2979,6 +2979,110 @@ Three probes survived the first cut and the walk was sharpened for them: substit
 
 **Step 11.7: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 80 (30 September 2026) — step 11.8, reporting and exports
+
+Five requirements, and none held as written. The seven "reports" were each a raw count of rows by state, such as carts by state or delivery attempts by state. None of them was a funnel, a rate, a value or a time. Each carried the same one-line definition ("Synthetic … snapshot; freshness is query time"). Only incident commanders could read reports at all, so finance could not read the finance report and support could not read the support report. No report could be scoped to a zone. The filters an export recorded were never applied, and the caller chose the export's classification, so a finance export could be marked INTERNAL. An export stored nothing: redeeming it re-ran the report at download time, over whatever the data then was. Creating an export was not audited, and a refused download left no trace. The console printed raw JSON.
+
+What changed:
+- one migration (0122);
+- a reporting service with seven routes, replacing three on the control plane;
+- a worker pass that purges lapsed exports;
+- a new console screen for reports and exports;
+- a new connected walk;
+- three unit tests;
+- twenty mutation probes.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Customer funnel, marketplace, vendor health, delivery operations, finance, support and risk reports | **Seven group-by counts**, not measures of any of them — P80-01. |
+| 2 | Enforce role and scope | **Incident command only**; no zone scope — P80-02. |
+| 3 | Label metric definitions and freshness | **One generic sentence** per report — P80-03. |
+| 4 | Protected expiring exports | Single-use and expiring, but **no snapshot**, a caller-chosen classification, and any holder of the token could take it — P80-04. |
+| 5 | Record exporter, filters, time, classification and access | Exporter and time recorded; **filters ignored, creation unaudited, refusals unrecorded** — P80-05. |
+
+**P80-01 — seven reports that measure something.** `ReportingService` (`database/src/reporting.ts`) reads each report over a period (seven days unless asked, at most 92) from the primary database:
+
+| Report | Figures |
+|---|---|
+| Customer funnel | Baskets started, quoted, checked out and delivered, with conversion from quote and from start. |
+| Marketplace | Orders placed, gross and average order value in paise, orders cancelled and expired unanswered, shops live. |
+| Vendor health | Orders answered, acceptance rate, orders expired unanswered, average time to accept, share ready after the pickup promise. |
+| Delivery operations | Deliveries completed, average pickup to door, attempts failed or returned, offers lapsed, partners online. |
+| Finance | Captured, refunded and paid out, open exceptions, money at risk, and whether the ledger conserves (the 10.7 audit). |
+| Support | Cases opened, resolved and open, share of replies late, average first reply, reopened. |
+| Risk | Signals collected, restrictions approved, rejected and in force, appeals opened and decided. |
+
+Rates are integer basis points and money is integer paise; there is no floating-point money anywhere.
+
+**P80-02 — role and scope.** Every admin role can open reporting, and the service decides which reports each person may read, by the work each report measures:
+- Support: the funnel and support reports.
+- Finance: marketplace and finance.
+- Trust: risk.
+- Delivery: delivery operations.
+- Vendor and catalogue reviewers: vendor health.
+- Incident command (`admin.reporting.read`): all seven.
+
+A zone route (`admin/reports/zones/:id/:kind`) is guarded by that zone's membership. The zone is the named area, meaning every shop with an active zone of that name. A person holding a membership for one zone reads that zone and nothing wider, not even the platform. Finance and risk are platform-only, because their figures have no shop to scope by. The API spec pins each route's capability and scope.
+
+**P80-03 — definitions and freshness.** Every figure has a key, a label, a unit (count, paise, basis points, seconds or yes/no), a definition of what it counts, and a window. The window is PERIOD for events inside the period, or NOW for the state at generation. Every report states its scope (including the zone's name and how many shops it holds), its period, when it was generated, and its freshness: live from the primary database, not cached or sampled. Reads of the two RESTRICTED reports are audited.
+
+**P80-04 — protected, expiring exports.** An export (`POST …/exports`) is a snapshot of one report, period and scope, stored as canonical JSON with its SHA-256:
+- It is classified at least as the report is. Asking for a finance or risk export below RESTRICTED is refused, and 0122's floor constraint enforces the same in the table.
+- It lapses after 5 to 60 minutes; the token is 32 random bytes, and only its hash is stored.
+- Exporting needs export authority (finance and trust approvers, from 0122, and incident command) as well as read access to that report in that scope.
+- Only the exporter can take it, and only once. Anyone else gets the same answer as a made-up token.
+- Its content is dropped when it is taken, or by the worker when it lapses; the hash stays, so a file taken can still be checked against the record.
+
+**P80-05 — the record.** An export records its exporter, filters (period and zone), creation time, classification, scope, period and hash. Creating it writes `REPORT_EXPORT_CREATED`. Every attempt to take it is appended to `report_export_accesses` with its outcome: taken, not the exporter, already taken, or lapsed. Each attempt is also audited, including refusals, which are committed before the refusal is returned. The register (`GET …/exports`) shows each person their own exports with state and attempts; incident command sees everyone's.
+
+**The console.** The reports screen lists the reports this person may read and takes a zone (where the report allows one) and a period. It shows each figure in words (rupees, percentages, minutes) with its definition, the scope, period and read time. It exports with classification and lapse time, and downloads the file on taking. The register shows each export's state and every attempt. The audit search stays on its own screen for 11.9.
+
+**Mutation results.** Twenty probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| Reports readable by anyone | *A support agent read the finance report* |
+| A zone read with global memberships only | the zone agent's own read refused |
+| Any zone membership reads every zone | *An agent scoped to one zone read another* |
+| A platform-only report scoped to a zone | *The finance report was scoped to a zone* |
+| The zone filter ignored | *The zone-scoped agent could not read their zone* (the zone read as the whole platform) |
+| The period start ignored | *A report ran over more than a quarter* |
+| The period unbounded | the same |
+| Finance exported INTERNAL | the table's classification floor, a second layer |
+| Export without export authority | *An operator without export authority exported the finance report* |
+| Anyone takes an export | *Someone other than the exporter took an export* |
+| Taken twice | *The attempts to take the export are not on its record* |
+| A lapsed export taken | *A lapsed export was taken*, once the walk tried before the sweep |
+| Content kept after taking | the table's taken-means-purged constraint |
+| An attempt not recorded | *The attempts to take the export are not on its record* |
+| The hash of something else | *The export taken is not the snapshot that was made* |
+| A restricted read not audited | *Reading a restricted report was not recorded* |
+| An export not audited | *Making an export was not audited* |
+| Lapsed content kept | *A lapsed zone export kept its content* |
+| The register shows everyone's exports | *The export register does not show exports … to the right people* |
+| The finance classification floor dropped | *The schema let a finance export be downgraded* |
+
+Two probes were first caught only by SQL errors; they were rewritten until assertions caught them. The walk was also sharpened so a lapsed export is refused on its time alone, before the sweep runs.
+
+**Not in this step.** The vendor insight rows mapped to 11.8 in the matrix (VEN-45 sales, VEN-46 repeat customers, VEN-47 ratings) are the shop's own dashboard, not the admin reports this step names. They were not re-audited, and VEN-46 stays backend-only.
+
+**Forward findings.**
+- (zones) A zone is a named area of shop zones; a real service-area model would replace the name.
+- (history) The figures are live; reporting over a period as it stood then, rather than now, needs snapshots.
+- (exports) The content is JSON; CSV and a signed file store are for when exports leave the console.
+- (support/risk) There are no matrix rows for the support and risk reports; they are walked here.
+- (11.9) Report reads, exports and attempts are on the operational audit.
+
+**Verification.**
+- `pnpm db:verify` exit 0 locally: 123 migration files (0000–0122), the full ladder with rollback rehearsal, and conservation after every module (46 checks).
+- `reporting` makes 50 assertions (new); the control-plane walk keeps only the audit search.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm security:secrets` and `pnpm features:check` exit 0.
+- `pnpm test:unit`: 656 pass, 0 fail.
+- `pnpm test:integration` exit 0 on a migrated test stack.
+- All twenty probes killed on rebuilt databases.
+
+**Step 11.8: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

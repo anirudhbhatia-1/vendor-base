@@ -50,31 +50,4 @@ export class AdminControlPlaneController {
   @Get('audit') @global('admin.audit.read') audit(@Query('q') q?: string) {
     return this.control.audit({ context: currentRequestContext(), ...(q ? { query: q } : {}) });
   }
-  @Get('reports/:kind') @global('admin.reporting.read') report(@Param('kind') kind: string) {
-    return this.control.report({ context: currentRequestContext(), report_kind: kind });
-  }
-  @Post('exports') @global('admin.reporting.export') async export(@Body() raw: unknown) {
-    const b = object(raw);
-    try {
-      return await this.control.createExport({
-        context: currentRequestContext(),
-        report_kind: stringField(b, 'report_kind'),
-        filters: object(b.filters),
-        classification: stringField(b, 'classification') as 'INTERNAL' | 'RESTRICTED',
-      });
-    } catch (e) {
-      translateDomainError(e);
-    }
-  }
-  @Post('exports/redeem') @global('admin.reporting.export') async redeem(@Body() raw: unknown) {
-    const b = object(raw);
-    try {
-      return await this.control.redeemExport({
-        context: currentRequestContext(),
-        download_token: stringField(b, 'download_token'),
-      });
-    } catch (e) {
-      translateDomainError(e);
-    }
-  }
 }

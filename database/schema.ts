@@ -1966,3 +1966,16 @@ export const incidentControlEvents = marketplaceSchema.table(
     index('incident_control_events_control').on(table.incidentControlId, table.occurredAt),
   ],
 );
+
+export const reportExportAccesses = marketplaceSchema.table(
+  'report_export_accesses',
+  {
+    reportExportAccessId: uuid('report_export_access_id').primaryKey(),
+    reportExportId: uuid('report_export_id').notNull(),
+    actorId: uuid('actor_id').notNull(),
+    outcome: text('outcome').notNull(),
+    requestId: uuid('request_id').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [index('report_export_accesses_export').on(table.reportExportId, table.occurredAt)],
+);

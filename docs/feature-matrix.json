@@ -5990,7 +5990,7 @@
       "name": "Marketplace dashboard",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "MARKETPLACE_HEALTH report",
+      "notes": "MARKETPLACE report: orders placed, gross and average order value in paise, orders cancelled and expired unanswered, shops live. Each figure states what it counts and whether it is over the period or as things stand; the report says when it was read (live, uncached). Read by the roles whose work it measures and by incident command; for the platform or one named zone under a zone membership; periods up to 92 days (audit run 80: it had been a raw group-by of states, readable only by incident command, ignoring its filters).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6004,15 +6004,18 @@
       "phase_steps": ["11.8"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "apps/api/src/admin-control-plane.controller.spec.ts"
-      ]
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/reporting.controller.spec.ts",
+        "database/scripts/verify-reporting.ts"
+      ],
+      "files": ["apps/admin-pwa/app/reports-panel.tsx", "database/src/reporting.ts"]
     },
     {
       "id": "ADM-54",
       "name": "Vendor health reporting",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "VENDOR_HEALTH report",
+      "notes": "VENDOR_HEALTH report: orders answered, acceptance rate, orders expired unanswered, average time to accept, share ready after the pickup promise. Each figure states what it counts and whether it is over the period or as things stand; the report says when it was read (live, uncached). Read by the roles whose work it measures and by incident command; for the platform or one named zone under a zone membership; periods up to 92 days (audit run 80: it had been a raw group-by of states, readable only by incident command, ignoring its filters).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6026,15 +6029,18 @@
       "phase_steps": ["11.8"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "apps/api/src/admin-control-plane.controller.spec.ts"
-      ]
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/reporting.controller.spec.ts",
+        "database/scripts/verify-reporting.ts"
+      ],
+      "files": ["apps/admin-pwa/app/reports-panel.tsx", "database/src/reporting.ts"]
     },
     {
       "id": "ADM-55",
       "name": "Delivery operations reporting",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "DELIVERY_OPERATIONS report",
+      "notes": "DELIVERY_OPERATIONS report: deliveries completed, average pickup to door, attempts failed or returned, offers lapsed, partners online (platform only). Each figure states what it counts and whether it is over the period or as things stand; the report says when it was read (live, uncached). Read by the roles whose work it measures and by incident command; for the platform or one named zone under a zone membership; periods up to 92 days (audit run 80: it had been a raw group-by of states, readable only by incident command, ignoring its filters).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6048,15 +6054,18 @@
       "phase_steps": ["11.8"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "apps/api/src/admin-control-plane.controller.spec.ts"
-      ]
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/reporting.controller.spec.ts",
+        "database/scripts/verify-reporting.ts"
+      ],
+      "files": ["apps/admin-pwa/app/reports-panel.tsx", "database/src/reporting.ts"]
     },
     {
       "id": "ADM-56",
       "name": "Customer funnel reporting",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "CUSTOMER_FUNNEL report",
+      "notes": "CUSTOMER_FUNNEL report: baskets started, quoted, checked out and delivered, with conversion in basis points. Each figure states what it counts and whether it is over the period or as things stand; the report says when it was read (live, uncached). Read by the roles whose work it measures and by incident command; for the platform or one named zone under a zone membership; periods up to 92 days (audit run 80: it had been a raw group-by of states, readable only by incident command, ignoring its filters).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6070,15 +6079,18 @@
       "phase_steps": ["11.8"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "apps/api/src/admin-control-plane.controller.spec.ts"
-      ]
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/reporting.controller.spec.ts",
+        "database/scripts/verify-reporting.ts"
+      ],
+      "files": ["apps/admin-pwa/app/reports-panel.tsx", "database/src/reporting.ts"]
     },
     {
       "id": "ADM-57",
       "name": "Finance reporting",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "FINANCE report",
+      "notes": "FINANCE report (RESTRICTED, platform only): captured, refunded and paid out in paise, open exceptions and money at risk, and whether the ledger conserves; each read is audited. Each figure states what it counts and whether it is over the period or as things stand; the report says when it was read (live, uncached). Read by the roles whose work it measures and by incident command; for the platform or one named zone under a zone membership; periods up to 92 days (audit run 80: it had been a raw group-by of states, readable only by incident command, ignoring its filters).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6092,15 +6104,18 @@
       "phase_steps": ["11.8"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "apps/api/src/admin-control-plane.controller.spec.ts"
-      ]
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/reporting.controller.spec.ts",
+        "database/scripts/verify-reporting.ts"
+      ],
+      "files": ["apps/admin-pwa/app/reports-panel.tsx", "database/src/reporting.ts"]
     },
     {
       "id": "ADM-58",
       "name": "Exportable reports",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "Classified export request and redemption",
+      "notes": "An export is a snapshot of one report, period and scope, classified at least as the report is (finance and risk always RESTRICTED, enforced by the table), stored with its SHA-256, lapsing after 5 to 60 minutes. Only its exporter can take it, once; the content is dropped when taken or lapsed and the hash stays. The exporter, filters, time, classification and scope are recorded, and every attempt to take it — taken, not the exporter, already taken, lapsed — is kept append-only and audited. Finance and trust approvers export their reports; incident command exports any (audit run 80: an export stored nothing and re-ran the report when redeemed).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -6112,13 +6127,16 @@
         "tests": true
       },
       "files": [
-        "apps/admin-pwa/app/reporting-panel.tsx",
-        "apps/admin-pwa/app/admin-panels.spec.ts"
+        "apps/admin-pwa/app/admin-panels.spec.ts",
+        "apps/admin-pwa/app/reports-panel.tsx",
+        "database/src/reporting.ts"
       ],
       "phase_steps": ["11.8"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "apps/api/src/admin-control-plane.controller.spec.ts"
+        "apps/api/src/admin-control-plane.controller.spec.ts",
+        "apps/api/src/reporting.controller.spec.ts",
+        "database/scripts/verify-reporting.ts"
       ]
     },
     {

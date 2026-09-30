@@ -4,7 +4,7 @@ import {
   createUuidV7,
 } from '@neighbourhood-store/domain-types';
 import { Pool } from 'pg';
-import { AdminControlNotFoundError, AdminControlPlaneService } from '../src/admin-control-plane.js';
+import { AdminControlPlaneService } from '../src/admin-control-plane.js';
 import { check } from './verify-support.js';
 export async function verifyAdminControlPlane(connectionString: string): Promise<void> {
   const pool = new Pool({ connectionString, application_name: 'admin-control-verifier' });
@@ -30,29 +30,18 @@ export async function verifyAdminControlPlane(connectionString: string): Promise
     // verify-trust-review.ts).
     // Incident controls moved to their own service and walk (11.7,
     // verify-incident-controls.ts).
-    const created = await service.createExport({
-      context: context(),
-      report_kind: 'SUPPORT',
-      filters: { state: 'OPEN' },
-      classification: 'RESTRICTED',
-    });
-    const redeemed = await service.redeemExport({
-      context: context(),
-      download_token: String(created.download_token),
-    });
-    check(String(redeemed.content).includes('Synthetic SUPPORT'), 'Export content is missing');
-    let replayBlocked = false;
-    try {
-      await service.redeemExport({
-        context: context(),
-        download_token: String(created.download_token),
-      });
-    } catch (error) {
-      replayBlocked = error instanceof AdminControlNotFoundError;
-    }
-    check(replayBlocked, 'Export token replay was not blocked');
-    const audit = await service.audit({ context: context(), query: 'REPORT_EXPORT_DOWNLOADED' });
-    check(audit.events.length === 1, 'Export audit event missing');
+    // Reports and exports moved to their own service and walk (11.8,
+    // verify-reporting.ts). The audit search stays here until 11.9.
+    const action = `SYNTH_CONTROL_${adminA.replaceAll('-', '').slice(-8).toUpperCase()}`;
+    await pool.query(
+      `INSERT INTO marketplace.operational_audit_events
+         (operational_audit_event_id, action, target_kind, target_reference, actor_id, reason_code,
+          request_id, correlation_id)
+       VALUES ($1,$2,'CONTROL_PLANE',$3,$4,'VERIFIER_CHECK',$5,$5)`,
+      [createUuidV7(), action, adminA, adminA, createUuidV7()],
+    );
+    const audit = await service.audit({ context: context(), query: action });
+    check(audit.events.length === 1, 'The audit search did not find the event it was asked for');
   } finally {
     await Promise.all([service.close(), pool.end()]);
   }

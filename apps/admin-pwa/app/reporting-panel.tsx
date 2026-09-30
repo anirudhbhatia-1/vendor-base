@@ -4,30 +4,9 @@ import { useState } from 'react';
 import { adminRequest } from './authenticated-api';
 
 /**
- * Reporting, exports and scoped search (ADM-58, ADM-06).
- *
- * The report reader existed but the export path did not: the console showed
- * figures with no way to take them away, and the audit trail had a `?q=` filter
- * nothing used, so finding one actor's actions meant reading the whole log.
- *
- * An export is a two-step, classified operation — request a token, then redeem
- * it — so that taking data out of the platform is itself an audited act.
+ * Scoped search over the audit trail (ADM-06). Reports and exports moved to
+ * their own screen (11.8, reports-panel.tsx); this search is 11.9's.
  */
-/**
- * The kinds both the report reader and the export register accept. The two
- * disagreed historically — the reader knows `MARKETPLACE`, the export table's
- * CHECK constraint allows the same — so this list is their intersection rather
- * than a guess.
- */
-const reportKinds = [
-  'CUSTOMER_FUNNEL',
-  'MARKETPLACE',
-  'VENDOR_HEALTH',
-  'DELIVERY_OPERATIONS',
-  'FINANCE',
-  'SUPPORT',
-  'RISK',
-] as const;
 
 type AuditEntry = {
   readonly audit_event_id?: string;
@@ -37,56 +16,10 @@ type AuditEntry = {
   readonly object_reference?: string;
 };
 
-export function ReportingPanel({ view }: { view: 'reporting' | 'audit' }) {
-  const [reportKind, setReportKind] = useState<string>('MARKETPLACE');
-  const [report, setReport] = useState<Record<string, unknown> | null>(null);
-  const [downloadToken, setDownloadToken] = useState('');
-  const [payload, setPayload] = useState<string>('');
+export function ReportingPanel({ view }: { view: 'audit' }) {
   const [query, setQuery] = useState('');
   const [entries, setEntries] = useState<AuditEntry[]>([]);
-  const [message, setMessage] = useState('Choose a report or search the audit trail.');
-
-  async function loadReport() {
-    try {
-      const result = await adminRequest<Record<string, unknown>>(
-        `admin/control/reports/${reportKind}`,
-      );
-      setReport(result);
-      setMessage(`${reportKind.replaceAll('_', ' ')} report loaded.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The report failed to load.');
-    }
-  }
-
-  async function requestExport(classification: 'INTERNAL' | 'RESTRICTED') {
-    try {
-      const result = await adminRequest<{ download_token: string }>('admin/control/exports', {
-        method: 'POST',
-        body: JSON.stringify({ report_kind: reportKind, filters: {}, classification }),
-      });
-      setDownloadToken(result.download_token);
-      setMessage(`${classification} export authorised. Redeem the token to receive the contents.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The export could not be authorised.');
-    }
-  }
-
-  async function redeem() {
-    if (!downloadToken) {
-      setMessage('Request an export first.');
-      return;
-    }
-    try {
-      const result = await adminRequest<Record<string, unknown>>('admin/control/exports/redeem', {
-        method: 'POST',
-        body: JSON.stringify({ download_token: downloadToken }),
-      });
-      setPayload(JSON.stringify(result, null, 2));
-      setMessage('Export redeemed. The token is now spent.');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'The export could not be redeemed.');
-    }
-  }
+  const [message, setMessage] = useState('Search the audit trail.');
 
   /**
    * Scoped search over the immutable audit log. The filter runs on the server,
@@ -117,41 +50,6 @@ export function ReportingPanel({ view }: { view: 'reporting' | 'audit' }) {
         <h2>{view === 'audit' ? 'Who changed what, and why' : 'Protected operational evidence'}</h2>
       </div>
       <p aria-live="polite">{message}</p>
-
-      {view === 'reporting' && (
-        <div className="catalogue-flag">
-          <label>
-            Report
-            <select value={reportKind} onChange={(e) => setReportKind(e.target.value)}>
-              {reportKinds.map((kind) => (
-                <option key={kind} value={kind}>
-                  {kind.replaceAll('_', ' ')}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="actions">
-            <button type="button" onClick={() => void loadReport()}>
-              Load report
-            </button>
-            <button type="button" onClick={() => void requestExport('INTERNAL')}>
-              Export (internal)
-            </button>
-            <button type="button" onClick={() => void requestExport('RESTRICTED')}>
-              Export (restricted)
-            </button>
-            <button type="button" disabled={!downloadToken} onClick={() => void redeem()}>
-              Redeem export
-            </button>
-          </div>
-          {report && (
-            <pre style={{ overflowX: 'auto', maxHeight: '18rem' }}>
-              {JSON.stringify(report, null, 2)}
-            </pre>
-          )}
-          {payload && <pre style={{ overflowX: 'auto', maxHeight: '18rem' }}>{payload}</pre>}
-        </div>
-      )}
 
       {view === 'audit' && (
         <div className="catalogue-flag">

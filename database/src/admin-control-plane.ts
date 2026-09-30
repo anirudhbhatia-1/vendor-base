@@ -1,6 +1,5 @@
 import { deriveCheckoutGroupState } from './checkout-group-state.js';
 import { releaseServicePool, resolveServicePool } from './database-pool.js';
-import { createHash } from 'node:crypto';
 import {
   createUuidV7,
   parseRequestId,
@@ -10,7 +9,6 @@ import {
 } from '@neighbourhood-store/domain-types';
 import { Pool, type PoolClient } from 'pg';
 import { listDeadLetterEvents, recoverDeadLetterEvent } from './transactional-messaging.js';
-import { transaction as tx } from './transaction.js';
 import { rankWork, type RawWorkItem, type WorkSeverity } from './work-ranking.js';
 import { globalAdminCapabilities } from './admin-capabilities.js';
 import { supportNextAction } from './support-cases.js';
@@ -689,85 +687,6 @@ export class AdminControlPlaneService {
       [input.query ?? null],
     );
     return { events: r.rows };
-  }
-  async report(input: { readonly context: RequestContext; readonly report_kind: string }) {
-    admin(input.context);
-    const queries: Record<string, string> = {
-      FINANCE: `SELECT count(*) open_exceptions,COALESCE(sum(amount_at_risk_minor),0) risk_minor FROM marketplace.finance_exceptions WHERE exception_state<>'RESOLVED'`,
-      SUPPORT: `SELECT lifecycle_state,count(*) count FROM marketplace.support_cases GROUP BY lifecycle_state`,
-      MARKETPLACE: `SELECT lifecycle_state,count(*) count FROM marketplace.checkout_groups GROUP BY lifecycle_state`,
-      DELIVERY_OPERATIONS: `SELECT assignment_state,count(*) count FROM marketplace.delivery_assignments GROUP BY assignment_state`,
-      RISK: `SELECT lifecycle_state,count(*) count FROM marketplace.trust_restriction_cases GROUP BY lifecycle_state`,
-      VENDOR_HEALTH: `SELECT lifecycle_state,count(*) count FROM marketplace.vendor_locations GROUP BY lifecycle_state`,
-      CUSTOMER_FUNNEL: `SELECT lifecycle_state,count(*) count FROM marketplace.carts GROUP BY lifecycle_state`,
-    };
-    const query = queries[input.report_kind];
-    if (!query) throw new AdminControlInputError();
-    return {
-      definition: `Synthetic ${input.report_kind} snapshot; freshness is query time.`,
-      rows: (await this.#pool.query(query)).rows,
-    };
-  }
-  async createExport(input: {
-    readonly context: RequestContext;
-    readonly report_kind: string;
-    readonly filters: object;
-    readonly classification: 'INTERNAL' | 'RESTRICTED';
-  }) {
-    const who = admin(input.context);
-    const token = createUuidV7();
-    const r = await this.#pool.query(
-      `INSERT INTO marketplace.report_exports(report_export_id,report_kind,filters,classification,exported_by_user_id,expires_at,download_token_hash,request_id,correlation_id)VALUES($1,$2,$3,$4,$5,clock_timestamp()+interval '15 minutes',$6,$7,$8)RETURNING report_export_id,expires_at`,
-      [
-        createUuidV7(),
-        input.report_kind,
-        JSON.stringify(input.filters),
-        input.classification,
-        who,
-        createHash('sha256').update(token).digest('hex'),
-        parseRequestId(input.context.request_id),
-        parseUuidV7(input.context.correlation_id),
-      ],
-    );
-    return { ...r.rows[0], download_token: `synthetic-export-${token}` };
-  }
-  async redeemExport(input: { readonly context: RequestContext; readonly download_token: string }) {
-    const who = admin(input.context);
-    const raw = input.download_token.replace(/^synthetic-export-/, '');
-    let token: UuidV7;
-    try {
-      token = parseUuidV7(raw);
-    } catch {
-      throw new AdminControlInputError('Export token is invalid');
-    }
-    return tx(this.#pool, async (client) => {
-      const r = await client.query(
-        `UPDATE marketplace.report_exports SET downloaded_at=clock_timestamp(),downloaded_by_user_id=$2 WHERE download_token_hash=$1 AND downloaded_at IS NULL AND expires_at>clock_timestamp() RETURNING *`,
-        [createHash('sha256').update(token).digest('hex'), who],
-      );
-      const row = r.rows[0] as Record<string, unknown> | undefined;
-      if (!row) throw new AdminControlNotFoundError();
-      const report = await this.report({
-        context: input.context,
-        report_kind: String(row['report_kind']),
-      });
-      await this.#audit(
-        client,
-        input.context,
-        who,
-        'REPORT_EXPORT_DOWNLOADED',
-        'REPORT_EXPORT',
-        parseUuidV7(String(row['report_export_id'])),
-        'REPORT_EXPORT_DOWNLOADED',
-        null,
-        { classification: row['classification'] },
-      );
-      return {
-        filename: `${String(row['report_kind']).toLowerCase()}-${String(row['report_export_id']).slice(0, 8)}.json`,
-        classification: row['classification'],
-        content: JSON.stringify(report),
-      };
-    });
   }
   async #audit(
     client: PoolClient,

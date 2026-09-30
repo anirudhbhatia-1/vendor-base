@@ -11,6 +11,7 @@ import {
   type TrustReviewService,
   type FinanceQueueService,
   type IncidentControlService,
+  type ReportingService,
   type GroupedCheckoutService,
   type InventoryReservationService,
   type PartnerAvailabilityService,
@@ -72,6 +73,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
   readonly #pool: Pool;
   readonly #assignments: AssignmentCustodyService;
   readonly #incidentControls: IncidentControlService;
+  readonly #reporting: ReportingService;
   readonly #supportCases: SupportCaseService;
   readonly #trust: TrustReviewService;
   readonly #financeQueues: FinanceQueueService;
@@ -110,6 +112,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
     this.#pool = services.pool;
     this.#inventory = services.inventory;
     this.#incidentControls = services.incidentControls;
+    this.#reporting = services.reporting;
     this.#supportCases = services.supportCases;
     this.#trust = services.trust;
     this.#financeQueues = services.financeQueues;
@@ -405,6 +408,12 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         () => this.#incidentControls.expireDue({ context, now }),
         { incidents: 0 },
       );
+      // Exports that lapsed untaken lose their content; the record stays (11.8).
+      const exportsPurged = await pass(
+        'reporting.purgeLapsed',
+        () => this.#reporting.purgeLapsed({ context, now }),
+        { purged: 0 },
+      );
       // Lapsed restrictions end on their case history; new signals are read
       // for review and restrict nothing (11.4).
       const trustExpired = await pass(
@@ -520,6 +529,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
         trustSignals.collected +
         breaches.opened +
         controls.incidents +
+        exportsPurged.purged +
         waitTimers +
         notificationSignals +
         escalations +
@@ -545,6 +555,7 @@ export class OperationsWorkerService implements OnApplicationBootstrap, OnApplic
           trust_signals: trustSignals.collected,
           conservation_breaches: breaches.breaches,
           incident_controls: controls.incidents,
+          exports_purged: exportsPurged.purged,
           wait_timers: waitTimers,
           notification_signals: notificationSignals,
           alert_escalations: escalations,

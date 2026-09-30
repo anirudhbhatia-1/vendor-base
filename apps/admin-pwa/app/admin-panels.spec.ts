@@ -23,6 +23,7 @@ import {
   reasonCode as incidentReason,
   scopeChoices,
 } from './incidents-panel.js';
+import { formatMetric, periodQuery, reportPath } from './reports-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -77,9 +78,18 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
       'admin/trust/cases/${detail.trust_restriction_case_id}/actions/${action}',
     ],
   ],
+  ['reporting-panel.tsx', ['admin/control/audit']],
   [
-    'reporting-panel.tsx',
-    ['admin/control/exports', 'admin/control/exports/redeem', 'admin/control/audit'],
+    'reports-panel.tsx',
+    [
+      'admin/reports',
+      'admin/reports/exports',
+      'admin/reports/exports/redeem',
+      'admin/reports/zones/${trimmed}/${kind}',
+      'admin/reports/${kind}',
+      'admin/reports/zones/${zone.trim()}/${kind}/exports',
+      'admin/reports/${kind}/exports',
+    ],
   ],
   [
     'verification-panel.tsx',
@@ -167,10 +177,18 @@ test('incident controls come from the server catalogue, not a list in the page (
   assert.ok(source.includes('admin/incidents/catalogue'));
 });
 
-test('report exports use a kind both the reader and the export register accept', () => {
-  const source = panel('reporting-panel.tsx');
-  assert.ok(source.includes("'MARKETPLACE'"));
-  assert.ok(!source.includes("'MARKETPLACE_HEALTH'"));
+test('reports come from the server, and figures are shown in words (11.8)', () => {
+  // The kinds are the server's catalogue for this person, not a list in the page.
+  assert.ok(!panel('reports-panel.tsx').includes("'MARKETPLACE'"));
+  assert.equal(formatMetric({ value: 1234, unit: 'BASIS_POINTS' }), '12.3%');
+  assert.equal(formatMetric({ value: 125, unit: 'SECONDS' }), '2 min 5 s');
+  assert.equal(formatMetric({ value: 1, unit: 'BOOLEAN' }), 'Yes');
+  assert.equal(formatMetric({ value: null, unit: 'COUNT' }), '—');
+  assert.match(formatMetric({ value: 12_345, unit: 'INR_MINOR' }), /123\.45/);
+  assert.equal(reportPath('SUPPORT', ' zone-1 '), 'admin/reports/zones/zone-1/SUPPORT');
+  assert.equal(reportPath('FINANCE', ''), 'admin/reports/FINANCE');
+  assert.equal(periodQuery('', ''), '');
+  assert.match(periodQuery('2026-09-01', ''), /^\?from=/);
 });
 
 test('no admin panel writes to the removed v2 refund path', () => {

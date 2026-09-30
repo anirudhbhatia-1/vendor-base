@@ -52,6 +52,7 @@ import { verifyTrustReview } from './verify-trust-review.js';
 import { verifyFinanceQueues } from './verify-finance-queues.js';
 import { verifyConfigurationPublication } from './verify-configuration-publication.js';
 import { verifyIncidentControls } from './verify-incident-controls.js';
+import { verifyReporting } from './verify-reporting.js';
 import { verifyRouting } from './verify-routing.js';
 import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
@@ -832,6 +833,7 @@ await withDatabaseClient(config, async (client) => {
     verifyConfigurationPublication(config.connectionString),
   );
   await measure('incident_controls', () => verifyIncidentControls(config.connectionString));
+  await measure('reporting', () => verifyReporting(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);
@@ -853,6 +855,7 @@ await withDatabaseClient(config, async (client) => {
   // that synthetic evidence before rehearsing schema rollback/forward cycles so
   // a Phase 4 staff row cannot outlive the Phase 5 location it references.
   await client.query(`TRUNCATE marketplace.support_cases,
+    marketplace.report_export_accesses, marketplace.report_exports,
     marketplace.incident_control_events, marketplace.incident_controls,
     marketplace.trust_appeals, marketplace.trust_case_events,
     marketplace.trust_restriction_signals, marketplace.trust_signal_dismissals,

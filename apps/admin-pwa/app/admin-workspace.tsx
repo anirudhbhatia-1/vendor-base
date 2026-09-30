@@ -31,6 +31,7 @@ import { PolicyPanel } from './policy-panel';
 import { ZoneControlsPanel } from './zone-controls-panel';
 import { VerificationPanel } from './verification-panel';
 import { ReportingPanel } from './reporting-panel';
+import { ReportsPanel } from './reports-panel';
 import { SupportPanel } from './support-panel';
 import { TrustPanel } from './trust-panel';
 import { OnboardingPanel } from './onboarding-panel';
@@ -1331,7 +1332,7 @@ function AdminWorkspaceContent({ view }: { view: AdminView }) {
       )}
       {(view === 'reporting' || view === 'audit') && (
         <>
-          <ReportingPanel view={view} />
+          {view === 'reporting' ? <ReportsPanel /> : <ReportingPanel view="audit" />}
           <section className="catalogue-oversight" style={{ marginTop: '1.5rem' }}>
             <div>
               <p className="eyebrow">NOTIFICATIONS</p>
