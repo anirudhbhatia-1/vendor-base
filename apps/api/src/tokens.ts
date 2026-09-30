@@ -38,4 +38,5 @@ export const FINANCE_QUEUES = Symbol('FINANCE_QUEUES');
 export const CONFIGURATION_PUBLICATION = Symbol('CONFIGURATION_PUBLICATION');
 export const INCIDENT_CONTROLS = Symbol('INCIDENT_CONTROLS');
 export const REPORTING = Symbol('REPORTING');
+export const AUDIT_SEARCH = Symbol('AUDIT_SEARCH');
 export const DOMAIN_SERVICES = Symbol('DOMAIN_SERVICES');

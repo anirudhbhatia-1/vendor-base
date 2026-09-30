@@ -63,3 +63,4 @@ export * from './finance-queues.js';
 export * from './configuration-publication.js';
 export * from './incident-controls.js';
 export * from './reporting.js';
+export * from './audit-search.js';

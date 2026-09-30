@@ -47,7 +47,4 @@ export class AdminControlPlaneController {
       translateDomainError(error);
     }
   }
-  @Get('audit') @global('admin.audit.read') audit(@Query('q') q?: string) {
-    return this.control.audit({ context: currentRequestContext(), ...(q ? { query: q } : {}) });
-  }
 }

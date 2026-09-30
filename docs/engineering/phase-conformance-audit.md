@@ -3083,6 +3083,92 @@ Two probes were first caught only by SQL errors; they were rewritten until asser
 
 **Step 11.8: VERIFIED_LOCAL**, with the forward findings carried.
 
+## Run 81 (30 September 2026) — step 11.9, searchable audit interface
+
+Five requirements. One held in part: rows could not be updated or deleted. The rest did not hold:
+- **Search:** one substring over three columns (action, target reference, reason). There was no search by actor, time, request or approval reference, and at most two hundred rows came back.
+- **Before and after:** every row was returned with every field of its before and after, to every reader. That included token hashes, amounts and evidence.
+- **Nothing withheld:** no capability decided what a reader could see.
+- **Erasable:** the table could be truncated. Its actor foreign key also meant that truncating the people table with CASCADE, as two verifier resets do, emptied the audit with it.
+- **Untested:** nothing showed that an admin could not erase their own action.
+
+What changed:
+- one migration (0123);
+- an audit search service with two GET routes, replacing one on the control plane;
+- the console screen rebuilt;
+- a new connected walk;
+- two unit tests;
+- twenty-one mutation probes.
+
+The control-plane walk had nothing left to verify and was retired. The sixteen feature-matrix rows that still cited it, most of them left over from earlier steps, now cite the walks that verify them.
+
+| # | Requirement | Finding |
+|---|---|---|
+| 1 | Search actor, action, target, reason, time, request and approval reference | **A substring of three columns** — P81-01. |
+| 2 | Show before/after safely | **Every field to every reader** — P81-02. |
+| 3 | Enforce read-only behaviour | Rows could not be updated or deleted; **the table could be truncated, directly or by cascade** — P81-03. |
+| 4 | Protect sensitive evidence and financial fields by capability | **Not at all** — P81-02. |
+| 5 | Test an admin cannot erase their own action | **Not tested** — P81-03. |
+
+**P81-01 — search.** `GET admin/audit` searches by exact actor, action or action prefix, target kind and reference, reason, request, approval reference, a time window, and text (over action, target and reason, with `%` and `_` escaped). Ids must be ids and codes must be codes. The window is thirty days unless asked, at most a year. Results come newest first, in pages of up to two hundred, with a keyset cursor, so a page never skips or repeats an entry. 0123 adds an index for each field a search starts from.
+
+**P81-02 — before and after, by capability.** Each entry shows its before and after as this reader may see them:
+- **Secrets** (tokens, hashes, OTPs, signatures, passwords, keys) are never shown to anyone, even inside a field the reader may open.
+- **Financial fields** (amounts in paise, prices, fees, commissions, earnings, payouts) are shown only to ledger managers.
+- **Evidence and personal detail** (evidence, statements, notes, messages, coordinates, phone, email, address, names) are shown only to case and restriction handlers.
+
+A field's class covers everything under it. Every withheld path is listed, so the reader knows something is there. The entry also names the fields the change touched, and `GET admin/audit/:id` adds the other entries made under the same request. Viewing fields that are withheld by default appends `AUDIT_ENTRY_VIEWED`, naming the fields (never a secret's). Viewing an entry with nothing sensitive in it records nothing. 0123 gives audit access to the finance, trust and configuration approvers, alongside support agents and incident commanders.
+
+**P81-03 — nothing erases an entry.** 0123 adds a TRUNCATE guard to the table and drops the actor foreign key, the same actor-id pattern the rest of the register uses, so no cascade reaches the audit. The walk has the commander try to change, delete and truncate their own entry: each is refused, and the entry is byte-for-byte unchanged. It also truncates the people table with CASCADE inside a rolled-back transaction, and the entry is still there. The API's audit controller offers nothing but GET, and a spec pins that. The service's only public methods are search and detail.
+
+**The console.** The audit screen searches by every field. Each entry opens to its before and after as the reader may see them, what changed, what was withheld, and links to the other entries under the same request. Older entries page in. The spec pins that the screen sends no write.
+
+**Mutation results.** Twenty-one probes, each on a rebuilt database, restored after:
+
+| Probe | Caught by |
+|---|---|
+| Actor filter ignored | *Search by actor* |
+| Action prefix matches anything | *Search by actor*, once the walk had a near miss to leave out |
+| Target reference ignored | *Search by target*, likewise |
+| Reason ignored | *Search by reason* |
+| Request ignored | *Search by request* |
+| Approval reference ignored | *Search by approval reference* |
+| Window start ignored | *Search by time* |
+| Cursor ignored | *Paging skipped or repeated an entry* |
+| Ids not checked | *A malformed actor id was searched* |
+| Window unbounded | *A search ran over more than a year* |
+| Secrets shown | the finance approver's view of the provider signature |
+| A secret inside a visible field shown | the same, the case added for it |
+| Money shown to everyone | *The support agent was shown money* |
+| Evidence shown to everyone | *The finance approver was shown evidence* |
+| Withheld paths not listed | *…its withholding was not listed* |
+| Viewing not recorded | *Viewing the money was not recorded* |
+| Viewing always recorded | *…or viewing nothing sensitive was* |
+| Anyone reads the audit | *Someone without audit access searched the audit* |
+| The table truncatable | *An admin could change or remove their own audit entry* |
+| The actor foreign key kept | the cascade step, stopped by the TRUNCATE guard it would have passed through |
+| Audit rows editable | *An admin could change or remove their own audit entry* |
+
+Two probes survived the first cut, because on a fresh database the walk's three entries were all there was to find. A near-miss entry was added, and both were then caught.
+
+**Forward findings.**
+- (sources) Domain histories (case, trust, finance exception, configuration and incident events) keep their own append-only tables. The operational audit is the cross-cutting record, and they are not yet searched from one box.
+- (privileges) A database owner can still drop the guards. Separating the application's database role from the owner is a deployment task (12.x).
+- (search reads) Searches are not themselves audited; detail views that show withheld fields are.
+- (retention) The audit has no retention rule yet.
+
+**Phase 11.** With this step, every step in phase 11 (11.1 to 11.9) is VERIFIED_LOCAL. The exit gate, that operations can resolve launch scenarios through controlled product actions, is for its own run.
+
+**Verification.**
+- `pnpm db:verify` exit 0 locally: 124 migration files (0000–0123), the full ladder with rollback rehearsal, and conservation after every module (46 checks).
+- `audit_search` makes 27 assertions (new); the admin-control-plane walk is retired.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test:controls`, `pnpm security:secrets` and `pnpm features:check` exit 0.
+- `pnpm test:unit`: 658 pass, 0 fail.
+- `pnpm test:integration` exit 0 on a migrated test stack.
+- All twenty-one probes killed on rebuilt databases.
+
+**Step 11.9: VERIFIED_LOCAL**, with the forward findings carried.
+
 ## Session handoff — end of run 2 (6 September 2026)
 
 **Resume at:** Phase 2.1 (repository/ownership map), then 2.2 controls, 2.4 migrations, 2.5 executed CI evidence, 2.6 staging skeleton. Phase 2.3 is PARTIAL with the readiness defect closed; worker bootstrap, graceful shutdown and structured startup logging within 2.3 are still unaudited.

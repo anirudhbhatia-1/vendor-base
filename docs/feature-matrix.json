@@ -1877,7 +1877,7 @@
         "tests": false
       },
       "phase_steps": ["11.3"],
-      "verified_by": ["database/scripts/verify-admin-control-plane.ts"]
+      "verified_by": ["database/scripts/verify-support-cases.ts"]
     },
     {
       "id": "CUS-66",
@@ -2993,7 +2993,7 @@
         "tests": false
       },
       "phase_steps": ["11.3"],
-      "verified_by": ["database/scripts/verify-admin-control-plane.ts"]
+      "verified_by": ["database/scripts/verify-support-cases.ts"]
     },
     {
       "id": "VEN-42",
@@ -3014,7 +3014,7 @@
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/vendor-pwa/app/vendor-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -3659,7 +3659,7 @@
       "phase_steps": ["11.2"],
       "verified_by": [
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-admin-dashboard.ts"
       ]
     },
     {
@@ -3917,8 +3917,8 @@
       "phase_steps": ["9.6", "11.3"],
       "verified_by": [
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts",
-        "database/scripts/verify-assignment-custody.ts"
+        "database/scripts/verify-assignment-custody.ts",
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -4601,7 +4601,7 @@
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/partner-pwa/app/partner-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -4982,7 +4982,7 @@
         "tests": true
       },
       "phase_steps": ["11.4"],
-      "verified_by": ["database/scripts/verify-admin-control-plane.ts"]
+      "verified_by": ["database/scripts/verify-trust-review.ts"]
     },
     {
       "id": "ADM-15",
@@ -5279,9 +5279,8 @@
       ],
       "phase_steps": ["11.2"],
       "verified_by": [
-        "database/scripts/verify-order-monitor.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-order-monitor.ts"
       ]
     },
     {
@@ -5303,7 +5302,7 @@
       "phase_steps": ["11.2"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-order-monitor.ts"
       ]
     },
     {
@@ -5328,9 +5327,8 @@
       ],
       "phase_steps": ["3.4", "11.2"],
       "verified_by": [
-        "database/scripts/verify-order-monitor.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts",
+        "database/scripts/verify-order-monitor.ts",
         "database/src/aggregate-versioning.spec.ts"
       ]
     },
@@ -5354,7 +5352,7 @@
       "phase_steps": ["11.2"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-order-monitor.ts"
       ]
     },
     {
@@ -5379,9 +5377,8 @@
       ],
       "phase_steps": ["11.2"],
       "verified_by": [
-        "database/scripts/verify-order-monitor.ts",
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-order-monitor.ts"
       ]
     },
     {
@@ -5407,8 +5404,8 @@
       "phase_steps": ["11.2"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts",
-        "database/scripts/verify-financial-corrections.ts"
+        "database/scripts/verify-financial-corrections.ts",
+        "database/scripts/verify-order-monitor.ts"
       ]
     },
     {
@@ -5431,7 +5428,7 @@
       "phase_steps": ["11.2"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-order-monitor.ts"
       ]
     },
     {
@@ -5677,7 +5674,7 @@
       "phase_steps": ["11.3"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
+        "database/scripts/verify-support-cases.ts"
       ]
     },
     {
@@ -5946,7 +5943,7 @@
       "name": "Searchable audit log",
       "status": "complete_local_synthetic",
       "target_stage": "7",
-      "notes": "PWA Audit page calls audit endpoint",
+      "notes": "The operational audit is searched by actor, action (or its prefix), target, reason, time window (thirty days unless asked, at most a year), request, approval reference and text, newest first with a cursor; an entry shows its before and after, the fields that changed, what was withheld from this reader and the other entries made under the same request. Secrets are never shown; financial fields only to ledger managers; evidence and personal detail only to case and restriction handlers; seeing withheld-by-default fields is itself recorded (audit run 81: it had been one substring box returning every field to every reader).",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5960,15 +5957,17 @@
       "phase_steps": ["11.9"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
-      ]
+        "apps/api/src/audit.controller.spec.ts",
+        "database/scripts/verify-audit-search.ts"
+      ],
+      "files": ["apps/admin-pwa/app/reporting-panel.tsx", "database/src/audit-search.ts"]
     },
     {
       "id": "ADM-52",
       "name": "Read-only audit access",
       "status": "complete_local_synthetic",
       "target_stage": null,
-      "notes": "admin.audit.read capability",
+      "notes": "Read-only by construction: the audit routes are GET only and the service has no writing method but the view record; the table refuses UPDATE, DELETE and — from 0123 — TRUNCATE, and no longer has a foreign key through which truncating the people table with CASCADE emptied it. The walk shows the commander cannot change, delete or truncate their own entry. Audit readers are support agents, incident commanders and, from 0123, the finance, trust and configuration approvers.",
       "owner": "admin-surface",
       "catalogue_status": "Launch",
       "evidence": {
@@ -5982,8 +5981,10 @@
       "phase_steps": ["11.9"],
       "verified_by": [
         "apps/admin-pwa/app/admin-panels.spec.ts",
-        "database/scripts/verify-admin-control-plane.ts"
-      ]
+        "apps/api/src/audit.controller.spec.ts",
+        "database/scripts/verify-audit-search.ts"
+      ],
+      "files": ["apps/admin-pwa/app/reporting-panel.tsx", "database/src/audit-search.ts"]
     },
     {
       "id": "ADM-53",

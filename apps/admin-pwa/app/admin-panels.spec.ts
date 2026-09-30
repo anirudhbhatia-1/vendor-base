@@ -24,6 +24,7 @@ import {
   scopeChoices,
 } from './incidents-panel.js';
 import { formatMetric, periodQuery, reportPath } from './reports-panel.js';
+import { auditQuery, describeValue, EMPTY_AUDIT_SEARCH } from './reporting-panel.js';
 
 /**
  * The admin console reaches the API through raw path strings rather than the
@@ -78,7 +79,10 @@ const expectations: ReadonlyArray<readonly [string, readonly string[]]> = [
       'admin/trust/cases/${detail.trust_restriction_case_id}/actions/${action}',
     ],
   ],
-  ['reporting-panel.tsx', ['admin/control/audit']],
+  [
+    'reporting-panel.tsx',
+    ['admin/audit${auditQuery(form, more ? (next ?? undefined) : undefined)}', 'admin/audit/${id}'],
+  ],
   [
     'reports-panel.tsx',
     [
@@ -554,4 +558,28 @@ test('an incident pause is engaged in the shape the server accepts (11.7)', () =
   assert.equal(approvalNeeded({ approval: 'WHEN_GLOBAL' }, 'VENDOR_LOCATION'), false);
   assert.equal(approvalNeeded({ approval: 'WHEN_GLOBAL' }, 'GLOBAL'), true);
   assert.equal(approvalNeeded({ approval: 'ALWAYS' }, 'PAYMENT_METHOD'), true);
+});
+
+test('the audit is searched by the fields given, and offers nothing that writes (11.9)', () => {
+  assert.equal(auditQuery(EMPTY_AUDIT_SEARCH), '');
+  const query = new URLSearchParams(
+    auditQuery(
+      {
+        ...EMPTY_AUDIT_SEARCH,
+        action_prefix: ' incident_control ',
+        request_id: 'r-1',
+        from: '2026-09-01',
+      },
+      'c-1',
+    ).slice(1),
+  );
+  assert.equal(query.get('action_prefix'), 'INCIDENT_CONTROL');
+  assert.equal(query.get('request_id'), 'r-1');
+  assert.equal(query.get('before'), 'c-1');
+  assert.ok(query.get('from')?.startsWith('2026-'));
+  assert.equal(query.get('text'), null);
+  assert.equal(describeValue(null), '—');
+  assert.equal(describeValue('[secret: never shown]'), '[secret: never shown]');
+  // Read-only: the screen never sends a write to the audit.
+  assert.ok(!/method:\s*'(POST|PUT|PATCH|DELETE)'/.test(panel('reporting-panel.tsx')));
 });

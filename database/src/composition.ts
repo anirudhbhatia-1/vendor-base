@@ -42,6 +42,7 @@ import { FinanceQueueService } from './finance-queues.js';
 import { ConfigurationPublicationService } from './configuration-publication.js';
 import { IncidentControlService } from './incident-controls.js';
 import { ReportingService } from './reporting.js';
+import { AuditSearchService } from './audit-search.js';
 import { ConfigurationAdminService } from './versioned-configuration.js';
 import { VendorFulfilmentService } from './vendor-fulfilment.js';
 import { VendorNetworkService } from './vendor-network.js';
@@ -137,6 +138,7 @@ export interface DomainServices {
   readonly configurationPublication: ConfigurationPublicationService;
   readonly incidentControls: IncidentControlService;
   readonly reporting: ReportingService;
+  readonly auditSearch: AuditSearchService;
   readonly vendorNetwork: VendorNetworkService;
   readonly vendorSettings: VendorSettingsService;
   readonly vendorStaff: VendorStaffService;
@@ -242,6 +244,7 @@ export function createDomainServices(options: DomainCompositionOptions): DomainS
     configurationPublication: new ConfigurationPublicationService(shared),
     incidentControls: new IncidentControlService(shared),
     reporting: new ReportingService(shared),
+    auditSearch: new AuditSearchService(shared),
     vendorNetwork: new VendorNetworkService(shared),
     vendorSettings: new VendorSettingsService(shared),
     vendorStaff: new VendorStaffService({ ...shared, access, hash_key: otp_hash_key }),

@@ -53,8 +53,8 @@ import { verifyFinanceQueues } from './verify-finance-queues.js';
 import { verifyConfigurationPublication } from './verify-configuration-publication.js';
 import { verifyIncidentControls } from './verify-incident-controls.js';
 import { verifyReporting } from './verify-reporting.js';
+import { verifyAuditSearch } from './verify-audit-search.js';
 import { verifyRouting } from './verify-routing.js';
-import { verifyAdminControlPlane } from './verify-admin-control-plane.js';
 import { verifyAdminOnboarding } from './verify-admin-onboarding.js';
 import { verifyCatalogueFreshnessModeration } from './verify-catalogue-freshness-moderation.js';
 import { verifyCatalogueProducts } from './verify-catalogue-products.js';
@@ -808,7 +808,6 @@ await withDatabaseClient(config, async (client) => {
   await measure('customer_cart', () => verifyCustomerCart(config.connectionString));
   await measure('grouped_checkout', () => verifyGroupedCheckout(config.connectionString));
   await measure('vendor_fulfilment', () => verifyVendorFulfilment(config.connectionString));
-  await measure('admin_control_plane', () => verifyAdminControlPlane(config.connectionString));
   await measure('admin_onboarding', () => verifyAdminOnboarding(config.connectionString));
   await measure('partner_lifecycle', () => verifyPartnerLifecycle(config.connectionString));
   await measure('partner_availability', () => verifyPartnerAvailability(config.connectionString));
@@ -834,6 +833,7 @@ await withDatabaseClient(config, async (client) => {
   );
   await measure('incident_controls', () => verifyIncidentControls(config.connectionString));
   await measure('reporting', () => verifyReporting(config.connectionString));
+  await measure('audit_search', () => verifyAuditSearch(config.connectionString));
   await measure('identity_access', () => verifyIdentityAccess(config.connectionString));
 
   const firstHash = await seedFixtures(client);

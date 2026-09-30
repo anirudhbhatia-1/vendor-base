@@ -19,7 +19,6 @@ test('every admin control-plane route is capability protected and globally scope
     orders: 'admin.control.dashboard_read',
     deadLetters: 'admin.messaging.deadletter_read',
     recoverDeadLetter: 'admin.messaging.deadletter_recover',
-    audit: 'admin.audit.read',
   };
   for (const [method, capability] of Object.entries(expected)) {
     const rule = auth(method);
@@ -31,7 +30,9 @@ test('every admin control-plane route is capability protected and globally scope
   // Trust restrictions moved to theirs (11.4, trust-review.controller.ts).
   // Incident controls moved to theirs (11.7, incident-controls.controller.ts).
   // Reports and exports moved to theirs (11.8, reporting.controller.ts).
+  // The audit search moved to its own (11.9, audit.controller.ts).
   for (const gone of [
+    'audit',
     'report',
     'export',
     'redeem',

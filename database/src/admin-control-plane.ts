@@ -680,14 +680,6 @@ export class AdminControlPlaneService {
     return { stalled_orders: stalled.rows };
   }
 
-  async audit(input: { readonly context: RequestContext; readonly query?: string }) {
-    admin(input.context);
-    const r = await this.#pool.query(
-      `SELECT * FROM marketplace.operational_audit_events WHERE ($1::text IS NULL OR action ILIKE '%'||$1||'%' OR target_reference ILIKE '%'||$1||'%' OR reason_code ILIKE '%'||$1||'%') ORDER BY occurred_at DESC LIMIT 200`,
-      [input.query ?? null],
-    );
-    return { events: r.rows };
-  }
   async #audit(
     client: PoolClient,
     context: RequestContext,
