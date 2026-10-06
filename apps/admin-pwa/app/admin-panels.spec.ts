@@ -24,7 +24,11 @@ import {
   scopeChoices,
 } from './incidents-panel.js';
 import { formatMetric, periodQuery, reportPath } from './reports-panel.js';
-import { onboardingErrorText, VENDOR_CATEGORY_OPTIONS } from './onboarding-panel.js';
+import {
+  NAME_MAX_LENGTH,
+  onboardingErrorText,
+  VENDOR_CATEGORY_OPTIONS,
+} from './onboarding-panel.js';
 import { ApiError } from '@neighbourhood-store/contracts';
 import { auditQuery, describeValue, EMPTY_AUDIT_SEARCH } from './reporting-panel.js';
 
@@ -611,4 +615,11 @@ test('a refused onboarding request says which field, in words', () => {
     /^Category: this was not accepted/,
   );
   assert.equal(onboardingErrorText(refused([]), 'x'), 'Something in that request was not valid.');
+  // A pasted street address ran past the server's 120 with "SYNTH " in front.
+  assert.match(
+    onboardingErrorText(refused([{ field: 'location_name', code: 'INVALID_FIELD' }]), 'x'),
+    /^Store name: use 2 to 114 characters/,
+  );
+  assert.equal(NAME_MAX_LENGTH + 'SYNTH '.length, 120);
+  assert.ok(panel('onboarding-panel.tsx').includes('maxLength={NAME_MAX_LENGTH}'));
 });

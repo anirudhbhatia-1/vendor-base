@@ -26,6 +26,12 @@ type PartnerResult = {
  * The shop categories the server takes: a free-text box let an operator type
  * one it refuses ("all mart"), and the refusal read only as an invalid request.
  */
+/**
+ * The longest name the server takes (120) less the "SYNTH " the console puts
+ * in front. A pasted street address ran past it and was refused.
+ */
+export const NAME_MAX_LENGTH = 114;
+
 const FIELD_LABELS: Record<string, string> = {
   email: 'Email',
   password: 'Temporary password',
@@ -51,6 +57,8 @@ export function onboardingErrorText(error: unknown, fallback: string): string {
           return `${label}: choose a stronger one, at least 8 characters mixing upper and lower case letters, a number and a symbol, and not a common password.`;
         if (entry.code === 'EMAIL_REJECTED')
           return `${label}: that address was not accepted. Check it, or use another.`;
+        if (entry.field === 'business_name' || entry.field === 'location_name')
+          return `${label}: use 2 to ${NAME_MAX_LENGTH} characters. A short name is enough; the map gives the address.`;
         return `${label}: this was not accepted.`;
       })
       .join(' ');
@@ -175,11 +183,26 @@ export function OnboardingPanel() {
         </label>
         <label>
           Business name
-          <input value={vBusiness} onChange={(e) => setVBusiness(e.target.value)} required />
+          <input
+            value={vBusiness}
+            onChange={(e) => setVBusiness(e.target.value)}
+            maxLength={NAME_MAX_LENGTH}
+            required
+          />
         </label>
         <label>
-          Location name
-          <input value={vLocation} onChange={(e) => setVLocation(e.target.value)} required />
+          Store name
+          <input
+            value={vLocation}
+            onChange={(e) => setVLocation(e.target.value)}
+            maxLength={NAME_MAX_LENGTH}
+            placeholder="e.g. Anirudh General, Mansarovar"
+            required
+          />
+          <small>
+            The short name customers see, up to {NAME_MAX_LENGTH} characters. The address comes from
+            the map pin below.
+          </small>
         </label>
         <LocationPicker
           accessToken={maps?.access_token ?? null}
