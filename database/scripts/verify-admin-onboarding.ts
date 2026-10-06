@@ -71,6 +71,23 @@ export async function verifyAdminOnboarding(connectionString: string): Promise<v
       AdminOnboardingInputError,
       'Vendor provisioning accepted an out-of-range latitude',
     );
+    // A category the network does not take is refused by name, not by the table.
+    await rejects(
+      () =>
+        service.provisionVendor({
+          context: adminContext(adminId),
+          actor_user_id: adminId,
+          phone_identifier: vendorPhone,
+          business_name: 'SYNTH All Mart',
+          location_name: 'SYNTH All Mart Location',
+          latitude: 26.9,
+          longitude: 75.8,
+          category: 'all mart',
+          now,
+        }),
+      AdminOnboardingInputError,
+      'Vendor provisioning accepted a category the network does not take',
+    );
 
     const vendor = await service.provisionVendor({
       context: adminContext(adminId),

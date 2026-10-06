@@ -19,6 +19,19 @@ const PHONE_PATTERN = /^(?:\+[1-9][0-9]{7,14}|SYNTH-PHONE-[A-Z0-9][A-Z0-9-]{2,47
 const REASON_PATTERN = /^[A-Z][A-Z0-9_]{2,63}$/;
 const DEFAULT_TIMEZONE = 'Asia/Kolkata';
 const DEFAULT_CATEGORY = 'FRUIT_VEGETABLE';
+/**
+ * The shop categories the network takes (vendor_location_category_allowed,
+ * 0010): fruit and vegetables only, for the internal-test cohort (D-01).
+ * Checked here so an unknown category is refused by name, not by the table.
+ */
+export const VENDOR_CATEGORIES = ['FRUIT_VEGETABLE'] as const;
+
+function requireCategory(value: string | undefined): string {
+  const category = value ?? DEFAULT_CATEGORY;
+  if (!(VENDOR_CATEGORIES as readonly string[]).includes(category))
+    throw new AdminOnboardingInputError(`category must be one of ${VENDOR_CATEGORIES.join(', ')}`);
+  return category;
+}
 const DEFAULT_MIN_ORDER_MINOR = 5_000;
 const ZONE_HALF_SIZE_DEGREES = 0.2;
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1_000;
@@ -504,7 +517,7 @@ export class AdminOnboardingService {
     const businessName = requireLabel(input.business_name, 'business_name');
     const locationName = requireLabel(input.location_name, 'location_name');
     const timezone = input.timezone ?? DEFAULT_TIMEZONE;
-    const category = input.category ?? DEFAULT_CATEGORY;
+    const category = requireCategory(input.category);
     const latitude = requireFiniteCoordinate(input.latitude, 'latitude', -85, 85);
     const longitude = requireFiniteCoordinate(input.longitude, 'longitude', -180, 180);
     const minimumOrderMinor = input.minimum_order_minor ?? DEFAULT_MIN_ORDER_MINOR;
@@ -783,7 +796,7 @@ export class AdminOnboardingService {
     const businessName = requireLabel(input.business_name, 'business_name');
     const locationName = requireLabel(input.location_name, 'location_name');
     const timezone = input.timezone ?? DEFAULT_TIMEZONE;
-    const category = input.category ?? DEFAULT_CATEGORY;
+    const category = requireCategory(input.category);
     const latitude = requireFiniteCoordinate(input.latitude, 'latitude', -85, 85);
     const longitude = requireFiniteCoordinate(input.longitude, 'longitude', -180, 180);
     const minimumOrderMinor = input.minimum_order_minor ?? DEFAULT_MIN_ORDER_MINOR;

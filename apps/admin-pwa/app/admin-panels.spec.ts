@@ -24,6 +24,7 @@ import {
   scopeChoices,
 } from './incidents-panel.js';
 import { formatMetric, periodQuery, reportPath } from './reports-panel.js';
+import { VENDOR_CATEGORY_OPTIONS } from './onboarding-panel.js';
 import { auditQuery, describeValue, EMPTY_AUDIT_SEARCH } from './reporting-panel.js';
 
 /**
@@ -582,4 +583,14 @@ test('the audit is searched by the fields given, and offers nothing that writes 
   assert.equal(describeValue('[secret: never shown]'), '[secret: never shown]');
   // Read-only: the screen never sends a write to the audit.
   assert.ok(!/method:\s*'(POST|PUT|PATCH|DELETE)'/.test(panel('reporting-panel.tsx')));
+});
+
+test('a vendor is created in a category the server takes, chosen not typed', () => {
+  // vendor_location_category_allowed (0010) takes FRUIT_VEGETABLE only.
+  assert.deepEqual(
+    VENDOR_CATEGORY_OPTIONS.map((option) => option.value),
+    ['FRUIT_VEGETABLE'],
+  );
+  const source = panel('onboarding-panel.tsx');
+  assert.ok(!/<input value=\{vCategory\}/.test(source), 'category is free text again');
 });

@@ -21,6 +21,14 @@ type PartnerResult = {
   temporary_password: string;
 };
 
+/**
+ * The shop categories the server takes: a free-text box let an operator type
+ * one it refuses ("all mart"), and the refusal read only as an invalid request.
+ */
+export const VENDOR_CATEGORY_OPTIONS = [
+  { value: 'FRUIT_VEGETABLE', label: 'Fruit and vegetables' },
+] as const;
+
 export function OnboardingPanel() {
   const vendorCommand = useRef<{ digest: string; key: string } | null>(null);
   const partnerCommand = useRef<{ digest: string; key: string } | null>(null);
@@ -156,7 +164,14 @@ export function OnboardingPanel() {
         />
         <label>
           Category
-          <input value={vCategory} onChange={(e) => setVCategory(e.target.value)} />
+          <select value={vCategory} onChange={(e) => setVCategory(e.target.value)}>
+            {VENDOR_CATEGORY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <small>Only fruit and vegetable shops can join for now.</small>
         </label>
         <label>
           Temporary password
