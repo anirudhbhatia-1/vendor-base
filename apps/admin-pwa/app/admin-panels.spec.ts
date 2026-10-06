@@ -24,7 +24,8 @@ import {
   scopeChoices,
 } from './incidents-panel.js';
 import { formatMetric, periodQuery, reportPath } from './reports-panel.js';
-import { VENDOR_CATEGORY_OPTIONS } from './onboarding-panel.js';
+import { onboardingErrorText, VENDOR_CATEGORY_OPTIONS } from './onboarding-panel.js';
+import { ApiError } from '@neighbourhood-store/contracts';
 import { auditQuery, describeValue, EMPTY_AUDIT_SEARCH } from './reporting-panel.js';
 
 /**
@@ -593,4 +594,21 @@ test('a vendor is created in a category the server takes, chosen not typed', () 
   );
   const source = panel('onboarding-panel.tsx');
   assert.ok(!/<input value=\{vCategory\}/.test(source), 'category is free text again');
+});
+
+test('a refused onboarding request says which field, in words', () => {
+  const refused = (fieldErrors: { field: string; code: string }[]) =>
+    new ApiError(400, 'Something in that request was not valid.', {
+      code: 'INVALID_ARGUMENT',
+      fieldErrors,
+    });
+  assert.match(
+    onboardingErrorText(refused([{ field: 'password', code: 'PASSWORD_REJECTED' }]), 'x'),
+    /^Temporary password: choose a stronger one/,
+  );
+  assert.match(
+    onboardingErrorText(refused([{ field: 'category', code: 'INVALID_FIELD' }]), 'x'),
+    /^Category: this was not accepted/,
+  );
+  assert.equal(onboardingErrorText(refused([]), 'x'), 'Something in that request was not valid.');
 });

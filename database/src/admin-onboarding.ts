@@ -29,7 +29,10 @@ export const VENDOR_CATEGORIES = ['FRUIT_VEGETABLE'] as const;
 function requireCategory(value: string | undefined): string {
   const category = value ?? DEFAULT_CATEGORY;
   if (!(VENDOR_CATEGORIES as readonly string[]).includes(category))
-    throw new AdminOnboardingInputError(`category must be one of ${VENDOR_CATEGORIES.join(', ')}`);
+    throw new AdminOnboardingInputError(
+      `category must be one of ${VENDOR_CATEGORIES.join(', ')}`,
+      'category',
+    );
   return category;
 }
 const DEFAULT_MIN_ORDER_MINOR = 5_000;
@@ -38,6 +41,13 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1_000;
 
 export class AdminOnboardingInputError extends Error {
   readonly code = 'INVALID_ARGUMENT';
+  /** The request field the refusal is about, so the console can say which. */
+  constructor(
+    message: string,
+    readonly field?: string,
+  ) {
+    super(message);
+  }
 }
 
 export class AdminOnboardingConflictError extends Error {
@@ -135,7 +145,10 @@ export interface AdminLifecycleResult {
 
 function requirePhone(value: string): string {
   if (typeof value !== 'string') {
-    throw new AdminOnboardingInputError('Phone number must use international E.164 format');
+    throw new AdminOnboardingInputError(
+      'Phone number must use international E.164 format',
+      'phone_identifier',
+    );
   }
   const trimmed = value.trim().toUpperCase();
   // Separators are stripped for E.164 only. Stripping them from a
@@ -145,23 +158,30 @@ function requirePhone(value: string): string {
     ? trimmed.replace(/[\s()]/g, '')
     : trimmed.replace(/[\s()-]/g, '');
   if (!PHONE_PATTERN.test(normalized)) {
-    throw new AdminOnboardingInputError('Phone number must use international E.164 format');
+    throw new AdminOnboardingInputError(
+      'Phone number must use international E.164 format',
+      'phone_identifier',
+    );
   }
   return normalized;
 }
 
 function requireFiniteCoordinate(value: number, label: string, min: number, max: number): number {
   if (!Number.isFinite(value) || value < min || value > max) {
-    throw new AdminOnboardingInputError(`${label} must be a finite number in [${min},${max}]`);
+    throw new AdminOnboardingInputError(
+      `${label} must be a finite number in [${min},${max}]`,
+      label,
+    );
   }
   return value;
 }
 
 function requireLabel(value: string, label: string, min = 2, max = 120): string {
-  if (typeof value !== 'string') throw new AdminOnboardingInputError(`${label} must be a string`);
+  if (typeof value !== 'string')
+    throw new AdminOnboardingInputError(`${label} must be a string`, label);
   const trimmed = value.trim();
   if (trimmed.length < min || trimmed.length > max) {
-    throw new AdminOnboardingInputError(`${label} length must be between ${min} and ${max}`);
+    throw new AdminOnboardingInputError(`${label} length must be between ${min} and ${max}`, label);
   }
   return trimmed;
 }
@@ -522,7 +542,10 @@ export class AdminOnboardingService {
     const longitude = requireFiniteCoordinate(input.longitude, 'longitude', -180, 180);
     const minimumOrderMinor = input.minimum_order_minor ?? DEFAULT_MIN_ORDER_MINOR;
     if (!Number.isInteger(minimumOrderMinor) || minimumOrderMinor < 0) {
-      throw new AdminOnboardingInputError('minimum_order_minor must be a non-negative integer');
+      throw new AdminOnboardingInputError(
+        'minimum_order_minor must be a non-negative integer',
+        'minimum_order_minor',
+      );
     }
     const fulfilmentModes =
       input.fulfilment_modes && input.fulfilment_modes.length > 0
@@ -801,7 +824,10 @@ export class AdminOnboardingService {
     const longitude = requireFiniteCoordinate(input.longitude, 'longitude', -180, 180);
     const minimumOrderMinor = input.minimum_order_minor ?? DEFAULT_MIN_ORDER_MINOR;
     if (!Number.isInteger(minimumOrderMinor) || minimumOrderMinor < 0) {
-      throw new AdminOnboardingInputError('minimum_order_minor must be a non-negative integer');
+      throw new AdminOnboardingInputError(
+        'minimum_order_minor must be a non-negative integer',
+        'minimum_order_minor',
+      );
     }
     const fulfilmentModes =
       input.fulfilment_modes && input.fulfilment_modes.length > 0

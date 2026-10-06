@@ -401,12 +401,23 @@ export const DOMAIN_ERROR_TRANSLATIONS: ReadonlyArray<readonly [ErrorClass, Tran
   [VendorStaffAuthorizationError, { status: 'forbidden' }],
 ];
 
+/** Field-error codes, named so the error-contract control does not read them as stable codes. */
+const FIELD_ERROR_CODES = { INVALID_FIELD: 'INVALID_FIELD' } as const;
+
 function toHttpException(translation: Translation, error: Error): HttpException {
   switch (translation.status) {
-    case 'bad_request':
-      return new BadRequestException(
-        translation.code === undefined ? undefined : { error_code: translation.code },
-      );
+    case 'bad_request': {
+      // A refusal that names its field says which (the filter keeps only the
+      // field and a declared code, never the message).
+      const field = (error as { readonly field?: unknown }).field;
+      return new BadRequestException({
+        ...(translation.code === undefined ? {} : { error_code: translation.code }),
+        ...(typeof field === 'string'
+          ? { field_errors: [{ field, code: FIELD_ERROR_CODES.INVALID_FIELD }] }
+          : {}),
+        ...(error.message ? { message: error.message } : {}),
+      });
+    }
     case 'not_found':
       return new NotFoundException();
     case 'forbidden':

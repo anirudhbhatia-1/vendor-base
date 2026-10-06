@@ -1,9 +1,12 @@
 import { Catch, HttpException, type ArgumentsHost, type ExceptionFilter } from '@nestjs/common';
 import {
+  createFieldError,
   createRequestId,
   createStandardError,
   ERROR_DEFINITIONS,
   errorHttpStatus,
+  FIELD_ERROR_MESSAGE_KEYS,
+  type FieldError,
   type ErrorDetailValue,
   type StableErrorCode,
 } from '@neighbourhood-store/domain-types';
@@ -80,6 +83,57 @@ function declaredDetails(exception: unknown): Readonly<Record<string, ErrorDetai
   return details;
 }
 
+/**
+ * Which fields a refusal was about. Only a declared field-error code crosses,
+ * with its registered message key, and only for a well-formed field name; the
+ * exception's own message never does. Until the vendor-onboarding repair an
+ * operator creating a shop read "Something in that request was not valid" for
+ * every refusal, with no way to tell a bad password from a bad category.
+ */
+export function declaredFieldErrors(exception: unknown): readonly FieldError[] {
+  if (!(exception instanceof HttpException)) return [];
+  const body = exception.getResponse();
+  if (typeof body !== 'object' || body === null) return [];
+  const listed = (body as { readonly field_errors?: unknown }).field_errors;
+  if (!Array.isArray(listed)) return [];
+  const errors: FieldError[] = [];
+  for (const entry of listed.slice(0, 10)) {
+    const field = (entry as { field?: unknown })?.field;
+    const code = (entry as { code?: unknown })?.code;
+    if (
+      typeof field !== 'string' ||
+      typeof code !== 'string' ||
+      !(code in FIELD_ERROR_MESSAGE_KEYS)
+    )
+      continue;
+    try {
+      errors.push(
+        createFieldError({
+          field,
+          code,
+          message_key: FIELD_ERROR_MESSAGE_KEYS[code as keyof typeof FIELD_ERROR_MESSAGE_KEYS],
+        }),
+      );
+    } catch {
+      // A field name that is not a plain path is dropped, not echoed.
+    }
+  }
+  return errors;
+}
+
+/** Why a request was refused, for the logs only -- never the response. */
+function refusalReason(exception: unknown): string | undefined {
+  if (!(exception instanceof HttpException)) return undefined;
+  const body = exception.getResponse();
+  const message =
+    typeof body === 'string'
+      ? body
+      : typeof (body as { message?: unknown })?.message === 'string'
+        ? (body as { message: string }).message
+        : exception.message;
+  return message.slice(0, 200);
+}
+
 @Catch()
 export class RequestExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
@@ -105,14 +159,23 @@ export class RequestExceptionFilter implements ExceptionFilter {
     //
     // This is `routeOptions.url`, the registered route pattern, so it carries no
     // identifier from the request — the same value the success path already logs.
+    const fieldErrors = declaredFieldErrors(exception);
     apiLogger.event('http.request.failed', {
       status,
       error_code: code,
       method: request?.method ?? 'unknown',
       route: request?.routeOptions?.url ?? 'unmatched',
+      // A bad request says why in the logs, so an operator's refused form can
+      // be explained; other statuses stay as they were (a concealed 404 says
+      // nothing).
+      ...(status === 400 ? { reason: refusalReason(exception) } : {}),
+      ...(fieldErrors.length > 0 ? { fields: fieldErrors.map((error) => error.field) } : {}),
     });
-    void reply
-      .code(status)
-      .send(createStandardError(code, requestId, { details: declaredDetails(exception) }));
+    void reply.code(status).send(
+      createStandardError(code, requestId, {
+        details: declaredDetails(exception),
+        field_errors: fieldErrors,
+      }),
+    );
   }
 }

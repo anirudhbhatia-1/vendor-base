@@ -79,6 +79,9 @@ const provisionPartner = RequireAuthorization({
   conceal_resource: false,
 });
 
+/** Field-error codes this controller declares (registered by 0125). */
+const FIELD_REJECTION = { PASSWORD: 'PASSWORD_REJECTED', EMAIL: 'EMAIL_REJECTED' } as const;
+
 @Controller('admin/onboarding')
 export class AdminOnboardingController implements OnApplicationShutdown {
   readonly #pool: Pool;
@@ -192,9 +195,15 @@ export class AdminOnboardingController implements OnApplicationShutdown {
       );
     }
     if (input.password.length < 8)
-      throw new BadRequestException('password must be at least 8 chars');
+      throw new BadRequestException({
+        message: 'password must be at least 8 chars',
+        field_errors: [{ field: 'password', code: FIELD_REJECTION.PASSWORD }],
+      });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email))
-      throw new BadRequestException('email is invalid');
+      throw new BadRequestException({
+        message: 'email is invalid',
+        field_errors: [{ field: 'email', code: FIELD_REJECTION.EMAIL }],
+      });
     if (input.command.supabase_user_id) return input.command.supabase_user_id;
     const created = await this.#supabaseAdmin.auth.admin.createUser({
       email: input.email,
@@ -212,7 +221,19 @@ export class AdminOnboardingController implements OnApplicationShutdown {
           throw new AdminOnboardingConflictError('An account already exists for this email');
         }
       } else {
-        throw new BadRequestException(created.error.message);
+        // The sign-in provider's own rules (its password policy, its email
+        // checks) refuse here; the operator is told which field, and the
+        // provider's wording goes to the log.
+        const field = /password/i.test(created.error.message) ? 'password' : 'email';
+        throw new BadRequestException({
+          message: `sign-in provider refused: ${created.error.message}`,
+          field_errors: [
+            {
+              field,
+              code: field === 'password' ? FIELD_REJECTION.PASSWORD : FIELD_REJECTION.EMAIL,
+            },
+          ],
+        });
       }
     } else {
       supabaseUserId = created.data.user.id;

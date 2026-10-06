@@ -197,6 +197,7 @@ assert(
       '0122_reporting',
       '0123_audit_interface',
       '0124_support_refund_proposal',
+      '0125_field_rejection_keys',
     ]),
   'Unexpected reviewed migrations',
 );

@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useState, type FormEvent } from 'react';
+import { ApiError } from '@neighbourhood-store/contracts';
 import { LocationPicker, type GeoPoint } from '@neighbourhood-store/ui';
 import { adminApiClient } from './authenticated-api';
 import { useMapsConfig } from './maps-config';
@@ -25,6 +26,38 @@ type PartnerResult = {
  * The shop categories the server takes: a free-text box let an operator type
  * one it refuses ("all mart"), and the refusal read only as an invalid request.
  */
+const FIELD_LABELS: Record<string, string> = {
+  email: 'Email',
+  password: 'Temporary password',
+  business_name: 'Business name',
+  location_name: 'Store name',
+  latitude: 'Store location',
+  longitude: 'Store location',
+  category: 'Category',
+  phone_identifier: 'Phone number',
+};
+
+/**
+ * What a refused onboarding request was about, field by field. The server
+ * names the field and a code; the console words it. Until the onboarding
+ * repair every refusal read "Something in that request was not valid".
+ */
+export function onboardingErrorText(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && error.fieldErrors.length > 0) {
+    return error.fieldErrors
+      .map((entry) => {
+        const label = FIELD_LABELS[entry.field] ?? entry.field;
+        if (entry.code === 'PASSWORD_REJECTED')
+          return `${label}: choose a stronger one, at least 8 characters mixing upper and lower case letters, a number and a symbol, and not a common password.`;
+        if (entry.code === 'EMAIL_REJECTED')
+          return `${label}: that address was not accepted. Check it, or use another.`;
+        return `${label}: this was not accepted.`;
+      })
+      .join(' ');
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
 export const VENDOR_CATEGORY_OPTIONS = [
   { value: 'FRUIT_VEGETABLE', label: 'Fruit and vegetables' },
 ] as const;
@@ -80,7 +113,7 @@ export function OnboardingPanel() {
       vendorCommand.current = null;
       setVPassword('');
     } catch (error) {
-      setVError(error instanceof Error ? error.message : 'Vendor creation failed');
+      setVError(onboardingErrorText(error, 'Vendor creation failed'));
     } finally {
       setVBusy(false);
     }
@@ -107,7 +140,7 @@ export function OnboardingPanel() {
       partnerCommand.current = null;
       setPPassword('');
     } catch (error) {
-      setPError(error instanceof Error ? error.message : 'Partner creation failed');
+      setPError(onboardingErrorText(error, 'Partner creation failed'));
     } finally {
       setPBusy(false);
     }

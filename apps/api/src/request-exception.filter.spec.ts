@@ -8,7 +8,7 @@ import {
   UnprocessableEntityException,
   type ArgumentsHost,
 } from '@nestjs/common';
-import { RequestExceptionFilter } from './request-exception.filter.js';
+import { declaredFieldErrors, RequestExceptionFilter } from './request-exception.filter.js';
 
 interface Captured {
   readonly body: unknown;
@@ -197,4 +197,22 @@ test('a refusal carries the detail that explains it, and nothing else', () => {
   const plain = host({ method: 'GET', routeOptions: { url: '/x' } });
   new RequestExceptionFilter().catch(new NotFoundException(), plain.host);
   assert.deepEqual((plain.captured[0]?.body as { error: { details: unknown } }).error.details, {});
+});
+
+test('a refusal names its fields with declared codes, never its message', () => {
+  const fields = declaredFieldErrors(
+    new BadRequestException({
+      message: 'sign-in provider refused: Password is known to be weak',
+      field_errors: [
+        { field: 'password', code: 'PASSWORD_REJECTED' },
+        { field: 'email', code: 'MADE_UP_CODE' },
+        { field: 'not a path!', code: 'INVALID_FIELD' },
+      ],
+    }),
+  );
+  assert.deepEqual(
+    fields.map((entry) => [entry.field, entry.code, entry.message_key]),
+    [['password', 'PASSWORD_REJECTED', 'validation.password_rejected']],
+  );
+  assert.deepEqual(declaredFieldErrors(new NotFoundException()), []);
 });

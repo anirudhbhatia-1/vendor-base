@@ -273,6 +273,10 @@ export function errorMessageFor(code: string | null | undefined): string | undef
 export const FIELD_ERROR_MESSAGE_KEYS = {
   INVALID_REQUEST_ID: 'validation.invalid_request_id',
   INVALID_TRACEPARENT: 'validation.invalid_traceparent',
+  // Which field a refusal was about, without the server's own wording (0125).
+  INVALID_FIELD: 'validation.invalid_field',
+  PASSWORD_REJECTED: 'validation.password_rejected',
+  EMAIL_REJECTED: 'validation.email_rejected',
 } as const;
 
 export type StableErrorCode = keyof typeof ERROR_DEFINITIONS;

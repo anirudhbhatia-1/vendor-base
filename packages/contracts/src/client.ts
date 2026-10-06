@@ -65,6 +65,8 @@ export class ApiError extends Error {
   readonly messageKey: string | null;
   /** The request id to quote to support. */
   readonly requestId: string | null;
+  /** Which fields a refusal was about, each with its message key. */
+  readonly fieldErrors: readonly { readonly field: string; readonly code: string }[];
 
   constructor(
     readonly status: number,
@@ -73,6 +75,7 @@ export class ApiError extends Error {
       readonly code?: string | null;
       readonly messageKey?: string | null;
       readonly requestId?: string | null;
+      readonly fieldErrors?: readonly { readonly field: string; readonly code: string }[];
     },
   ) {
     super(message);
@@ -80,6 +83,7 @@ export class ApiError extends Error {
     this.code = envelope?.code ?? null;
     this.messageKey = envelope?.messageKey ?? null;
     this.requestId = envelope?.requestId ?? null;
+    this.fieldErrors = envelope?.fieldErrors ?? [];
   }
 }
 
@@ -148,7 +152,12 @@ function makeRequest(options: ApiClientOptions) {
     if (!response.ok) {
       const problem = (await response.json().catch(() => null)) as {
         message?: string;
-        error?: { code?: string; message_key?: string; request_id?: string };
+        error?: {
+          code?: string;
+          message_key?: string;
+          request_id?: string;
+          field_errors?: { field?: unknown; code?: unknown }[];
+        };
       } | null;
       const envelope = problem?.error;
       const code = envelope?.code ?? null;
@@ -159,6 +168,11 @@ function makeRequest(options: ApiClientOptions) {
           code,
           messageKey: envelope?.message_key ?? null,
           requestId: envelope?.request_id ?? null,
+          fieldErrors: (envelope?.field_errors ?? []).flatMap((entry) =>
+            typeof entry.field === 'string' && typeof entry.code === 'string'
+              ? [{ field: entry.field, code: entry.code }]
+              : [],
+          ),
         },
       );
     }
